@@ -17,6 +17,7 @@
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
+#include "tdx/data/tdx_data.hpp"
 #include "tdx/util/time_util.hpp"
 
 using namespace tdx;
@@ -106,6 +107,40 @@ int DoExBars(int argc, char** argv) {
   return 0;
 }
 
+// 统一 API：tdx fetch-history <code> [code...] [period]
+//   period: 1d/5m/1m/15m/30m/1h（位置参数，避免 absl flag 冲突）
+int DoFetchHistory(int argc, char** argv) {
+  std::vector<std::string> codes;
+  std::string period = "1d";
+  for (int i = 2; i < argc; ++i) codes.emplace_back(argv[i]);
+  // 末尾若是周期标识则视作 period
+  if (codes.size() > 1) {
+    const std::string& last = codes.back();
+    if (last == "1d" || last == "5m" || last == "1m" || last == "15m" ||
+        last == "30m" || last == "1h") {
+      period = last;
+      codes.pop_back();
+    }
+  }
+  if (codes.empty()) {
+    std::cerr << "用法: tdx fetch-history <code> [code...] [period]\n";
+    return 1;
+  }
+  tdx::data::TdxData td;
+  if (auto ec = td.Connect()) {
+    std::cerr << "连接失败: " << ec.message() << "\n";
+    return 1;
+  }
+  auto bars = td.FetchHistory(codes, "", "", period);
+  std::cout << "获取 " << bars.size() << " 根 K线（" << codes.size() << " 只股票，period=" << period << "）\n";
+  for (const auto& b : bars) {
+    auto c = tdx::util::epoch_to_cst(b.datetime);
+    printf("%04d-%02d-%02d  开%.2f 高%.2f 低%.2f 收%.2f  量%.0f\n",
+           c.year, c.month, c.day, b.open, b.high, b.low, b.close, b.volume);
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -114,13 +149,15 @@ int main(int argc, char** argv) {
     std::cerr << "用法:\n"
               << "  tdx server-test                    测速服务器\n"
               << "  tdx bars <code> <period> <count>   拉K线（如 tdx bars 600000 4 10）\n"
-              << "    period: 0=5分 4=日 5=周 6=月 7=1分 9=多日 11=年\n";
+              << "  tdx ex-bars <market> <code> <period> <count>  扩展行情\n"
+              << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n";
     return 1;
   }
   std::string cmd = argv[1];
   if (cmd == "server-test") return DoServerTest();
   if (cmd == "bars") return DoBars(argc, argv);
   if (cmd == "ex-bars") return DoExBars(argc, argv);
+  if (cmd == "fetch-history") return DoFetchHistory(argc, argv);
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

@@ -151,4 +151,12 @@ enum class SortOrder : uint8_t {
   None = 0, Desc = 1, Asc = 2,
 };
 
+// ============ Phase 3：交易时段常量（对齐 tdxdata base.py:62-63）============
+// A 股交易时段（分钟数，0:00 起）：上午 9:30-11:30，下午 13:00-15:00
+inline constexpr int kMorningOpenMin = 570;    // 09:30
+inline constexpr int kMorningCloseMin = 690;   // 11:30
+inline constexpr int kAfternoonOpenMin = 780;  // 13:00
+inline constexpr int kAfternoonCloseMin = 900; // 15:00
+inline constexpr int kSessionSplitMin = 720;   // 12:00（base.py:68 切上下午分支用，非 11:30）
+
 }  // namespace tdx
