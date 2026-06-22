@@ -1,0 +1,102 @@
+// 五档报价 parser 0x53e（最复杂：price 基准 + OHLC/五档相对增量）。
+// 逐字移植 opentdx/parser/quotation/quotes_detail.py:22-97。
+#include "tdx/proto/parsers.hpp"
+
+#include "tdx/proto/codec.hpp"
+#include "tdx/util/byte_order.hpp"
+#include "tdx/util/gbk.hpp"
+
+namespace tdx::proto {
+namespace {
+
+void push_u16(std::vector<uint8_t>& b, uint16_t v) {
+  b.push_back(static_cast<uint8_t>(v & 0xff));
+  b.push_back(static_cast<uint8_t>((v >> 8) & 0xff));
+}
+void push_code6(std::vector<uint8_t>& b, std::string_view code) {
+  std::size_t n = std::min<std::size_t>(code.size(), 6);
+  for (std::size_t i = 0; i < 6; ++i) b.push_back(i < n ? static_cast<uint8_t>(code[i]) : 0);
+}
+
+}  // namespace
+
+std::vector<uint8_t> serialize_quotes_detail(const std::vector<QuoteReq>& stocks) {
+  // 请求体 <H6sH>(5,'',count) + N×<B6s>(market,code)
+  std::vector<uint8_t> body;
+  body.reserve(10 + 7 * stocks.size());
+  push_u16(body, 5);  // magic 常量 5（quotes_detail.py:16）
+  for (int i = 0; i < 6; ++i) body.push_back(0);  // 6s 空
+  push_u16(body, static_cast<uint16_t>(stocks.size()));
+  for (const auto& s : stocks) {
+    body.push_back(static_cast<uint8_t>(s.market));
+    push_code6(body, s.code);
+  }
+  return body;
+}
+
+std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t len) {
+  std::vector<Quote> result;
+  if (len < 4) return result;
+  uint16_t count = util::rd_u16(data + 2);  // 头部 <HH>，用第二个 H（quotes_detail.py:23）
+  std::size_t pos = 4;
+
+  for (uint16_t i = 0; i < count; ++i) {
+    if (pos + 9 > len) break;
+    // <B6sH>：market(1) code(6) active1(2)
+    std::string code_raw(reinterpret_cast<const char*>(data + pos + 1), 6);
+    pos += 9;
+
+    // price 是基准，后续 OHLC/pre_close/五档 bid/ask 都相对它增量
+    auto price = get_price(data, len, pos); pos = price.new_pos;
+    auto pre_close = get_price(data, len, pos); pos = pre_close.new_pos;
+    auto open = get_price(data, len, pos); pos = open.new_pos;
+    auto high = get_price(data, len, pos); pos = high.new_pos;
+    auto low = get_price(data, len, pos); pos = low.new_pos;
+    auto server_time = get_price(data, len, pos); pos = server_time.new_pos;
+    auto neg_price = get_price(data, len, pos); pos = neg_price.new_pos;
+    auto vol = get_price(data, len, pos); pos = vol.new_pos;
+    auto cur_vol = get_price(data, len, pos); pos = cur_vol.new_pos;
+
+    if (pos + 4 > len) break;
+    float amount = util::rd_f32(data + pos);  // amount 是唯一 float32（非 get_price）
+    pos += 4;
+
+    auto s_vol = get_price(data, len, pos); pos = s_vol.new_pos;
+    auto b_vol = get_price(data, len, pos); pos = b_vol.new_pos;
+    auto s_amount = get_price(data, len, pos); pos = s_amount.new_pos;
+    auto open_amount = get_price(data, len, pos); pos = open_amount.new_pos;
+    (void)neg_price; (void)cur_vol; (void)s_vol; (void)b_vol;
+    (void)s_amount; (void)open_amount; (void)server_time;
+
+    Quote q;
+    int64_t base = price.value;
+    q.price = static_cast<double>(base);
+    q.pre_close = static_cast<double>(base + pre_close.value);
+    q.open = static_cast<double>(base + open.value);
+    q.high = static_cast<double>(base + high.value);
+    q.low = static_cast<double>(base + low.value);
+    q.volume = static_cast<double>(vol.value);
+    q.amount = static_cast<double>(amount);
+
+    // 五档 ×5：每档 bid/ask 相对 price 增量（quotes_detail.py:57-58）
+    for (int j = 0; j < 5; ++j) {
+      auto bid = get_price(data, len, pos); pos = bid.new_pos;
+      auto ask = get_price(data, len, pos); pos = ask.new_pos;
+      auto bid_vol = get_price(data, len, pos); pos = bid_vol.new_pos;
+      auto ask_vol = get_price(data, len, pos); pos = ask_vol.new_pos;
+      q.bid[j] = static_cast<double>(base + bid.value);
+      q.ask[j] = static_cast<double>(base + ask.value);
+      q.bid_vol[j] = static_cast<double>(bid_vol.value);
+      q.ask_vol[j] = static_cast<double>(ask_vol.value);
+    }
+
+    if (pos + 10 > len) break;
+    pos += 10;  // 尾部 <h4shH>：unknown/rise_speed/active2（暂不解析）
+
+    q.code = util::trim_null(code_raw);
+    result.push_back(std::move(q));
+  }
+  return result;
+}
+
+}  // namespace tdx::proto

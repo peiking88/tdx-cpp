@@ -1,0 +1,70 @@
+[
+  {
+    "market": "MARKET.SH",
+    "code": "600000",
+    "close": 919,
+    "open": 903,
+    "high": 922,
+    "low": 898,
+    "pre_close": 909,
+    "server_time": "14:04:13.692",
+    "neg_price": -919,
+    "vol": 594018,
+    "cur_vol": 65,
+    "amount": 539929792.0,
+    "s_vol": 324861,
+    "b_vol": 269158,
+    "s_amount": 0,
+    "open_amount": 63307,
+    "handicap": {
+      "bid": [
+        {
+          "price": 918,
+          "vol": 2112
+        },
+        {
+          "price": 917,
+          "vol": 432
+        },
+        {
+          "price": 916,
+          "vol": 770
+        },
+        {
+          "price": 915,
+          "vol": 1174
+        },
+        {
+          "price": 914,
+          "vol": 1364
+        }
+      ],
+      "ask": [
+        {
+          "price": 919,
+          "vol": 954
+        },
+        {
+          "price": 920,
+          "vol": 2857
+        },
+        {
+          "price": 921,
+          "vol": 3200
+        },
+        {
+          "price": 922,
+          "vol": 2967
+        },
+        {
+          "price": 923,
+          "vol": 2633
+        }
+      ]
+    },
+    "unknown": "0001010010001100",
+    "rise_speed": 55,
+    "active1": 3237,
+    "active2": 3237
+  }
+]

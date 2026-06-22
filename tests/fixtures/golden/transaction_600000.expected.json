@@ -1,0 +1,82 @@
+[
+  {
+    "time": "14:03:00",
+    "price": 918,
+    "vol": 99,
+    "trans": 10,
+    "action": "SELL",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 919,
+    "vol": 130,
+    "trans": 32,
+    "action": "BUY",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 919,
+    "vol": 140,
+    "trans": 10,
+    "action": "BUY",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 919,
+    "vol": 78,
+    "trans": 4,
+    "action": "BUY",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 919,
+    "vol": 93,
+    "trans": 19,
+    "action": "BUY",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 919,
+    "vol": 49,
+    "trans": 5,
+    "action": "BUY",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 919,
+    "vol": 22,
+    "trans": 5,
+    "action": "BUY",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 919,
+    "vol": 81,
+    "trans": 21,
+    "action": "BUY",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 919,
+    "vol": 60,
+    "trans": 8,
+    "action": "BUY",
+    "unknown": 0
+  },
+  {
+    "time": "14:04:00",
+    "price": 918,
+    "vol": 55,
+    "trans": 5,
+    "action": "SELL",
+    "unknown": 0
+  }
+]
