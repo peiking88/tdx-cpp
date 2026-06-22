@@ -83,4 +83,72 @@ inline Market MarketFromCode(std::string_view code) {
   return Market::SH;  // ETF/可转债等默认 SH
 }
 
+// ============ Phase 2：扩展行情 + SP/MAC 枚举 ============
+
+// 扩展市场（opentdx const.py:491-544 EX_MARKET）。值域 1-102，与标准 MARKET(0-2) 独立。
+enum class ExMarket : uint8_t {
+  TempStock = 1,
+  ZzFuturesOption = 4, DlFuturesOption = 5, ShFuturesOption = 6,
+  CffexOption = 7, ShStockOption = 8, SzStockOption = 9,
+  BasicFx = 10, CrossFx = 11, IntlIndex = 12,
+  ComexFutures = 16, NymexFutures = 17, CbotFutures = 18,
+  HkFinancialFutures = 23, HkFinancialOptions = 24,
+  HkStockFutures = 25, HkStockOptions = 26, HkIndex = 27,
+  ZzFutures = 28, DlFutures = 29, ShFutures = 30,
+  HkMainBoard = 31,
+  OpenEndFund = 33, MonetaryFund = 34, MacroIndicator = 38,
+  FuturesIndex = 42, BToH = 43, Neeq = 44, ShGold = 46,
+  CffexFutures = 47, HkGem = 48, HkFund = 49,
+  TreasuryValuation = 54, SunshinePrivateFund = 56,
+  BrokerCollectiveFinance = 57, BrokerMonetaryFinance = 58,
+  MainFuturesContract = 60, CsiIndex = 62,
+  GzArbitrageFutures = 65, GzFutures = 66, GzOptions = 67,
+  RiskControlIndex = 68, HuazhengIndex = 69, ExtendedSectorIndex = 70,
+  HkStockGgt = 71, GeStock = 73, UsStock = 74, SgStock = 78,
+  MoneyMarket = 91, FundValuation = 93, HkDarkPool = 98,
+  CodeMirror = 100, SzseIndex = 102,
+};
+
+// 扩展类别（opentdx const.py:243-255 EX_CATEGORY）
+enum class ExCategory : uint32_t {
+  Hk = 0x001f, HkGem = 0x0030, Ggt = 0x0047, Us = 0x004a,
+  Hsi = 0x2ee1, Hshc = 0x2ee2, Hsgq = 0x2ee4, Hsgz = 0x2ee7,
+  Hskj = 0x2eec, Uszgg = 0x32c9, Uszm = 0x32ca,
+};
+
+// 板块类型（opentdx const.py:470-481 BOARD_TYPE）
+enum class BoardType : uint8_t {
+  Hy = 0, Hy2 = 1, Gn = 3, Fg = 4, Dq = 5, Other = 6,
+  YjLevel1 = 7, YjLevel2 = 8, YjLevel3 = 9, All = 255,
+};
+
+// 本地板块文件类型（opentdx const.py:464-468 BLOCK_FILE_TYPE）
+enum class BlockFileType : uint8_t {
+  Default, Zs, Fg, Gn,
+};
+inline constexpr const char* BlockFileName(BlockFileType t) {
+  switch (t) {
+    case BlockFileType::Default: return "block.dat";
+    case BlockFileType::Zs: return "block_zs.dat";
+    case BlockFileType::Fg: return "block_fg.dat";
+    case BlockFileType::Gn: return "block_gn.dat";
+  }
+  return "block.dat";
+}
+
+// 排序类型（opentdx const.py:309-401 SORT_TYPE，子集）
+enum class SortType : uint16_t {
+  Code = 0x00, Name = 0x01, PreClose = 0x02, Open = 0x03,
+  High = 0x04, Low = 0x05, Price = 0x06, Bid = 0x07, Ask = 0x08,
+  Volume = 0x09, TotalAmount = 0x0a, LastVolume = 0x0b,
+  Change = 0x0c, ChangePct = 0x0e, AmplitudePct = 0x0f, Avg = 0x10,
+  PeDynamic = 0x11, VolRatio = 0x23, TurnoverRate = 0x24,
+  Activity = 0x2f,
+};
+
+// 排序方向（opentdx const.py:459-462 SORT_ORDER）
+enum class SortOrder : uint8_t {
+  None = 0, Desc = 1, Asc = 2,
+};
+
 }  // namespace tdx

@@ -68,6 +68,26 @@ def _market(code):
     return MARKET.SH if code[:1] in ('6', '5', '9') else MARKET.SZ
 
 
+def _connect_ex():
+    # 扩展行情（exQuotationClient，7727，登录 0x2454，不发心跳）
+    from opentdx.client import exQuotationClient
+    client = exQuotationClient()
+    client.connect()  # 自动选服 ex_hosts
+    client.login()    # 0x2454（80B hex）
+    return client
+
+
+def record_ex_kline(code):
+    from opentdx.const import EX_MARKET, PERIOD
+    from opentdx.parser.ex_quotation.kline import K_Line
+    client = _connect_ex()
+    market = EX_MARKET.HK_MAIN_BOARD  # 默认港股（code 推断可扩展）
+    parser = K_Line(market, code, PERIOD.DAILY, 1, 0, 10)
+    bars = client.call(parser)
+    _save(f'ex_kline_{code}_day', _captured['body'], bars)
+    client.disconnect()
+
+
 def record_kline(code):
     from opentdx.const import ADJUST, PERIOD
     from opentdx.parser.quotation.kline import K_Line
@@ -115,6 +135,7 @@ if __name__ == '__main__':
         'transaction': record_transaction,
         'tick': record_tick,
         'quotes': record_quotes,
+        'ex-kline': record_ex_kline,
     }
     handler = handlers.get(kind)
     if not handler:

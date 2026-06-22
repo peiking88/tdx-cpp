@@ -23,12 +23,19 @@ add_library(tdx_proto STATIC
     proto/parsers.cpp
     proto/parsers_quotes.cpp
     proto/vipdoc_reader.cpp
+    proto/sp_codec.cpp
+    proto/ex_parsers.cpp
+    proto/bitmap.cpp
+    proto/sp_parsers.cpp
+    proto/block_reader.cpp
 )
 target_link_libraries(tdx_proto PUBLIC tdx_util fibers2)
 
 # ---- tdx_quotes：行情接口层（StdQuotes 组合协议层）----
 add_library(tdx_quotes STATIC
     quotes/std_quotes.cpp
+    quotes/ext_quotes.cpp
+    quotes/sp_quotes.cpp
 )
 target_link_libraries(tdx_quotes PUBLIC tdx_proto)
 

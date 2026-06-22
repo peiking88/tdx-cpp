@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "tdx/proto/parsers.hpp"
+#include "tdx/proto/ex_parsers.hpp"
 
 #ifndef FIXTURE_DIR
 #define FIXTURE_DIR "tests/fixtures/golden"
@@ -68,4 +69,16 @@ TEST(GoldenQuotes, ParseRealServer600000) {
   // 五档 bid/ask 应解析（可能部分 NaN：盘前档位）
   EXPECT_GT(quotes[0].bid[0], 0.0);
   EXPECT_GT(quotes[0].ask[0], 0.0);
+}
+
+TEST(GoldenExKline, ParseRealServerHK00700) {
+  auto data = ReadBin("ex_kline_00700_day");
+  ASSERT_FALSE(data.empty());
+  auto bars = proto::deserialize_ex_kline(data.data(), data.size(), Period::DAILY);
+  ASSERT_GT(bars.size(), 0u);
+  // 港股腾讯 float32 OHLC（~数百港元）
+  EXPECT_GT(bars[0].open, 0.0);
+  EXPECT_GT(bars[0].close, 0.0);
+  EXPECT_GT(bars[0].volume, 0.0);
+  EXPECT_GE(bars[0].high, std::max(bars[0].open, bars[0].close));
 }

@@ -94,4 +94,33 @@ struct Stock {
   int decimal_point = 2;
 };
 
+// 扩展行情五档档位（期货/港美股）
+struct ExQuoteLevel {
+  double price = 0.0;
+  double vol = 0.0;
+};
+
+// 扩展行情报价（对齐 opentdx help.py:233-287 unpack_futures，核心字段子集）
+struct ExQuote {
+  uint8_t market = 0;
+  std::string code;       // UTF8
+  double pre_close = 0.0;
+  double open = 0.0;
+  double high = 0.0;
+  double low = 0.0;
+  double close = 0.0;
+  double vol = 0.0;
+  double amount = 0.0;
+  double curr_vol = 0.0;
+  uint32_t open_position = 0;
+  uint32_t add_position = 0;
+  uint32_t hold_position = 0;
+  std::array<ExQuoteLevel, 5> bid{};
+  std::array<ExQuoteLevel, 5> ask{};
+  double settlement = 0.0;
+  double avg = 0.0;
+  double pre_settlement = 0.0;
+  int64_t datetime = 0;  // date_raw → epoch（仅日期）
+};
+
 }  // namespace tdx

@@ -15,6 +15,7 @@
 
 #include "tdx/consts.hpp"
 #include "tdx/proto/server_pool.hpp"
+#include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/util/time_util.hpp"
 
@@ -77,6 +78,34 @@ int DoBars(int argc, char** argv) {
   return 0;
 }
 
+// 扩展行情 K 线：tdx ex-bars <market> <code> <period> <count>
+//   market：ExMarket 数字值（如 31=港股主板 47=沪深300期货 74=美股）
+int DoExBars(int argc, char** argv) {
+  if (argc < 4) {
+    std::cerr << "用法: tdx ex-bars <market> <code> <period> <count>\n"
+              << "  market: 31=港股主板 47=中金所期货 74=美股（ExMarket 值）\n";
+    return 1;
+  }
+  int market = std::atoi(argv[2]);
+  std::string code = argv[3];
+  int period = argc > 4 ? std::atoi(argv[4]) : 4;
+  int count = argc > 5 ? std::atoi(argv[5]) : 10;
+
+  quotes::ExtQuotes eq;
+  if (auto ec = eq.Connect()) {
+    std::cerr << "扩展行情连接失败: " << ec.message() << "\n";
+    return 1;
+  }
+  auto bars = eq.Bars(static_cast<ExMarket>(market), code, static_cast<Period>(period), 0, count);
+  std::cout << "获取 " << bars.size() << " 根扩展 K线（" << code << "）\n";
+  for (const auto& b : bars) {
+    auto c = tdx::util::epoch_to_cst(b.datetime);
+    printf("%04d-%02d-%02d  开%.2f 高%.2f 低%.2f 收%.2f  量%.0f\n",
+           c.year, c.month, c.day, b.open, b.high, b.low, b.close, b.volume);
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -91,6 +120,7 @@ int main(int argc, char** argv) {
   std::string cmd = argv[1];
   if (cmd == "server-test") return DoServerTest();
   if (cmd == "bars") return DoBars(argc, argv);
+  if (cmd == "ex-bars") return DoExBars(argc, argv);
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }
