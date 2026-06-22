@@ -1,0 +1,31 @@
+# 构建产物
+build/
+build-*/
+output/
+*.o
+*.obj
+*.so
+*.a
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+
+# IDE
+.vscode/
+.idea/
+.cache/
+*.swp
+*~
+
+# 调试/运行时
+core
+core.*
+*.log
+
+# 临时
+summary.md
