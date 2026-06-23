@@ -18,6 +18,7 @@
 #include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/data/tdx_data.hpp"
+#include "tdx/query/duckdb_query.hpp"
 #include "tdx/util/time_util.hpp"
 
 using namespace tdx;
@@ -141,6 +142,18 @@ int DoFetchHistory(int argc, char** argv) {
   return 0;
 }
 
+// DuckDB 即席 SQL 查询：tdx sql "SELECT ..."
+int DoSql(int argc, char** argv) {
+  if (argc < 3) {
+    std::cerr << "用法: tdx sql \"<SQL>\"（如 tdx sql \"SELECT * FROM 'k.parquet'\"）\n";
+    return 1;
+  }
+  tdx::query::DuckDBQuery q;
+  auto n = q.Exec(argv[2]);
+  std::cout << (n >= 0 ? "OK rows=" + std::to_string(n) : "ERROR") << "\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -158,6 +171,7 @@ int main(int argc, char** argv) {
   if (cmd == "bars") return DoBars(argc, argv);
   if (cmd == "ex-bars") return DoExBars(argc, argv);
   if (cmd == "fetch-history") return DoFetchHistory(argc, argv);
+  if (cmd == "sql") return DoSql(argc, argv);
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

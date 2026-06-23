@@ -26,6 +26,14 @@ function(tdx_test_data name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+# DuckDB 查询层测试：链 tdx_query（duckdb IMPORTED，无 Arrow）
+function(tdx_test_query name)
+  add_executable(${name} ${name}.cpp)
+  target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  target_link_libraries(${name} PRIVATE tdx_query gtest gtest_main)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
 tdx_test(test_codec)
 tdx_test(test_frame)
 tdx_test(test_util)
@@ -36,6 +44,12 @@ tdx_test(test_sp_codec)
 tdx_test(test_json)
 tdx_test(test_phase2)
 tdx_test_data(test_phase3)
+# test_sync4 用 custom main（MainInitGuard，SyncState fb2::Mutex 需 helio init）
+add_executable(test_sync4 test_sync4.cpp)
+target_include_directories(test_sync4 PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_sync4 PRIVATE tdx_data base gtest)
+add_test(NAME test_sync4 COMMAND test_sync4)
+tdx_test_query(test_duckdb)
 tdx_test_helio(test_retry)
 tdx_test_helio(test_server_pool)
 

@@ -3,7 +3,7 @@
 # 异步 IO 采用 helio（io_uring + fiber），逐字移植 opentdx 协议层。
 cmake_minimum_required(VERSION 3.16)
 
-project(tdx-cpp VERSION 0.3.0 LANGUAGES C CXX)
+project(tdx-cpp VERSION 0.4.0 LANGUAGES C CXX)
 
 # ---- C++ 标准（helio 要求 C++17）----
 set(CMAKE_CXX_STANDARD 17)
@@ -20,7 +20,7 @@ if(NOT HELIO_PATH)
   if(DEFINED ENV{HELIO_PATH})
     set(HELIO_PATH "$ENV{HELIO_PATH}")
   else()
-    set(HELIO_PATH "/home/li/framework/dragonfly/helio")
+    set(HELIO_PATH "${CMAKE_SOURCE_DIR}/external/helio")
   endif()
   set(HELIO_PATH "${HELIO_PATH}" CACHE PATH "helio 源码根目录" FORCE)
 endif()
@@ -73,6 +73,12 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---- zlib（通达信协议解压必需；iconv 在 glibc 内置，无需额外 link）----
 find_package(ZLIB REQUIRED)
+
+# ---- DuckDB（vendored external/duckdb，嵌入式 SQL + Parquet 读写，无 Arrow 依赖）----
+add_library(duckdb SHARED IMPORTED)
+set_target_properties(duckdb PROPERTIES
+  IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/external/duckdb/libduckdb.so
+  INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/external/duckdb)
 
 # ---- 子目录 ----
 add_subdirectory(src)

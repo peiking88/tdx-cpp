@@ -42,10 +42,13 @@ target_link_libraries(tdx_quotes PUBLIC tdx_proto)
 # ---- tdx_data：数据管理层（Phase 3）----
 add_subdirectory(data)
 
+# ---- tdx_query：DuckDB 查询层（Phase 4，Parquet 读写+SQL，无 Arrow）----
+add_subdirectory(query)
+
 # ---- Task 1 smoke：验证 helio 集成 ----
 add_executable(tdx_smoke smoke.cc)
 target_link_libraries(tdx_smoke PRIVATE base fibers2)
 
 # ---- tdx_cli：命令行工具（server-test / bars / ex-bars / fetch-history）----
 add_executable(tdx cli/main.cpp)
-target_link_libraries(tdx PRIVATE tdx_data tdx_quotes base fibers2)
+target_link_libraries(tdx PRIVATE tdx_data tdx_query tdx_quotes base fibers2)
