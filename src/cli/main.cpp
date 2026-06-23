@@ -19,6 +19,7 @@
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/data/tdx_data.hpp"
 #include "tdx/query/duckdb_query.hpp"
+#include "tdx/batch/batch_fetch.hpp"
 #include "tdx/util/time_util.hpp"
 
 using namespace tdx;
@@ -154,6 +155,28 @@ int DoSql(int argc, char** argv) {
   return 0;
 }
 
+// 并发批量拉取：tdx batch-fetch <code> [code...] [concurrency]
+int DoBatchFetch(int argc, char** argv) {
+  std::vector<std::string> codes;
+  int concurrency = 4;
+  for (int i = 2; i < argc; ++i) codes.emplace_back(argv[i]);
+  if (!codes.empty()) {
+    const std::string& last = codes.back();
+    bool all_digit = !last.empty();
+    for (char c : last) if (!std::isdigit(static_cast<unsigned char>(c))) all_digit = false;
+    if (all_digit) { concurrency = std::atoi(last.c_str()); codes.pop_back(); }
+  }
+  if (codes.empty()) { std::cerr << "用法: tdx batch-fetch <code> [code...] [concurrency]\n"; return 1; }
+  auto results = tdx::batch::BatchFetchKline(codes, concurrency, tdx::Period::DAILY, 0, 10);
+  int ok = 0;
+  for (const auto& r : results) {
+    if (r.success) { ++ok; std::cout << r.code << ": " << r.bars.size() << " 根 K线\n"; }
+    else std::cout << r.code << ": 失败\n";
+  }
+  std::cout << "完成: " << ok << "/" << results.size() << " 成功（并发=" << concurrency << "）\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -172,6 +195,7 @@ int main(int argc, char** argv) {
   if (cmd == "ex-bars") return DoExBars(argc, argv);
   if (cmd == "fetch-history") return DoFetchHistory(argc, argv);
   if (cmd == "sql") return DoSql(argc, argv);
+  if (cmd == "batch-fetch") return DoBatchFetch(argc, argv);
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }
