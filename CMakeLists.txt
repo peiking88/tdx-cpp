@@ -3,7 +3,7 @@
 # 异步 IO 采用 helio（io_uring + fiber），逐字移植 opentdx 协议层。
 cmake_minimum_required(VERSION 3.16)
 
-project(tdx-cpp VERSION 0.5.0 LANGUAGES C CXX)
+project(tdx-cpp VERSION 0.5.1 LANGUAGES C CXX)
 
 # ---- C++ 标准（helio 要求 C++17）----
 set(CMAKE_CXX_STANDARD 17)
@@ -148,6 +148,25 @@ if(EXISTS "${_EXT}/zstd/zstd-1.5.7.tar.zst")
   message(STATUS "tdx-cpp: 预置 zstd → external/zstd/")
 endif()
 
+# rapidjson + expected-lite：header-only，helio 用 ExternalProject GIT_REPOSITORY 拉取。
+# 将 external/ 中的完整 checkout 复制到 build tree 并创建 stamp 文件，跳过 git clone。
+foreach(_dep IN ITEMS rapidjson expected)
+  set(_dep_src "${_EXT}/${_dep}")
+  set(_dep_dst "${_EP_DL_BASE}/${_dep}")
+  set(_dep_stamp "${_EP_DL_BASE}/src/${_dep}_project-stamp")
+  if(EXISTS "${_dep_src}/.git")
+    message(STATUS "tdx-cpp: 预置 ${_dep} → external/${_dep}/（本地 checkout）")
+    # 仅在目标目录不存在时复制（避免每次 configure 都 copy）
+    if(NOT EXISTS "${_dep_dst}/.git")
+      file(COPY "${_dep_src}/" DESTINATION "${_dep_dst}")
+    endif()
+    # 创建 stamp 文件，使 ExternalProject 跳过 download+clone 步骤
+    file(MAKE_DIRECTORY "${_dep_stamp}")
+    file(WRITE "${_dep_stamp}/${_dep}_project-gitclone-lastrun.txt" "offline")
+    file(WRITE "${_dep_stamp}/${_dep}_project-gitinfo.txt" "offline")
+  endif()
+endforeach()
+
 # helio 暴露的 target（来自 agent 调研）：
 #   base        —— 日志/flags/hash 等无协程底层
 #   fibers2     —— fiber 协程 + FiberSocketBase + fb2::Mutex/CondVar + ProactorBase::AddPeriodic
@@ -162,8 +181,21 @@ endif()
 # 可执行统一输出到 build/bin（便于 CLI 调用）
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# ---- zlib（通达信协议解压必需；iconv 在 glibc 内置，无需额外 link）----
-find_package(ZLIB REQUIRED)
+# ---- zlib-ng（vendored 替代系统 zlib，ZLIB_COMPAT 模式，API/ABI 100% 兼容）----
+# 通达信协议响应解压必需。zlib-ng 兼容模式提供标准 zlib.h + libz.a，
+# 零代码改动，消除项目最后一个 find_package 系统依赖。
+set(ZLIB_COMPAT ON CACHE BOOL "zlib API 兼容模式" FORCE)
+set(ZLIB_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+if(EXISTS "${CMAKE_SOURCE_DIR}/external/zlib-ng/zlib-ng-2.3.3.tar.gz")
+  FetchContent_Declare(zlib
+    URL file://${CMAKE_SOURCE_DIR}/external/zlib-ng/zlib-ng-2.3.3.tar.gz)
+  message(STATUS "tdx-cpp: 使用本地 zlib-ng → external/zlib-ng/")
+else()
+  FetchContent_Declare(zlib
+    URL https://ghfast.top/https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.tar.gz)
+  message(STATUS "tdx-cpp: zlib-ng 镜像下载（ghfast.top）")
+endif()
+FetchContent_MakeAvailable(zlib)
 
 # ---- DuckDB（vendored external/duckdb，嵌入式 SQL + Parquet 读写，无 Arrow 依赖）----
 add_library(duckdb SHARED IMPORTED)

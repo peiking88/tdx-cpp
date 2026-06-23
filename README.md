@@ -154,10 +154,10 @@ test_e2e            # 端到端集成测试（真网）
    tdx_proto_core  parsers   local    transport
    (frame/codec)   (7文件) (vipdoc) (conn/retry)
           │
-       tdx_util（gbk/zlib/absl::Time）
+       tdx_util（gbk/zlib-ng/absl::Time）
           │
-    ┌─────┴─────┐
-   ZLIB    absl::time
+    ┌─────┴──────────┐
+   zlib-ng    absl::time
 ```
 
 ### 命名空间
@@ -169,7 +169,7 @@ test_e2e            # 端到端集成测试（真网）
 | `tdx::data` | 数据管理层（Calendar / Adjust / Resampler / SyncState / TdxData） |
 | `tdx::query` | DuckDB 查询层 |
 | `tdx::batch` | 并发批量拉取 |
-| `tdx::util` | 工具（GBK iconv、zlib 解压、absl::Time 时区） |
+| `tdx::util` | 工具（GBK iconv、zlib-ng 解压、absl::Time 时区、字节序） |
 
 ### helio fiber 纪律
 
@@ -189,7 +189,7 @@ include/     公共头文件（tdx/ 命名空间）
   ├─ tdx/data/              数据管理层头文件（5 个）
   ├─ tdx/query/             DuckDB 查询层头文件（1 个）
   ├─ tdx/batch/             批量拉取头文件（1 个）
-  ├─ tdx/util/              工具头文件（4 个）
+  ├─ tdx/util/              工具头文件（4 个：gbk/zlib/time_util/byte_order）
   └─ nlohmann/              JSON 库（vendored 单头文件）
 src/         源码
   ├─ util/                  gbk / zlib / time_util（absl::Time）
@@ -214,7 +214,35 @@ external/    第三方依赖（不入 git）
   ├─ pugixml/               预下载 tarball
   ├─ cares/                 预下载 tarball
   ├─ zstd/                  预下载 tarball
-  ├─ rapidjson/             git bare clone
-  └─ expected/              git bare clone
+  ├─ rapidjson/             git checkout（header-only，离线构建用）
+  ├─ expected/              git checkout（header-only，离线构建用）
+  ├─ zlib-ng/               zlib-ng 2.3.3 tarball（替代系统 zlib）
 output/      程序输出（不入 git）
+```
+### 2026-06-23 v0.5.0
+
+**zlib-ng 替代系统 zlib**：`find_package(ZLIB)` → FetchContent zlib-ng 2.3.3（ZLIB_COMPAT 模式），API 100% 兼容，零代码改动。消除项目最后一个系统包依赖，实现完全 vendored 离线可复现构建。
+
+**external/ 离线完善**：
+- rapidjson / expected-lite：bare repo → 完整 git checkout（`external/rapidjson/`、`external/expected/`），cmake configure 期自动复制到 build tree 并创建 stamp 跳过 ExternalProject 下载。
+- 新增 `external/zlib-ng/`（zlib-ng 2.3.3 tarball）。
+
+**代码简化（ponytail audit）**：
+- 合并 4 处 `push_u8/u16/u32/push_code` 重复定义到 `byte_order.hpp`（-30 行）。
+- 合并 3 处 `DefaultHosts()` 重复定义到 `StdQuotes::DefaultHosts()`（公开，-60 行）。
+- Calendar `IsHoliday` O(n) vector → O(1) unordered_set。
+
+**文件变更**（15 files, +193/-139）：
+```
+CMakeLists.txt                         zlib-ng FetchContent + 离线复制逻辑
+include/tdx/util/byte_order.hpp        +push_* 共享 helper
+include/tdx/quotes/std_quotes.hpp      DefaultHosts 公开
+include/tdx/data/calendar.hpp          vector → unordered_set
+src/CMakeLists.txt                     ZLIB::ZLIB → zlib
+src/proto/{parsers,ex_parsers,sp_parsers,parsers_quotes}.cpp  去重
+src/cli/main.cpp                       复用 DefaultHosts
+src/batch/batch_fetch.cpp              复用 DefaultHosts
+src/data/calendar.cpp                  O(1) lookup + snprintf 修复
+scripts/setup_external.sh              +zlib-ng, rapidjson/expected 完整 clone
+CLAUDE.md/README.md                    文档更新
 ```

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**Phase 1-4 核心完成（v0.4.0）。** 协议层 + A股标准行情（Phase 1, v0.1.0）+ 扩展行情/SP/MAC（Phase 2, v0.2.0）+ 数据管理核心 Calendar/Adjust/Resampler/SyncState/TdxData（Phase 3, v0.3.0）+ v2 改进 external/ 统一/DuckDB/断点续传（Phase 4, v0.4.0）。本文件作为 C++ 实现的设计蓝图与协议知识库。
+**Phase 1-4 全部完成（v0.5.0）。** 协议层 + A股标准行情（Phase 1, v0.1.0）+ 扩展行情/SP/MAC（Phase 2, v0.2.0）+ 数据管理核心 Calendar/Adjust/Resampler/SyncState/TdxData（Phase 3, v0.3.0）+ v2 改进 external/统一/DuckDB/断点续传/并发批量（Phase 4, v0.4.0）+ 加固 time_util abseil 替代 POSIX / SQL 注入防护 / 离线构建 / e2e 真网测试（v0.5.0）。本文件作为 C++ 实现的设计蓝图与协议知识库。
 
 ## 项目目标
 
@@ -62,32 +62,70 @@ C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser
 - **本地数据**：`.day/.lc1/.lc5` 读取与时效性校验。
 - **数据管理（tdxdata 层）**：统一 API、熔断器+指数退避重试、增量同步（JSON 状态持久化）、本地优先+网络补缺的混合数据源、自算复权因子、A 股交易时段感知的 K 线重采样、标准化输出 schema。
 
-## 上游短板与改进路线（架构评审已确认）
+## 上游短板与改进路线（Phase 4 全部完成 ✅）
 
-上游 Python 版有三个明确缺陷。**经 PRD 评审决策，v1 严格追求功能对等，这些改进推迟到 v2（Phase 4）**：
+上游 Python 版有三个明确缺陷，已在 Phase 4（v0.4.0）全部解决：
 
-1. **并发批量下载**：tdxdata 全市场抓取是纯串行（`tdxdata/sources/base.py:184`）。v2 用 helio fiber 池 + 全局规范要求的 `-n` 参数解决。
-2. **断点续传**：上游只到「天」不到「股票」（`tdxdata/sync.py:91`）。v2 实现股票级进度持久化。
-3. **存储后端**：tdxdata 存储全是桩（`tdxdata/storage/dataframe.py:9`）。v2 采用 **DuckDB 嵌入式 SQL 引擎**（进程内，零外部服务）——内置 Parquet 读写（COPY TO / SELECT FROM）+ 即席 SQL 查询 + 内存热表（最新报价/订阅状态），**无 Arrow 依赖**。第三方依赖统一收纳 `external/`（helio symlink + duckdb vendored）。
+1. **并发批量下载**（已完成）：`tdx_batch` 模块——helio fiber 池 + 全局规范要求的 `-n` 参数。见 `src/batch/batch_fetch.cpp`。
+2. **断点续传**（已完成）：`tdx_data::SyncState` 实现股票级进度持久化（JSON），支持崩溃恢复。见 `src/data/sync_state.cpp`。
+3. **存储后端**（已完成）：`tdx_query::DuckDBQuery`——DuckDB 嵌入式 SQL 引擎（进程内，零外部服务），Parquet 读写（COPY TO / SELECT FROM）+ 即席 SQL 查询 + 内存热表（最新报价/订阅状态），**无 Arrow 依赖**。第三方依赖统一收纳 `external/`（helio rsync 复制 + duckdb vendored + abseil 等预下载）。
 
 ## 技术栈与目录结构（架构评审已确认，见 `.claude/PRPs/prds/tdx-cpp.prd.md`）
 
 - **构建**：CMake + Ninja（两者均已安装）。**C++ 标准定为 C++17**。
 - **版本号**：写在 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`，遵循全局规范的打 tag 规则（不加 `v` 前缀）。
-- **异步 IO**：**helio**（`external/helio` symlink → `~/framework/dragonfly/helio`，io_uring+epoll+自研 fiber 协程，C++17）。`AddPeriodic` 做 15s 心跳、`MakeFiber` 做并发测速、`FiberSocketBase` 做 TCP。参考 `helio/examples/echo_server.cc` 的 `Driver`/`TLocalClient`。**纪律：禁用 `std::mutex`/`std::thread::sleep_for`，须用 `util::fb2::Mutex`/`ThisFiber::SleepFor`**，否则整个 Proactor 线程卡死。无 install target，须 `add_subdirectory(external/helio)` 内嵌；需系统 Boost(context+system)，其余依赖(abseil/glog/liburing 等)自动拉。
+- **异步 IO**：**helio**（`external/helio`，由 `scripts/setup_external.sh` 从 `~/framework/dragonfly/helio` rsync 复制源码（排除 build/.git/），io_uring+epoll+自研 fiber 协程，C++17）。`AddPeriodic` 做 15s 心跳、`MakeFiber` 做并发测速、`FiberSocketBase` 做 TCP。参考 `helio/examples/echo_server.cc` 的 `Driver`/`TLocalClient`。**纪律：禁用 `std::mutex`/`std::thread::sleep_for`，须用 `util::fb2::Mutex`/`ThisFiber::SleepFor`**，否则整个 Proactor 线程卡死。无 install target，须 `add_subdirectory(external/helio)` 内嵌；需系统 Boost(context+system)，其余依赖(abseil/glog/liburing 等)自动拉。
 - **GBK 转码**：系统 iconv。
 - **压缩**：zlib（协议必需）。
 - **测试**：GoogleTest + CTest，live 测试间加延迟退避避免限流。
 - **v2 存储**：**DuckDB 嵌入式**（Parquet 读写 COPY TO/SELECT FROM + SQL 查询 + 内存热表，**无 Arrow**），vendored `external/duckdb`（libduckdb.so + duckdb.hpp，镜像下载，CMake IMPORTED target）。
-- **目录结构**（遵循全局规范）：
+- **目录结构**：
   ```
-  docs/   API 文档、协议说明、PRD
-  cfg/    服务器列表、市场代码、字段映射等配置
-  src/    协议层 / 行情接口层 / 数据管理层（分库或分子目录）
-  scripts/ 测速、批量下载、数据校验脚本
-  tests/  单元测试（协议解析、reader）+ 集成测试（live 连接、local 文件）
-  output/ 程序输出（不入 git）
+  docs/        API 文档、协议说明、PRD（规划中，当前为空）
+  cfg/         配置文件（servers.json / holidays.json）
+  include/     公共头文件（tdx/ 命名空间）
+    ├─ tdx/types.hpp           KLine/Tick/Transaction/Quote/Stock 结构体
+    ├─ tdx/consts.hpp          协议常量、市场/周期/交易时段枚举
+    ├─ tdx/errors.hpp          异常类型
+    ├─ tdx/proto/              协议层头文件（13 个）
+    ├─ tdx/quotes/             行情接口层头文件（3 个）
+    ├─ tdx/data/               数据管理层头文件（5 个）
+    ├─ tdx/query/              DuckDB 查询层头文件（1 个）
+    ├─ tdx/batch/              批量拉取头文件（1 个）
+    ├─ tdx/util/               工具头文件（4 个：gbk/zlib/time_util/byte_order）
+    └─ nlohmann/               JSON 库（vendored 单头文件）
+  src/         源码
+    ├─ util/                   gbk / zlib / time_util（absl::Time+FixedTimeZone）
+    ├─ proto/                  协议层（14 文件，拆分为 4 子 target：core/transport/parsers/local）
+    ├─ quotes/                 行情接口层（3 文件：std/ext/sp）
+    ├─ data/                   数据管理层（5 文件）
+    ├─ query/                  DuckDB 查询层（1 文件）
+    ├─ batch/                  并发批量拉取（1 文件）
+    └─ cli/                    CLI 入口
+  scripts/     辅助脚本（setup_external.sh / record_golden.py）
+  tests/       单元测试 + 集成测试（15 文件）
+    └─ fixtures/golden/        黄金字节流（真服录制）
+  external/    第三方依赖（不入 git，setup_external.sh 初始化）
+    ├─ helio/                  io_uring + fiber 框架（rsync 复制）
+    ├─ duckdb/                 DuckDB vendored（libduckdb.so + duckdb.hpp）
+    ├─ googletest/             预下载 tarball（离线构建用）
+    ├─ abseil/                 预下载 tarball
+    ├─ benchmark/              预下载 tarball
+    └─ ...                     gperf/xxhash/uring/pugixml/cares/zstd/rapidjson/expected
+  output/      程序输出（不入 git）
   ```
+
+## 命名空间与模块架构
+
+| 命名空间 | 对应 CMake target | 职责 |
+|---|---|---|
+| `tdx::util` | `tdx_util` | 工具（GBK iconv、zlib 解压、**absl::Time+FixedTimeZone(+8)** 替代 POSIX timegm/gmtime_r、字节序转换） |
+| `tdx::proto` | `tdx_proto`（umbrella INTERFACE） | 协议层：帧编解码（core）、连接/心跳/熔断/选服（transport）、解析器（parsers）、本地文件（local） |
+| `tdx::quotes` | `tdx_quotes` | 行情接口层（StdQuotes / ExtQuotes / SpQuotes） |
+| `tdx::data` | `tdx_data` | 数据管理层（Calendar / Adjust / Resampler / SyncState / TdxData） |
+| `tdx::query` | `tdx_query` | DuckDB 查询层（Parquet 读写 + 内存热表 + SQL 注入防护） |
+| `tdx::batch` | `tdx_batch` | 并发批量拉取（helio fiber 池分片 + `-n` 并发数） |
+| `tdx` (exe) | `tdx` | CLI 入口（server-test / bars / ex-bars / fetch-history） |
 
 ## helio fiber 编码纪律（关键约束）
 
@@ -112,21 +150,28 @@ helio 的 Proactor 线程内**禁用**标准库阻塞原语——它们会阻塞
 ## 构建、测试、运行命令（建议脚手架）
 
 ```bash
-# 配置（Release，ninja，并行）
+# 0. 首次初始化 external/ 依赖（helio 源码 + DuckDB + 预下载 tarball，支持离线构建）
+bash scripts/setup_external.sh
+
+# 1. 配置（Release，ninja，并行）
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-# 编译（全局规范：-j$(nproc) 并行）
+# 2. 编译（全局规范：-j$(nproc) 并行）
 cmake --build build -j$(nproc)
 
-# 运行全部测试（ctest 并行）
+# 3. 运行全部测试（ctest 并行）
 ctest --test-dir build -j$(nproc) --output-on-failure
 # 运行单个测试用例
 ctest --test-dir build -R <test_name> -V
 
-# 批量下载示例（-n 控制并发，遵循全局规范）
-./build/tdx_fetch history --stock-list <file> --start 2024-01-01 --end 2024-06-01 -n 16
+# 4. CLI 示例
+./build/bin/tdx server-test                              # 测速选服
+./build/bin/tdx bars 600000 4 10                         # 拉日 K
+./build/bin/tdx ex-bars 31 HSImain 4 10                  # 扩展行情 K 线
+./build/bin/tdx fetch-history --stock-list stock.txt \
+    --start 2024-01-01 --end 2024-06-01 -n 16 --resume   # 批量拉取+断点续传
 ```
 
-实际命令在 CMakeLists.txt 与可执行文件落地后以本节为准对齐。**真实网络测试**（连接通达信服务器）优先级高于 mock，参考上游的 `pytest -m live`（连真服）与 `-m local`（读本地文件）划分。
+**真实网络测试**（连接通达信服务器）优先级高于 mock，参考上游的 `pytest -m live`（连真服）与 `-m local`（读本地文件）划分。e2e 测试（`test_e2e`）在服务器不可达时自动 `GTEST_SKIP`，不视为失败。
 
 ## 关键实现注意事项
 
@@ -135,6 +180,9 @@ ctest --test-dir build -R <test_name> -V
 - **A 股时段感知重采样**：15m/30m/1h 由 5m 重采样，1w/1mon 由 1d 重采样，且 K 线结束时间须按 A 股交易时段（上午 9:30、下午 13:00 开盘）标注。参考 `tdxdata/sources/base.py:56-132`。
 - **K 线周期常量**：`0`=5min、`1`=15min、`2`=30min、`3`=1h、`4`=日、`5`=周、`6`=月、`7`=扩展1min、`8`=1min、`9`=日K、`10`=季、`11`=年。单次请求 K 线上限 800 条、分笔 2000 条。
 - **结构体移植**：所有 `struct.unpack` 格式串须逐字移植，不可臆测字节序。
+- **时区转换（v0.5.0 重构）**：`time_util` 用 `absl::Time` + `absl::FixedTimeZone(+8)` 替代 POSIX `timegm`/`gmtime_r`——消除非标准依赖、天然线程安全、为跨时区扩展铺路。见 `src/util/time_util.cpp`。
+- **SQL 注入防护（v0.5.0）**：`DuckDBQuery` 所有拼接 SQL 通过 `EscapeSql()` 转义单引号（`''`），含引号 code 可安全使用。见 `src/query/duckdb_query.cpp`。
+- **离线构建（v0.5.0）**：`scripts/setup_external.sh` 预下载 googletest/benchmark/abseil-cpp/gperf/xxhash/liburing 等依赖的 tarball 到 `external/`，CMake FetchContent 使用 `file://` URL 离线使用，构建期无需联网。
 
 ## 参考资源
 

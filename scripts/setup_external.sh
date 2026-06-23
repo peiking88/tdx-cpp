@@ -109,19 +109,32 @@ if [ ! -f external/zstd/zstd-1.5.7.tar.zst ]; then
   echo "external/zstd 就绪"
 fi
 
-# rapidjson（bare repo，供 git:// 本地离线使用）
-if [ ! -d external/rapidjson/rapidjson.git ]; then
-  mkdir -p external/rapidjson
-  echo "克隆 rapidjson bare repo（镜像）..."
-  git clone --bare https://ghfast.top/https://github.com/Tencent/rapidjson.git external/rapidjson/rapidjson.git
+# zlib-ng（替代系统 zlib，ZLIB_COMPAT 模式，API 100% 兼容，消除 find_package 系统依赖）
+if [ ! -f external/zlib-ng/zlib-ng-2.3.3.tar.gz ]; then
+  mkdir -p external/zlib-ng
+  echo "下载 zlib-ng v2.3.3（镜像）..."
+  curl -sL -o external/zlib-ng/zlib-ng-2.3.3.tar.gz \
+    "https://ghfast.top/https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.tar.gz"
+  echo "external/zlib-ng 就绪"
+fi
+
+# rapidjson（header-only，供 helio ExternalProject 离线构建——完整 checkout 到 external/，cmake 时复制到 build tree）
+if [ ! -d external/rapidjson/.git ]; then
+  rm -rf external/rapidjson
+  echo "克隆 rapidjson（ghfast.top 镜像）..."
+  git clone --no-checkout \
+    "https://ghfast.top/https://github.com/Tencent/rapidjson.git" external/rapidjson
+  git -C external/rapidjson checkout ab1842a
   echo "external/rapidjson 就绪"
 fi
 
-# expected-lite（bare repo，供 git:// 本地离线使用）
-if [ ! -d external/expected/expected-lite.git ]; then
-  mkdir -p external/expected
-  echo "克隆 expected-lite bare repo（镜像）..."
-  git clone --bare https://ghfast.top/https://github.com/martinmoene/expected-lite.git external/expected/expected-lite.git
+# expected-lite（header-only，同上）
+if [ ! -d external/expected/.git ]; then
+  rm -rf external/expected
+  echo "克隆 expected-lite（ghfast.top 镜像）..."
+  git clone --no-checkout \
+    "https://ghfast.top/https://github.com/martinmoene/expected-lite.git" external/expected
+  git -C external/expected checkout f17940fabae07063cabb67abf2c8d164d3146044
   echo "external/expected 就绪"
 fi
 

@@ -23,7 +23,7 @@ bool IsWeekend(int year, int month, int day) {
 }
 
 std::string DateStr(int y, int m, int d) {
-  char b[16];
+  char b[32];  // ponytail: snprintf 溢出告警，16→32
   std::snprintf(b, sizeof(b), "%04d-%02d-%02d", y, m, d);
   return std::string(b);
 }
@@ -40,7 +40,7 @@ void Calendar::LoadHolidays(const std::string& path) {
   try {
     auto j = nlohmann::json::parse(f);
     if (j.is_array()) {
-      for (const auto& d : j) holidays_.push_back(d.get<std::string>());
+      for (const auto& d : j) holidays_.insert(d.get<std::string>());  // ponytail: unordered_set
     }
   } catch (...) {
     // 节假日文件解析失败，静默降级为「仅周末非交易日」
@@ -48,10 +48,7 @@ void Calendar::LoadHolidays(const std::string& path) {
 }
 
 bool Calendar::IsHoliday(const std::string& date) const {
-  for (const auto& h : holidays_) {
-    if (h == date) return true;
-  }
-  return false;
+  return holidays_.count(date) > 0;  // ponytail: O(1)
 }
 
 bool Calendar::IsTradingDay(const std::string& date) const {

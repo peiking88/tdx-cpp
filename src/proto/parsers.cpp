@@ -10,23 +10,11 @@
 #include "tdx/util/gbk.hpp"
 
 namespace tdx::proto {
-namespace {
+using tdx::util::push_u16;
+using tdx::util::push_u32;
 
-void push_u8(std::vector<uint8_t>& b, uint8_t v) { b.push_back(v); }
-void push_u16(std::vector<uint8_t>& b, uint16_t v) {
-  b.push_back(static_cast<uint8_t>(v & 0xff));
-  b.push_back(static_cast<uint8_t>((v >> 8) & 0xff));
-}
-void push_u32(std::vector<uint8_t>& b, uint32_t v) {
-  for (int i = 0; i < 4; ++i) b.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
-}
-// 写入 6 字节 GBK 代码（不足补 0）
-void push_code6(std::vector<uint8_t>& b, std::string_view code) {
-  std::size_t n = std::min<std::size_t>(code.size(), 6);
-  for (std::size_t i = 0; i < 6; ++i) b.push_back(i < n ? static_cast<uint8_t>(code[i]) : 0);
-}
-
-}  // namespace
+// push_code from tdx/util/byte_order.hpp (width=6 for GBK code)
+using tdx::util::push_code;
 
 // ============================ K 线 0x523 ============================
 
@@ -37,7 +25,7 @@ std::vector<uint8_t> serialize_kline(Market market, std::string_view code, Perio
   std::vector<uint8_t> body;
   body.reserve(26);
   push_u16(body, static_cast<uint16_t>(market));
-  push_code6(body, code);
+  push_code(body, code, 6);
   push_u16(body, static_cast<uint16_t>(period));
   push_u16(body, times);
   push_u16(body, start);
@@ -125,7 +113,7 @@ std::vector<uint8_t> serialize_tick(Market market, std::string_view code,
   std::vector<uint8_t> body;
   body.reserve(12);
   push_u16(body, static_cast<uint16_t>(market));
-  push_code6(body, code);
+  push_code(body, code, 6);
   push_u16(body, start);
   push_u16(body, count);
   return body;
@@ -160,7 +148,7 @@ std::vector<uint8_t> serialize_transaction(Market market, std::string_view code,
   std::vector<uint8_t> body;
   body.reserve(12);
   push_u16(body, static_cast<uint16_t>(market));
-  push_code6(body, code);
+  push_code(body, code, 6);
   push_u16(body, start);
   push_u16(body, count);
   return body;

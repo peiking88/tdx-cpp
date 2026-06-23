@@ -3,6 +3,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace tdx::data {
@@ -25,7 +26,7 @@ class Calendar {
   bool IsHoliday(const std::string& date) const;
 
  private:
-  std::vector<std::string> holidays_;  // "YYYY-MM-DD"
+  std::unordered_set<std::string> holidays_;  // ponytail: O(1) lookup, vector→set
 };
 
 }  // namespace tdx::data

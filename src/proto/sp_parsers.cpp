@@ -11,25 +11,10 @@
 #include "tdx/util/gbk.hpp"
 
 namespace tdx::proto {
-namespace {
-
-void push_u8(std::vector<uint8_t>& b, uint8_t v) { b.push_back(v); }
-void push_u16(std::vector<uint8_t>& b, uint16_t v) {
-  b.push_back(static_cast<uint8_t>(v & 0xff));
-  b.push_back(static_cast<uint8_t>((v >> 8) & 0xff));
-}
-void push_u32(std::vector<uint8_t>& b, uint32_t v) {
-  for (int i = 0; i < 4; ++i) b.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
-}
-void push_code(std::vector<uint8_t>& b, std::string_view code, std::size_t width) {
-  std::size_t n = std::min<std::size_t>(code.size(), width);
-  for (std::size_t i = 0; i < width; ++i) b.push_back(i < n ? static_cast<uint8_t>(code[i]) : 0);
-}
-void push_ascii(std::vector<uint8_t>& b, std::string_view s, std::size_t width) {
-  push_code(b, s, width);  // ASCII 与单字节填充同
-}
-
-}  // namespace
+using tdx::util::push_code;
+using tdx::util::push_u8;
+using tdx::util::push_u16;
+using tdx::util::push_u32;
 
 // ============================ 板块列表 0x1231 ============================
 
@@ -183,7 +168,7 @@ std::vector<uint8_t> serialize_sp_capital_flow(uint16_t market, std::string_view
   push_u16(body, market);
   push_code(body, code, 8);
   for (int i = 0; i < 16; ++i) body.push_back(0);
-  push_ascii(body, "Stock_ZJLX", 21);
+  push_code(body, "Stock_ZJLX", 21);
   return body;
 }
 

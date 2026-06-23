@@ -26,26 +26,11 @@ using namespace tdx;
 
 namespace {
 
-// 内置标准行情服务器（与 StdQuotes::DefaultHosts 一致）
-std::vector<proto::ServerInfo> DefaultHosts() {
-  return {
-      {"通达信深圳双线主站1", "110.41.147.114", 7709},
-      {"通达信深圳双线主站2", "110.41.2.72", 7709},
-      {"通达信深圳双线主站3", "110.41.4.4", 7709},
-      {"通达信上海双线主站1", "124.70.176.52", 7709},
-      {"通达信上海双线主站2", "122.51.120.217", 7709},
-      {"通达信上海双线主站3", "123.60.186.45", 7709},
-      {"通达信北京双线主站1", "121.36.54.217", 7709},
-      {"通达信广州双线主站1", "124.71.85.110", 7709},
-      {"通达信武汉电信主站1", "119.97.185.59", 7709},
-  };
-}
-
 int DoServerTest() {
   std::unique_ptr<::util::ProactorPool> pool(::util::fb2::Pool::IOUring(64));
   pool->Run();
   auto* pb = pool->GetNextProactor();
-  auto hosts = DefaultHosts();
+  auto hosts = quotes::StdQuotes::DefaultHosts();  // ponytail: 复用，消除重复
   std::cout << "测速 " << hosts.size() << " 个标准行情服务器...\n";
   for (const auto& h : hosts) {
     auto lat = pb->Await([&] { return proto::ServerPool::Probe(h, pb); });

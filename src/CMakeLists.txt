@@ -8,7 +8,7 @@ add_library(tdx_util STATIC
     util/time_util.cpp
 )
 target_include_directories(tdx_util PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(tdx_util PUBLIC ZLIB::ZLIB absl::time absl::time_zone)
+target_link_libraries(tdx_util PUBLIC zlib absl::time absl::time_zone)
 # iconv：glibc 内置（libc），Linux 无需额外 link。
 
 # ---- tdx_proto：协议层（4 子 target + umbrella）----

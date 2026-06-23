@@ -2,9 +2,12 @@
 // 运行平台（x86_64/arm64）均为小端，直接 memcpy；保留显式接口以便后续跨平台审计。
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace tdx::util {
 
@@ -39,5 +42,21 @@ inline float    rd_f32(const uint8_t* p) { return read_le<float>(p); }
 // 常用宽度的小端写
 inline void wr_u16(uint8_t* p, uint16_t v) { write_le(p, v); }
 inline void wr_u32(uint8_t* p, uint32_t v) { write_le(p, v); }
+
+// vector append 变体 — 各 parser 共用，消除 4 处重复定义
+// ponytail: 4× 重复 → 1× shared inline
+inline void push_u8(std::vector<uint8_t>& b, uint8_t v) { b.push_back(v); }
+inline void push_u16(std::vector<uint8_t>& b, uint16_t v) {
+  b.push_back(static_cast<uint8_t>(v & 0xff));
+  b.push_back(static_cast<uint8_t>((v >> 8) & 0xff));
+}
+inline void push_u32(std::vector<uint8_t>& b, uint32_t v) {
+  for (int i = 0; i < 4; ++i) b.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+}
+inline void push_code(std::vector<uint8_t>& b, std::string_view code, std::size_t width) {
+  std::size_t n = std::min<std::size_t>(code.size(), width);
+  for (std::size_t i = 0; i < width; ++i)
+    b.push_back(i < n ? static_cast<uint8_t>(code[i]) : 0);
+}
 
 }  // namespace tdx::util

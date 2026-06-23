@@ -14,21 +14,9 @@
 #include "tdx/proto/frame.hpp"
 #include "tdx/proto/parsers.hpp"
 #include "tdx/proto/server_pool.hpp"
+#include "tdx/quotes/std_quotes.hpp"  // ponytail: DefaultHosts 共用
 
 namespace tdx::batch {
-namespace {
-
-std::vector<proto::ServerInfo> DefaultHosts() {
-  return {
-      {"通达信深圳主站1", "110.41.147.114", 7709},
-      {"通达信深圳主站2", "110.41.2.72", 7709},
-      {"通达信上海主站1", "124.70.176.52", 7709},
-      {"通达信上海主站2", "122.51.120.217", 7709},
-      {"通达信武汉主站", "119.97.185.59", 7709},
-  };
-}
-
-}  // namespace
 
 std::vector<BatchResult> BatchFetchKline(const std::vector<std::string>& codes,
                                          int concurrency, Period period,
@@ -42,7 +30,7 @@ std::vector<BatchResult> BatchFetchKline(const std::vector<std::string>& codes,
   auto* pb = pool->GetNextProactor();
 
   proto::ServerPool sp(pool.get());
-  auto best = sp.SelectBest(DefaultHosts());
+  auto best = sp.SelectBest(quotes::StdQuotes::DefaultHosts());
   if (!best) {
     pool->Stop();
     return all;

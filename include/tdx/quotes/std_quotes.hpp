@@ -48,12 +48,14 @@ class StdQuotes {
   // 股票数量
   uint16_t StockCount(Market market);
 
+  // 默认服务器列表（供 CLI/batch 等复用，避免多处硬编码）
+  static std::vector<proto::ServerInfo> DefaultHosts();
+
  private:
   // 在 fiber 内执行一次请求（受 RetryPolicy + CircuitBreaker 保护）。
   proto::Response Call(uint16_t msg_id, const std::vector<uint8_t>& body);
   std::error_code ConnectInFiber();
   void SendHeartbeat();
-  static std::vector<proto::ServerInfo> DefaultHosts();
 
   std::unique_ptr<::util::ProactorPool> pool_;
   ::util::fb2::ProactorBase* proactor_ = nullptr;
