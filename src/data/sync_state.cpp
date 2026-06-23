@@ -117,8 +117,12 @@ void SyncState::Clear() {
 
 void SyncState::StartBatch(const std::string& batch_id) {
   std::lock_guard<::util::fb2::Mutex> lk(mu_);
-  // 批次启动：不预置（MarkStockComplete 时记 batch_id）
-  (void)batch_id;
+  batch_id_ = batch_id;
+}
+
+std::string SyncState::GetActiveBatch() const {
+  std::lock_guard<::util::fb2::Mutex> lk(mu_);
+  return batch_id_;
 }
 
 bool SyncState::IsCompletedInBatch(const std::string& stock, const std::string& data_type,

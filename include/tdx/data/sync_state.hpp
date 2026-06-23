@@ -37,6 +37,8 @@ class SyncState {
   // ---- Phase 4 股票级断点续传 ----
   // 启动批次（记录 batch_id，便于崩溃恢复查找）
   void StartBatch(const std::string& batch_id);
+  // 获取当前活跃批次 ID（空字符串 = 无活跃批次）
+  std::string GetActiveBatch() const;
   // 该股票在本批次是否已完成（崩溃恢复跳过）
   bool IsCompletedInBatch(const std::string& stock, const std::string& data_type,
                           const std::string& batch_id) const;
@@ -51,8 +53,9 @@ class SyncState {
 
  private:
   std::string path_;
-  mutable ::util::fb2::Mutex mu_;  // 保护 state_（多 fiber 并发写）
+  mutable ::util::fb2::Mutex mu_;  // 保护 state_+batch_id_（多 fiber 并发写）
   std::map<std::string, std::map<std::string, SyncEntry>> state_;
+  std::string batch_id_;           // 当前活跃批次 ID
 };
 
 }  // namespace tdx::data

@@ -9,6 +9,20 @@
 #include <duckdb.hpp>
 
 namespace tdx::query {
+namespace {
+
+// 转义 SQL 字符串中的单引号（标准 SQL：'' → 转义后的单引号）
+std::string EscapeSql(std::string_view s) {
+  std::string out;
+  out.reserve(s.size() + 4);
+  for (char ch : s) {
+    if (ch == '\'') out += "''";
+    else out += ch;
+  }
+  return out;
+}
+
+}  // namespace
 
 struct DuckDBQuery::Impl {
   duckdb::DuckDB db;
@@ -31,7 +45,7 @@ void DuckDBQuery::WriteKlineParquet(std::string_view path, const std::vector<KLi
     char sql[512];
     std::snprintf(sql, sizeof(sql),
                   "INSERT INTO bars VALUES ('%s', %lld, %f, %f, %f, %f, %f, %f)",
-                  c.c_str(), static_cast<long long>(b.datetime),
+                  EscapeSql(c).c_str(), static_cast<long long>(b.datetime),
                   b.open, b.high, b.low, b.close, b.volume, b.amount);
     impl_->con.Query(sql);
   }
@@ -60,17 +74,16 @@ std::vector<KLine> DuckDBQuery::ReadKlineParquet(std::string_view path) {
 
 void DuckDBQuery::SetLatestQuote(std::string_view code, double price, int64_t ts) {
   std::string c(code);
-  // DuckDB 1.1.3 不支持 INSERT OR REPLACE，改 DELETE + INSERT
-  impl_->con.Query("DELETE FROM latest WHERE code = '" + c + "'");
+  impl_->con.Query("DELETE FROM latest WHERE code = '" + EscapeSql(c) + "'");
   char sql[256];
   std::snprintf(sql, sizeof(sql), "INSERT INTO latest VALUES ('%s', %f, %lld)",
-                c.c_str(), price, static_cast<long long>(ts));
+                EscapeSql(c).c_str(), price, static_cast<long long>(ts));
   impl_->con.Query(sql);
 }
 
 double DuckDBQuery::GetLatestQuote(std::string_view code) {
   std::string c(code);
-  auto result = impl_->con.Query("SELECT price FROM latest WHERE code = '" + c + "'");
+  auto result = impl_->con.Query("SELECT price FROM latest WHERE code = '" + EscapeSql(c) + "'");
   if (!result || result->HasError() || result->RowCount() == 0) return 0.0;
   return result->GetValue<double>(0, 0);
 }

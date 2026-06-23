@@ -34,24 +34,78 @@ function(tdx_test_query name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-tdx_test(test_codec)
-tdx_test(test_frame)
-tdx_test(test_util)
-tdx_test(test_parsers)
-tdx_test(test_vipdoc_reader)
-tdx_test(test_golden)
-tdx_test(test_sp_codec)
-tdx_test(test_json)
-tdx_test(test_phase2)
+# 精细链接：仅链接所需子 target，避免冗余 fibers2 依赖
+add_executable(test_codec test_codec.cpp)
+target_include_directories(test_codec PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_codec PRIVATE tdx_proto_core gtest gtest_main)
+add_test(NAME test_codec COMMAND test_codec)
+
+add_executable(test_frame test_frame.cpp)
+target_include_directories(test_frame PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_frame PRIVATE tdx_proto_core gtest gtest_main)
+add_test(NAME test_frame COMMAND test_frame)
+
+add_executable(test_util test_util.cpp)
+target_include_directories(test_util PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_util PRIVATE tdx_util gtest gtest_main)
+add_test(NAME test_util COMMAND test_util)
+
+# 需要 parsers 的测试：core + parsers
+add_executable(test_parsers test_parsers.cpp)
+target_include_directories(test_parsers PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_parsers PRIVATE tdx_proto_parsers tdx_proto_core gtest gtest_main)
+add_test(NAME test_parsers COMMAND test_parsers)
+
+add_executable(test_sp_codec test_sp_codec.cpp)
+target_include_directories(test_sp_codec PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_sp_codec PRIVATE tdx_proto_parsers tdx_proto_core gtest gtest_main)
+add_test(NAME test_sp_codec COMMAND test_sp_codec)
+
+add_executable(test_json test_json.cpp)
+target_include_directories(test_json PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_json PRIVATE tdx_proto_parsers tdx_proto_core gtest gtest_main)
+add_test(NAME test_json COMMAND test_json)
+
+add_executable(test_phase2 test_phase2.cpp)
+target_include_directories(test_phase2 PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_phase2 PRIVATE tdx_proto_parsers tdx_proto_core gtest gtest_main)
+add_test(NAME test_phase2 COMMAND test_phase2)
+
+# 需要 local reader 的测试：core + local
+add_executable(test_vipdoc_reader test_vipdoc_reader.cpp)
+target_include_directories(test_vipdoc_reader PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_vipdoc_reader PRIVATE tdx_proto_local tdx_proto_core gtest gtest_main)
+add_test(NAME test_vipdoc_reader COMMAND test_vipdoc_reader)
+
+add_executable(test_golden test_golden.cpp)
+target_include_directories(test_golden PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_golden PRIVATE tdx_proto_local tdx_proto_parsers tdx_proto_core gtest gtest_main)
+add_test(NAME test_golden COMMAND test_golden)
+
+# 数据层测试
 tdx_test_data(test_phase3)
 # test_sync4 用 custom main（MainInitGuard，SyncState fb2::Mutex 需 helio init）
 add_executable(test_sync4 test_sync4.cpp)
 target_include_directories(test_sync4 PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(test_sync4 PRIVATE tdx_data base gtest)
+target_link_libraries(test_sync4 PRIVATE tdx_data base fibers2 gtest)
 add_test(NAME test_sync4 COMMAND test_sync4)
 tdx_test_query(test_duckdb)
-tdx_test_helio(test_retry)
-tdx_test_helio(test_server_pool)
+# 需要 transport 的测试：core + transport + fibers2（含 ProactorPool 编排）
+add_executable(test_retry test_retry.cpp)
+target_include_directories(test_retry PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_retry PRIVATE tdx_proto_transport tdx_proto_core base fibers2 gtest)
+add_test(NAME test_retry COMMAND test_retry)
+
+add_executable(test_server_pool test_server_pool.cpp)
+target_include_directories(test_server_pool PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_server_pool PRIVATE tdx_proto_transport tdx_proto_core base fibers2 gtest)
+add_test(NAME test_server_pool COMMAND test_server_pool)
+
+# 端到端集成测试（真网通达信服务器 7709）：custom main + ProactorPool
+add_executable(test_e2e test_e2e.cpp)
+target_include_directories(test_e2e PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_e2e PRIVATE tdx_quotes tdx_query tdx_data base fibers2 gtest)
+add_test(NAME test_e2e COMMAND test_e2e)
 
 # golden 测试需 fixtures 路径
 target_compile_definitions(test_golden PRIVATE

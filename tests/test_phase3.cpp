@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <fstream>
 
 #include "tdx/data/adjust.hpp"
 #include "tdx/data/calendar.hpp"
@@ -22,6 +23,26 @@ class CalendarTest : public ::testing::Test {
   void SetUp() override { cal.LoadHolidays(std::string(CFG_DIR) + "/holidays.json"); }
   Calendar cal;
 };
+
+// 缺失文件不崩溃，降级为「仅周末非交易日」
+TEST(Calendar, MissingHolidaysFile) {
+  Calendar cal("/tmp/tdx_test_no_such_holidays.json");
+  EXPECT_TRUE(cal.IsTradingDay(2024, 1, 2));   // 周二（无 json 仅周末判断）
+  EXPECT_FALSE(cal.IsTradingDay(2024, 1, 6));  // 周六
+}
+
+TEST(Calendar, CorruptedHolidaysFile) {
+  // 写入损坏 JSON → LoadHolidays 静默降级
+  {
+    std::ofstream f("/tmp/tdx_test_corrupt_holidays.json");
+    f << "{{{bad json";
+  }
+  Calendar cal("/tmp/tdx_test_corrupt_holidays.json");
+  EXPECT_TRUE(cal.IsTradingDay(2024, 1, 2));  // 降级后仅周末判断
+  // 元旦本应是假日，但 json 损坏 → 按非假日处理
+  EXPECT_TRUE(cal.IsTradingDay(2024, 1, 1));
+  std::remove("/tmp/tdx_test_corrupt_holidays.json");
+}
 
 TEST_F(CalendarTest, WeekendNotTrading) {
   EXPECT_FALSE(cal.IsTradingDay(2024, 1, 6));   // 周六
@@ -70,7 +91,8 @@ TEST(Adjust, ComputeFactorQfq) {
 }
 
 TEST(Adjust, ApplyAdjustQfq) {
-  // qfq 末尾归一：最新事件后因子=1（基准）。事件前无事件覆盖的 K 线 backward-asof 无匹配（因子默认 1）。
+  // qfq 末尾归一：最新事件后因子=1（基准），事件前无匹配默认因子=1。
+  // 单事件归一后 factor=1.0，所有 K 线价格不变。
   std::vector<XdxrEvent> events = {{"2024-06-15", 0.0, 0.0, 1.0, 0.0, 1, "除权除息"}};
   std::vector<KLine> kline;
   for (int d = 13; d <= 17; ++d) {
@@ -83,10 +105,41 @@ TEST(Adjust, ApplyAdjustQfq) {
   ASSERT_GE(factors.size(), 1u);
   EXPECT_NEAR(factors[0].factor, 10.0 / 11.0, 0.001);  // 累计因子（未归一）
   ApplyAdjust(kline, factors, AdjustType::Qfq);
-  // 验证不崩溃 + 所有 K 线价格合理（>0）
+  // qfq 归一化后唯一因子为 1.0，所有 K 线价格保持 10.0（因子=1）
   for (const auto& k : kline) {
-    EXPECT_GT(k.close, 0.0);
-    EXPECT_GT(k.open, 0.0);
+    EXPECT_DOUBLE_EQ(k.open, 10.0);
+    EXPECT_DOUBLE_EQ(k.close, 10.0);
+    EXPECT_DOUBLE_EQ(k.high, 10.0);
+    EXPECT_DOUBLE_EQ(k.low, 10.0);
+  }
+}
+
+TEST(Adjust, ApplyAdjustHfq) {
+  // hfq（后复权）：event_factor=denominator/numerator=11/10=1.1，无归一化。
+  // forward-asof：事件前 K 线乘因子=1.1(→11.0)，事件后因子默认=1.0(→10.0)。
+  std::vector<XdxrEvent> events = {{"2024-06-15", 0.0, 0.0, 1.0, 0.0, 1, "除权除息"}};
+  std::vector<KLine> kline;
+  for (int d = 13; d <= 17; ++d) {
+    KLine k;
+    k.datetime = util::date_to_epoch(2024, 6, d);
+    k.open = k.high = k.low = k.close = 10.0;
+    kline.push_back(k);
+  }
+  auto factors = ComputeFactorFromXdxr(events, kline, AdjustType::Hfq);
+  ASSERT_GE(factors.size(), 1u);
+  EXPECT_NEAR(factors[0].factor, 11.0 / 10.0, 0.001);  // hfq 因子 = 1.1
+
+  ApplyAdjust(kline, factors, AdjustType::Hfq);
+  // 6/13-15(事件日及之前): 10.0 * 1.1 = 11.0
+  // forward-asof: date >= kdate → 事件日当天也匹配因子
+  for (int i = 0; i <= 2; ++i) {  // 6/13, 6/14, 6/15
+    EXPECT_DOUBLE_EQ(kline[i].open, 11.0);
+    EXPECT_DOUBLE_EQ(kline[i].close, 11.0);
+  }
+  // 6/16-17(事件日后): forward-asof 无匹配 → 默认因子 1.0
+  for (int i = 3; i < 5; ++i) {
+    EXPECT_DOUBLE_EQ(kline[i].open, 10.0);
+    EXPECT_DOUBLE_EQ(kline[i].close, 10.0);
   }
 }
 
@@ -110,6 +163,30 @@ TEST(Resampler, BarEndTimeAShareAfternoon) {
   auto c = util::epoch_to_cst(BarEndTimeAShare(e1305, 15));
   EXPECT_EQ(c.hour, 13);
   EXPECT_EQ(c.minute, 15);  // 13:05 15m → 13:15
+}
+
+TEST(Resampler, BarEndTimeAShareLunchBoundary) {
+  // 11:25 的 5m bar → 11:30（午休前最后一根）
+  int64_t e1125 = util::cst_to_epoch(2024, 6, 15, 11, 25);
+  auto c = util::epoch_to_cst(BarEndTimeAShare(e1125, 5));
+  EXPECT_EQ(c.hour, 11);
+  EXPECT_EQ(c.minute, 30);
+}
+
+TEST(Resampler, BarEndTimeAShareCloseBoundary) {
+  // 14:55 的 5m bar → 15:00（收盘前最后一根）
+  int64_t e1455 = util::cst_to_epoch(2024, 6, 15, 14, 55);
+  auto c = util::epoch_to_cst(BarEndTimeAShare(e1455, 5));
+  EXPECT_EQ(c.hour, 15);
+  EXPECT_EQ(c.minute, 0);
+}
+
+TEST(Resampler, BarEndTimeAShareAfternoon30m) {
+  // 13:00 30m bar → 13:30
+  int64_t e1300 = util::cst_to_epoch(2024, 6, 15, 13, 0);
+  auto c = util::epoch_to_cst(BarEndTimeAShare(e1300, 30));
+  EXPECT_EQ(c.hour, 13);
+  EXPECT_EQ(c.minute, 30);
 }
 
 TEST(Resampler, Resample5mTo15m) {

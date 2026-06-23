@@ -3,7 +3,7 @@
 # 异步 IO 采用 helio（io_uring + fiber），逐字移植 opentdx 协议层。
 cmake_minimum_required(VERSION 3.16)
 
-project(tdx-cpp VERSION 0.4.0 LANGUAGES C CXX)
+project(tdx-cpp VERSION 0.5.0 LANGUAGES C CXX)
 
 # ---- C++ 标准（helio 要求 C++17）----
 set(CMAKE_CXX_STANDARD 17)
@@ -55,7 +55,98 @@ set(LEGACY_GLOG OFF CACHE BOOL "使用 absl log 而非 legacy glog")
 set(BUILD_DOCS OFF CACHE BOOL "" FORCE)
 
 include_directories(${HELIO_PATH})
+
+# ---- 第三方依赖预注入（在 add_subdirectory(helio) 之前，FetchContent 先声明优先）----
+Include(FetchContent)
+# googletest：预置 tarball 到构建目录，helio 的 file(DOWNLOAD) 检测到已存在则跳过。
+set(GTEST_VERSION "1.17.0")
+set(GTEST_STAGED "${CMAKE_SOURCE_DIR}/external/googletest/googletest-${GTEST_VERSION}.tar.gz")
+if(EXISTS "${GTEST_STAGED}")
+  file(COPY "${GTEST_STAGED}" DESTINATION "${CMAKE_BINARY_DIR}")
+  message(STATUS "tdx-cpp: 使用本地 googletest → external/googletest/")
+endif()
+
+# benchmark：FetchContent 先声明（ghfast.top 镜像），覆盖 helio 内的 github URL。
+if(EXISTS "${CMAKE_SOURCE_DIR}/external/benchmark/v1.9.5.tar.gz")
+  FetchContent_Declare(
+    benchmark
+    URL file://${CMAKE_SOURCE_DIR}/external/benchmark/v1.9.5.tar.gz
+  )
+  message(STATUS "tdx-cpp: 使用本地 benchmark → external/benchmark/")
+else()
+  FetchContent_Declare(
+    benchmark
+    URL https://ghfast.top/https://github.com/google/benchmark/archive/v1.9.5.tar.gz
+  )
+endif()
+
+# abseil-cpp：FetchContent 先声明（本地/ghfast.top 镜像），复制 helio 的 patch 命令。
+if(EXISTS "${CMAKE_SOURCE_DIR}/external/abseil/abseil-cpp-20250512.1.tar.gz")
+  set(_ABSL_URL "file://${CMAKE_SOURCE_DIR}/external/abseil/abseil-cpp-20250512.1.tar.gz")
+else()
+  set(_ABSL_URL "https://ghfast.top/https://github.com/abseil/abseil-cpp/releases/download/20250512.1/abseil-cpp-20250512.1.tar.gz")
+endif()
+FetchContent_Declare(
+  abseil_cpp
+  URL ${_ABSL_URL}
+  PATCH_COMMAND patch -p1 < "${HELIO_PATH}/patches/abseil-20250512.1.patch"
+  COMMAND patch -p1 < "${HELIO_PATH}/patches/abseil-gcc-undefined-sanitizer-compilation-fix.patch"
+)
+message(STATUS "tdx-cpp: 使用 abseil-cpp mirror/git → ${_ABSL_URL}")
+
 add_subdirectory(${HELIO_PATH} ${CMAKE_BINARY_DIR}/helio)
+
+# gcs_demo 需要 GCP，但 tdx-cpp 用 WITH_GCP=OFF。将其排除出默认构建。
+if(TARGET gcs_demo AND NOT WITH_GCP)
+  set_target_properties(gcs_demo PROPERTIES EXCLUDE_FROM_ALL TRUE)
+  message(STATUS "tdx-cpp: 已排除 gcs_demo（WITH_GCP=OFF）")
+endif()
+
+# ---- ExternalProject 依赖预置（构建期跳过网络下载，全部走 external/ 本地 tarball）----
+# helio 的 add_third_party() 使用 ExternalProject_Add，下载目录为
+# ${CMAKE_BINARY_DIR}/helio/third_party/<name>/。文件名由 URL 最后路径段决定。
+# 在 configure 阶段将预下载的 tarball 复制到对应位置，ExternalProject 检测到
+# 文件存在则跳过 download 步骤。
+set(_EP_DL_BASE "${CMAKE_BINARY_DIR}/helio/third_party")
+set(_EXT "${CMAKE_SOURCE_DIR}/external")
+
+# gperf: gperftools-2.18.1.tar.gz
+if(EXISTS "${_EXT}/gperf/gperftools-2.18.1.tar.gz")
+  file(COPY "${_EXT}/gperf/gperftools-2.18.1.tar.gz" DESTINATION "${_EP_DL_BASE}/gperf")
+  message(STATUS "tdx-cpp: 预置 gperf → external/gperf/")
+endif()
+
+# xxhash: v0.8.3.tar.gz
+if(EXISTS "${_EXT}/xxhash/v0.8.3.tar.gz")
+  file(COPY "${_EXT}/xxhash/v0.8.3.tar.gz" DESTINATION "${_EP_DL_BASE}/xxhash")
+  message(STATUS "tdx-cpp: 预置 xxhash → external/xxhash/")
+endif()
+
+# uring (liburing): liburing-2.13.tar.gz
+if(EXISTS "${_EXT}/uring/liburing-2.13.tar.gz")
+  file(COPY "${_EXT}/uring/liburing-2.13.tar.gz" DESTINATION "${_EP_DL_BASE}/uring")
+  message(STATUS "tdx-cpp: 预置 liburing → external/uring/")
+endif()
+
+# pugixml: v1.15.tar.gz
+if(EXISTS "${_EXT}/pugixml/v1.15.tar.gz")
+  file(COPY "${_EXT}/pugixml/v1.15.tar.gz" DESTINATION "${_EP_DL_BASE}/pugixml")
+  message(STATUS "tdx-cpp: 预置 pugixml → external/pugixml/")
+endif()
+
+# c-ares: codeload URL 最后路径段为 v1.34.5
+if(EXISTS "${_EXT}/cares/c-ares-1.34.5.tar.gz")
+  file(COPY "${_EXT}/cares/c-ares-1.34.5.tar.gz" DESTINATION "${_EP_DL_BASE}/cares")
+  # ExternalProject 期望的文件名是 v1.34.5（codeload URL 的最后一段）
+  file(RENAME "${_EP_DL_BASE}/cares/c-ares-1.34.5.tar.gz" "${_EP_DL_BASE}/cares/v1.34.5")
+  message(STATUS "tdx-cpp: 预置 c-ares → external/cares/")
+endif()
+
+# zstd: zstd-1.5.7.tar.zst
+if(EXISTS "${_EXT}/zstd/zstd-1.5.7.tar.zst")
+  file(COPY "${_EXT}/zstd/zstd-1.5.7.tar.zst" DESTINATION "${_EP_DL_BASE}/zstd")
+  message(STATUS "tdx-cpp: 预置 zstd → external/zstd/")
+endif()
 
 # helio 暴露的 target（来自 agent 调研）：
 #   base        —— 日志/flags/hash 等无协程底层

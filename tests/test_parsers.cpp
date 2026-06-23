@@ -207,3 +207,66 @@ TEST(Serialize, LoginHeartbeat) {
   auto hb = serialize_heartbeat();
   EXPECT_TRUE(hb.empty());
 }
+
+// ---------- 错误路径：空/截断数据 ----------
+TEST(KlineParser, EmptyData) {
+  std::vector<uint8_t> empty;
+  auto bars = deserialize_kline(empty.data(), 0, Period::DAILY);
+  EXPECT_TRUE(bars.empty());
+}
+
+TEST(KlineParser, TruncatedHeader) {
+  uint8_t d[] = {0x01};  // count=1 但无后续数据
+  auto bars = deserialize_kline(d, 1, Period::DAILY);
+  EXPECT_TRUE(bars.empty());
+}
+
+TEST(KlineParser, TruncatedBody) {
+  std::vector<uint8_t> d;
+  pu16(d, 1);           // count=1
+  pu32(d, 20240101);     // date
+  // 缺 OHLC → pos 越界 break，bar vector 为空
+  auto bars = deserialize_kline(d.data(), d.size(), Period::DAILY);
+  EXPECT_TRUE(bars.empty());
+}
+
+TEST(TickParser, EmptyData) {
+  auto ticks = deserialize_tick(nullptr, 0);
+  EXPECT_TRUE(ticks.empty());
+}
+
+TEST(TickParser, Truncated) {
+  uint8_t d[] = {0x01};  // 仅 1 字节，len < 4 → 返回空
+  auto ticks = deserialize_tick(d, 1);
+  EXPECT_TRUE(ticks.empty());
+}
+
+TEST(TransactionParser, EmptyData) {
+  auto txns = deserialize_transaction(nullptr, 0);
+  EXPECT_TRUE(txns.empty());
+}
+
+TEST(TransactionParser, Truncated) {
+  uint8_t d[] = {0x01, 0x00};  // count=1, 但无字段
+  auto txns = deserialize_transaction(d, 2);
+  EXPECT_TRUE(txns.empty());
+}
+
+TEST(ListParser, EmptyData) {
+  auto stocks = deserialize_list(nullptr, 0);
+  EXPECT_TRUE(stocks.empty());
+}
+
+TEST(CountParser, EmptyData) {
+  EXPECT_EQ(deserialize_count(nullptr, 0), 0);
+}
+
+TEST(Serialize, CodeTruncation) {
+  // code 超 6 字节 → push_code6 截断前 6 字节
+  auto body = serialize_kline(Market::SH, "6000001234", Period::DAILY, 1, 0, 100, Adjust::NONE);
+  EXPECT_EQ(body.size(), 26u);
+  // 验证 code 位置仅含前 6 字节 '600000'（offset 2-7），period 在 offset 8
+  EXPECT_EQ(body[2], '6');
+  EXPECT_EQ(body[7], '0');  // code[5]
+  EXPECT_EQ(body[8], 0x04); // period DAILY=4
+}

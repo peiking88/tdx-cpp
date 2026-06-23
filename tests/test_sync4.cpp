@@ -2,7 +2,13 @@
 // custom main（MainInitGuard）：SyncState 用 fb2::Mutex，需 helio 初始化。
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <fstream>
+#include <memory>
+
 #include "base/init.h"
+#include "util/fibers/fibers.h"
+#include "util/fibers/pool.h"
 
 #include "tdx/data/sync_state.hpp"
 
@@ -13,6 +19,7 @@ TEST(SyncState4, BatchCompleteAndResume) {
   ss.Clear();
   ss.Load();
   ss.StartBatch("batch1");
+  EXPECT_EQ(ss.GetActiveBatch(), "batch1");  // StartBatch 记录批次 ID
   // 600000 完成，000001 未完成
   ss.MarkStockComplete("600000", "history_kline", "batch1");
   EXPECT_TRUE(ss.IsCompletedInBatch("600000", "history_kline", "batch1"));
@@ -35,6 +42,62 @@ TEST(SyncState4, MarkFailedThenComplete) {
   // 成功覆盖
   ss.MarkStockComplete("000001", "history_kline", "batch1");
   EXPECT_TRUE(ss.IsCompletedInBatch("000001", "history_kline", "batch1"));
+  ss.Clear();
+}
+
+TEST(SyncState4, FiberConcurrentWrite) {
+  // 2 fibers 同时写不同 stock → 验证无 data race / 无状态丢失
+  auto pp = std::unique_ptr<util::ProactorPool>(util::fb2::Pool::Epoll());
+  pp->Run();
+
+  std::string path = "/tmp/tdx_test_sync4_concurrent.json";
+  SyncState ss(path);
+  ss.Clear();
+  ss.StartBatch("batch_concurrent");
+
+  pp->GetNextProactor()->Await([&] {
+    util::fb2::Done done_a, done_b;
+    // Fiber A: 写 600000-600004
+    util::fb2::Fiber("write_a", [&ss, &done_a] {
+      for (int i = 0; i < 5; ++i) {
+        ss.MarkStockComplete("60000" + std::to_string(i), "history_kline", "batch_concurrent");
+      }
+      done_a.Notify();
+    }).Detach();
+    // Fiber B: 写 000005-000009
+    util::fb2::Fiber("write_b", [&ss, &done_b] {
+      for (int i = 0; i < 5; ++i) {
+        ss.MarkStockFailed("00000" + std::to_string(5 + i), "history_kline",
+                           "batch_concurrent", "err");
+      }
+      done_b.Notify();
+    }).Detach();
+
+    done_a.WaitFor(std::chrono::seconds(5));
+    done_b.WaitFor(std::chrono::seconds(5));
+  });
+
+  // 验证：新实例 Load → 全部 10 只股票状态存在
+  SyncState ss2(path);
+  ss2.Load();
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_TRUE(ss2.IsCompletedInBatch("60000" + std::to_string(i), "history_kline",
+                                       "batch_concurrent"));
+    EXPECT_FALSE(ss2.IsCompletedInBatch("00000" + std::to_string(5 + i), "history_kline",
+                                        "batch_concurrent"));
+  }
+  ss2.Clear();
+}
+
+TEST(SyncState4, CorruptedJson) {
+  // 写入损坏 JSON → Load 应静默降级（不崩溃，状态为空）
+  {
+    std::ofstream f("/tmp/tdx_test_sync4_corrupt.json");
+    f << "this is not valid json {{{[[[";
+  }
+  SyncState ss("/tmp/tdx_test_sync4_corrupt.json");
+  ss.Load();
+  EXPECT_EQ(ss.GetLastSync("600000", "history_kline"), "");
   ss.Clear();
 }
 
