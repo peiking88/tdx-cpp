@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**当前为初始化阶段（空目录）。** 本文件基于对三个上游 Python 参考实现的代码分析编写，作为 C++ 实现的设计蓝图与协议知识库。带「建议」标记的部分是尚未落地、待首次实现时确认的方案；协议/格式相关的硬知识则直接源自上游源码，可在 C++ 移植时逐字对照。
+**Phase 1-4 核心完成（v0.4.0）。** 协议层 + A股标准行情（Phase 1, v0.1.0）+ 扩展行情/SP/MAC（Phase 2, v0.2.0）+ 数据管理核心 Calendar/Adjust/Resampler/SyncState/TdxData（Phase 3, v0.3.0）+ v2 改进 external/ 统一/DuckDB/断点续传（Phase 4, v0.4.0）。本文件作为 C++ 实现的设计蓝图与协议知识库。
 
 ## 项目目标
 
@@ -68,17 +68,17 @@ C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser
 
 1. **并发批量下载**：tdxdata 全市场抓取是纯串行（`tdxdata/sources/base.py:184`）。v2 用 helio fiber 池 + 全局规范要求的 `-n` 参数解决。
 2. **断点续传**：上游只到「天」不到「股票」（`tdxdata/sync.py:91`）。v2 实现股票级进度持久化。
-3. **存储后端**：tdxdata 存储全是桩（`tdxdata/storage/dataframe.py:9`）。v2 采用 **dragonfly 热缓存 + Parquet 冷存储分层**——注意 dragonfly 是纯内存存储（Redis 兼容），不适合独立做磁盘落盘，**该分层方案待用户最终确认**。
+3. **存储后端**：tdxdata 存储全是桩（`tdxdata/storage/dataframe.py:9`）。v2 采用 **DuckDB 嵌入式 SQL 引擎**（进程内，零外部服务）——内置 Parquet 读写（COPY TO / SELECT FROM）+ 即席 SQL 查询 + 内存热表（最新报价/订阅状态），**无 Arrow 依赖**。第三方依赖统一收纳 `external/`（helio symlink + duckdb vendored）。
 
 ## 技术栈与目录结构（架构评审已确认，见 `.claude/PRPs/prds/tdx-cpp.prd.md`）
 
 - **构建**：CMake + Ninja（两者均已安装）。**C++ 标准定为 C++17**。
 - **版本号**：写在 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`，遵循全局规范的打 tag 规则（不加 `v` 前缀）。
-- **异步 IO**：**helio**（`~/framework/dragonfly/helio`，io_uring+epoll+自研 fiber 协程，C++17）。`AddPeriodic` 做 15s 心跳、`MakeFiber` 做并发测速、`FiberSocketBase` 做 TCP。参考 `helio/examples/echo_server.cc` 的 `Driver`/`TLocalClient`。**纪律：禁用 `std::mutex`/`std::thread::sleep_for`，须用 `util::fb2::Mutex`/`ThisFiber::SleepFor`**，否则整个 Proactor 线程卡死。无 install target，须 `add_subdirectory(third_party/helio)` 内嵌；需系统 Boost(context+system)，其余依赖(abseil/glog/liburing 等)自动拉。
+- **异步 IO**：**helio**（`external/helio` symlink → `~/framework/dragonfly/helio`，io_uring+epoll+自研 fiber 协程，C++17）。`AddPeriodic` 做 15s 心跳、`MakeFiber` 做并发测速、`FiberSocketBase` 做 TCP。参考 `helio/examples/echo_server.cc` 的 `Driver`/`TLocalClient`。**纪律：禁用 `std::mutex`/`std::thread::sleep_for`，须用 `util::fb2::Mutex`/`ThisFiber::SleepFor`**，否则整个 Proactor 线程卡死。无 install target，须 `add_subdirectory(external/helio)` 内嵌；需系统 Boost(context+system)，其余依赖(abseil/glog/liburing 等)自动拉。
 - **GBK 转码**：系统 iconv。
 - **压缩**：zlib（协议必需）。
 - **测试**：GoogleTest + CTest，live 测试间加延迟退避避免限流。
-- **v2 存储**：dragonfly 热缓存（RESP，纯内存）+ Parquet/Arrow 冷存储分层（待最终确认）。
+- **v2 存储**：**DuckDB 嵌入式**（Parquet 读写 COPY TO/SELECT FROM + SQL 查询 + 内存热表，**无 Arrow**），vendored `external/duckdb`（libduckdb.so + duckdb.hpp，镜像下载，CMake IMPORTED target）。
 - **目录结构**（遵循全局规范）：
   ```
   docs/   API 文档、协议说明、PRD
