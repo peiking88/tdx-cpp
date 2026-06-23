@@ -13,12 +13,13 @@ std::vector<KLine> TdxData::FetchHistory(const std::vector<std::string>& codes,
                                          const std::string& start,
                                          const std::string& end,
                                          const std::string& period,
-                                         const std::string& dividend) {
+                                         const std::string& dividend,
+                                         const std::string& batch_id,
+                                         const std::string& parquet_dir) {
   (void)start;
   (void)end;
-  (void)dividend;  // TODO: 复权需 xdxr 事件流（StdQuotes.Xdxr 未实现），v1 暂忽略
+  (void)dividend;  // TODO: 复权需 xdxr 事件流，v1 暂忽略
 
-  // period 字符串 → Period 枚举
   tdx::Period p = tdx::Period::DAILY;
   if (period == "5m") p = tdx::Period::MIN_5;
   else if (period == "1m") p = tdx::Period::MIN_1;
@@ -28,8 +29,23 @@ std::vector<KLine> TdxData::FetchHistory(const std::vector<std::string>& codes,
 
   std::vector<KLine> all;
   for (const auto& code : codes) {
+    // T4 断点续传：batch_id 非空且已完成 → 跳过（--resume 崩溃恢复）
+    if (!batch_id.empty() && sync_.IsCompletedInBatch(code, "history_kline", batch_id)) {
+      continue;
+    }
     auto bars = sq_.Bars(tdx::MarketFromCode(code), code, p, 0, tdx::kKlineMaxCount);
-    sync_.UpdateSync(code, "history_kline");  // 增量同步状态更新
+    // T4 标记完成（batch 模式 MarkStockComplete，否则 UpdateSync）
+    if (!batch_id.empty()) {
+      sync_.MarkStockComplete(code, "history_kline", batch_id);
+    } else {
+      sync_.UpdateSync(code, "history_kline");
+    }
+    // T5 DuckDB Parquet 落盘
+    if (!parquet_dir.empty() && !bars.empty()) {
+      query::DuckDBQuery dq;
+      std::string path = parquet_dir + "/" + code + "_" + period + ".parquet";
+      dq.WriteKlineParquet(path, bars, code);
+    }
     for (auto& b : bars) all.push_back(std::move(b));
   }
   return all;

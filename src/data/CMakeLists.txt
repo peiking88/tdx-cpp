@@ -8,4 +8,4 @@ add_library(tdx_data STATIC
     tdx_data.cpp
 )
 target_include_directories(tdx_data PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(tdx_data PUBLIC tdx_quotes)
+target_link_libraries(tdx_data PUBLIC tdx_quotes tdx_query)
