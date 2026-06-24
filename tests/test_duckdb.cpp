@@ -1,5 +1,5 @@
 // DuckDB 查询层测试：Parquet 读写 + 内存热表（无 Arrow）。
-// 注：vendored libduckdb.so 1.1.3 的 GetValue<double> 有精度截断问题（14.5→14），
+// 注：vendored libduckdb.so v1.5.2 的 GetValue<double> 仍有精度截断问题（14.5→14），
 //     故 double 用整数验证；datetime（int64）/RowCount 正常。精度问题后续调试。
 #include <gtest/gtest.h>
 
@@ -86,7 +86,7 @@ TEST(DuckDB, EmptyCode) {
 }
 
 // ---- 已知缺陷：DuckDB GetValue<double> 精度截断（xfail）----
-// vendored libduckdb.so 1.1.3 的 GetValue<double> 将 14.5 截断为 14（整数）。
+// vendored libduckdb.so v1.5.2 的 GetValue<double> 仍将 14.5 截断为 14（整数）（v1.1.3→v1.5.2 未修复）。
 // 升级 DuckDB 后若此测试通过，说明缺陷已修复；届时移除下方 GTEST_SKIP。
 TEST(DuckDB, DISABLED_PrecisionRegression) {
   DuckDBQuery q;
@@ -102,7 +102,7 @@ TEST(DuckDB, DISABLED_PrecisionRegression) {
   q.WriteKlineParquet(path, bars, "600000");
   auto read = q.ReadKlineParquet(path);
   ASSERT_EQ(read.size(), 1u);
-  // 已知缺陷：DuckDB 1.1.3 GetValue<double> 返回整数截断（14.5→14）
+  // 已知缺陷：DuckDB v1.5.2 GetValue<double> 返回整数截断（14.5→14）
   EXPECT_NEAR(read[0].open, 10.5, 0.001);
   EXPECT_NEAR(read[0].close, 14.5, 0.001);
   std::remove(path.c_str());

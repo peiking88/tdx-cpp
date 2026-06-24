@@ -1,11 +1,13 @@
 // DuckDB 嵌入式查询层。无 Arrow 依赖——Parquet 读写/SQL/内存热表全走 DuckDB。
-// 接口全用 string_view（跨 ABI 安全，因 vendored libduckdb.so 用旧 CXX11 ABI，
-// tdx_query 编译 -D_GLIBCXX_USE_CXX11_ABI=0，与消费者新 ABI 隔离）。
+// 接口全用 string_view（接口简洁 + 跨 ABI 安全）。vendored libduckdb.so v1.5.2
+// 用新 CXX11 ABI，tdx_query 编译 -D_GLIBCXX_USE_CXX11_ABI=1，与系统默认及消费者一致。
 #pragma once
 
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "tdx/types.hpp"
@@ -37,6 +39,8 @@ class DuckDBQuery {
   int64_t Exec(std::string_view sql);
 
   // === 批量导入支持 ===
+  // 配置 DuckDB 导入优化参数（SET threads/memory_limit 等）
+  void ConfigureForImport();
   // 确保 K 线表存在（code/datetime/open/high/low/close/volume/amount）
   void EnsureKlineTable(std::string_view table_name);
   // 批量插入 K 线（每 500 行一个 INSERT，含单引号转义）。
@@ -49,9 +53,19 @@ class DuckDBQuery {
   // 从表读取 K 线（按 datetime 升序）。
   std::vector<KLine> ReadKlines(std::string_view table, std::string_view code);
 
+  // 读取 import_state 全表，返回 "code|period" → last_datetime 映射（增量预载用）。
+  std::unordered_map<std::string, int64_t> LoadImportState();
+  // 读取 adjust 表已有的 distinct code 集合（复权增量跳过用）。
+  std::unordered_set<std::string> LoadAdjustCodes();
+
+  // 打开共享连接（新 Connection → 同一 DB）。多线程并发安全。
+  std::unique_ptr<DuckDBQuery> OpenSharedConnection() const;
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+  // 私有构造：从 Impl 构造（OpenSharedConnection 专用）
+  explicit DuckDBQuery(std::unique_ptr<Impl> p);
 };
 
 }  // namespace tdx::query

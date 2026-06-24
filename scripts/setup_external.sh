@@ -1,7 +1,7 @@
 #!/bin/bash
 # 初始化 external/ 目录（第三方依赖统一收纳，不入 git）。
 # helio：复制源码到 external/helio（排除 build/ .git，或 HELIO_SRC 环境变量）
-# duckdb：vendored libduckdb（镜像下载 v1.1.3）
+# duckdb：vendored libduckdb（镜像下载 v1.5.2）
 # googletest/benchmark/abseil：预下载 tarball 供 CMake 离线使用（ghfast.top 镜像）
 set -e
 cd "$(dirname "$0")/.."
@@ -18,8 +18,8 @@ fi
 # duckdb（如无 libduckdb.so 则下载）
 if [ ! -f external/duckdb/libduckdb.so ]; then
   mkdir -p external/duckdb
-  echo "下载 DuckDB libduckdb v1.1.3（镜像）..."
-  curl -sL -o /tmp/duckdb.zip "https://ghfast.top/https://github.com/duckdb/duckdb/releases/download/v1.1.3/libduckdb-linux-amd64.zip"
+  echo "下载 DuckDB libduckdb v1.5.2（镜像）..."
+  curl -sL -o /tmp/duckdb.zip "https://ghfast.top/https://github.com/duckdb/duckdb/releases/download/v1.5.2/libduckdb-linux-amd64.zip"
   (cd external/duckdb && unzip -oq /tmp/duckdb.zip)
   rm -f /tmp/duckdb.zip
   echo "external/duckdb 就绪"

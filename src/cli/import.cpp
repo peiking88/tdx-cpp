@@ -22,8 +22,11 @@
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "tdx/consts.hpp"
@@ -62,8 +65,8 @@ ImportConfig ParseArgs(int argc, char** argv, int jobs) {
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
     // 跳过 absl flag（absl 不自动从 argv 移除）
-    if (a == "--import_jobs") { ++i; continue; }
-    if (a.rfind("--import_jobs=", 0) == 0) continue;
+    if (a == "--jobs") { ++i; continue; }
+    if (a.rfind("--jobs=", 0) == 0) continue;
     if (a == "full") cfg.full = true;
     else if (a == "help") {
       std::cout << "用法: tdx import --jobs N [full] [codes...]\n\n"
@@ -111,115 +114,160 @@ std::vector<std::pair<Market, std::string>> ScanCodes(const std::string& tdx_roo
   return result;
 }
 
-// 导入单个代码的本地 K 线（线程安全：db 为线程独占，reader 只读共享）
-int64_t ImportCodeLocal(tdx::query::DuckDBQuery& db,
-                         tdx::proto::VipdocReader& reader,
-                         const std::string& code, Market market, bool full) {
-  int64_t imported = 0;
+// 方案 B：Reader 线程（文件 I/O + 重采样）→ Queue → Writer 线程（Appender 写入）。
+// Reader 线程零 DB 访问，Writer 独占 Connection + Appender，消除所有写竞态。
+
+struct TableEntry {
+  std::string table;
+  std::vector<KLine> bars;
+  bool replace = false;
+};
+
+struct WriteBatch {
+  std::string code;
+  std::vector<TableEntry> tables;
+  std::vector<std::string> state_rows;  // import_state INSERT 值
+};
+
+// 增量同步的 last_datetime 缓存：key = code|period。主线程预载后只读共享，reader 线程安全访问。
+using LastDtMap = std::unordered_map<std::string, int64_t>;
+
+// 读文件 + 重采样（无 DB 访问），返回 WriteBatch 供 writer 线程消费。
+// full=false（增量）时：主表（1d/1m/5m）只写 datetime > last_dt 的新 K 线；
+// 派生表（周/月/5m/15m/30m/60m）用完整原始序列重采样后全量 INSERT OR REPLACE（覆盖）。
+WriteBatch ReadAndResample(tdx::proto::VipdocReader& reader,
+                            const std::string& code, Market market, bool full,
+                            const LastDtMap& last_dt) {
+  WriteBatch batch;
+  batch.code = code;
+
+  auto MaxDt = [](const std::vector<KLine>& bars) -> int64_t {
+    int64_t md = 0;
+    for (const auto& b : bars) md = std::max(md, b.datetime);
+    return md;
+  };
+
+  auto AddState = [&](const std::string& period, int64_t dt) {
+    char s[384];
+    std::snprintf(s, sizeof(s), "('%s', '%s', %lld)", code.c_str(), period.c_str(),
+                  static_cast<long long>(dt));
+    batch.state_rows.emplace_back(s);
+  };
+
+  // 增量过滤：只保留 datetime > last_dt 的 K 线（full 模式不过滤）
+  auto FilterNew = [&](std::vector<KLine> bars, const std::string& period) {
+    if (full) return bars;
+    auto it = last_dt.find(code + "|" + period);
+    int64_t cut = (it != last_dt.end()) ? it->second : 0;
+    std::vector<KLine> out;
+    for (auto& b : bars)
+      if (b.datetime > cut) out.push_back(std::move(b));
+    return out;
+  };
 
   // ---- 日线 ----
   auto bars_1d = reader.ReadDay(market, code);
   if (!bars_1d.empty()) {
-    int64_t last_dt = full ? 0 : db.LastDatetime("kline_1d", code);
-    std::vector<KLine> new_bars;
-    for (const auto& b : bars_1d)
-      if (b.datetime > last_dt) new_bars.push_back(b);
-    if (!new_bars.empty()) {
-      db.InsertKlines("kline_1d", new_bars, code, /*replace=*/full);
-      imported += new_bars.size();
-
-      auto weekly = tdx::data::ResampleKline(bars_1d, tdx::data::Freq::Weekly);
-      auto monthly = tdx::data::ResampleKline(bars_1d, tdx::data::Freq::Monthly);
-      db.InsertKlines("kline_1w", weekly, code);
-      db.InsertKlines("kline_1mon", monthly, code);
-      imported += weekly.size() + monthly.size();
+    auto new_1d = FilterNew(bars_1d, "1d");
+    if (full || !new_1d.empty()) {
+      // 日线：全量全写；增量只写新数据（INSERT OR REPLACE 不覆盖旧行）
+      batch.tables.push_back({"kline_1d", full ? bars_1d : new_1d, full});
+      // 周/月：完整日线重采样，全量 INSERT OR REPLACE 覆盖（最新周期随新日线变化）
+      batch.tables.push_back({"kline_1w", tdx::data::ResampleKline(bars_1d, tdx::data::Freq::Weekly), false});
+      batch.tables.push_back({"kline_1mon", tdx::data::ResampleKline(bars_1d, tdx::data::Freq::Monthly), false});
+      AddState("1d", MaxDt(bars_1d));
     }
   }
 
   // ---- 1 分钟线 ----
   auto bars_1m = reader.ReadMin1(market, code);
   if (!bars_1m.empty()) {
-    int64_t last_dt = full ? 0 : db.LastDatetime("kline_1m", code);
-    std::vector<KLine> new_bars;
-    for (const auto& b : bars_1m)
-      if (b.datetime > last_dt) new_bars.push_back(b);
-    if (!new_bars.empty()) {
-      db.InsertKlines("kline_1m", new_bars, code, /*replace=*/full);
-      imported += new_bars.size();
-
-      auto m5 = tdx::data::ResampleKline(bars_1m, tdx::data::Freq::Min5);
-      auto m15 = tdx::data::ResampleKline(bars_1m, tdx::data::Freq::Min15);
-      auto m30 = tdx::data::ResampleKline(bars_1m, tdx::data::Freq::Min30);
-      auto h1 = tdx::data::ResampleKline(bars_1m, tdx::data::Freq::Hour1);
-      db.InsertKlines("kline_5m", m5, code);
-      db.InsertKlines("kline_15m", m15, code);
-      db.InsertKlines("kline_30m", m30, code);
-      db.InsertKlines("kline_60m", h1, code);
-      imported += m5.size() + m15.size() + m30.size() + h1.size();
+    auto new_1m = FilterNew(bars_1m, "1m");
+    if (full || !new_1m.empty()) {
+      batch.tables.push_back({"kline_1m", full ? bars_1m : new_1m, full});
+      batch.tables.push_back({"kline_5m", tdx::data::ResampleKline(bars_1m, tdx::data::Freq::Min5), false});
+      batch.tables.push_back({"kline_15m", tdx::data::ResampleKline(bars_1m, tdx::data::Freq::Min15), false});
+      batch.tables.push_back({"kline_30m", tdx::data::ResampleKline(bars_1m, tdx::data::Freq::Min30), false});
+      batch.tables.push_back({"kline_60m", tdx::data::ResampleKline(bars_1m, tdx::data::Freq::Hour1), false});
+      AddState("1m", MaxDt(bars_1m));
     }
-  }
-
-  // ---- 5 分钟线（原生，仅在 1m 不可用时）----
-  if (bars_1m.empty()) {
+  } else {
+    // 5 分钟线（原生，仅在 1m 不可用时）
     auto bars_5m = reader.ReadMin5(market, code);
     if (!bars_5m.empty()) {
-      int64_t last_dt = full ? 0 : db.LastDatetime("kline_5m", code);
-      std::vector<KLine> new_bars;
-      for (const auto& b : bars_5m)
-        if (b.datetime > last_dt) new_bars.push_back(b);
-      if (!new_bars.empty()) {
-        db.InsertKlines("kline_5m", new_bars, code, /*replace=*/full);
-        imported += new_bars.size();
-
-        auto m15 = tdx::data::ResampleKline(bars_5m, tdx::data::Freq::Min15);
-        auto m30 = tdx::data::ResampleKline(bars_5m, tdx::data::Freq::Min30);
-        auto h1 = tdx::data::ResampleKline(bars_5m, tdx::data::Freq::Hour1);
-        db.InsertKlines("kline_15m", m15, code);
-        db.InsertKlines("kline_30m", m30, code);
-        db.InsertKlines("kline_60m", h1, code);
-        imported += m15.size() + m30.size() + h1.size();
+      auto new_5m = FilterNew(bars_5m, "5m");
+      if (full || !new_5m.empty()) {
+        batch.tables.push_back({"kline_5m", full ? bars_5m : new_5m, full});
+        batch.tables.push_back({"kline_15m", tdx::data::ResampleKline(bars_5m, tdx::data::Freq::Min15), false});
+        batch.tables.push_back({"kline_30m", tdx::data::ResampleKline(bars_5m, tdx::data::Freq::Min30), false});
+        batch.tables.push_back({"kline_60m", tdx::data::ResampleKline(bars_5m, tdx::data::Freq::Hour1), false});
+        AddState("5m", MaxDt(bars_5m));
       }
     }
   }
 
-  // 更新 import_state
-  auto UpdateState = [&](const std::string& period, const std::vector<KLine>& bars) {
-    if (bars.empty()) return;
-    int64_t max_dt = 0;
-    for (const auto& b : bars) max_dt = std::max(max_dt, b.datetime);
-    char sql[384];
-    std::snprintf(sql, sizeof(sql),
-                  "INSERT OR REPLACE INTO import_state VALUES ('%s', '%s', %lld)",
-                  code.c_str(), period.c_str(), static_cast<long long>(max_dt));
-    db.Exec(sql);
-  };
-  UpdateState("1d", bars_1d);
-  UpdateState("1m", bars_1m);
-  if (bars_1m.empty()) UpdateState("5m", reader.ReadMin5(market, code));
-
-  return imported;
+  return batch;
 }
 
-// 并行导入本地数据：线程池分发，每线程独占一个 DuckDB 连接。
-// ponytail: 简单 atomic 分片，不用任务队列——文件 I/O 耗时远大于取号开销。
+// MPMC 任务队列：有界队列（max 256），reader 快于 writer 时背压节流
+struct TaskQueue {
+  static constexpr size_t kMaxQueue = 1024;
+  std::deque<WriteBatch> queue;
+  std::mutex mutex;
+  std::condition_variable cv;       // writer 等待项
+  std::condition_variable not_full; // reader 等待空间
+  bool closed = false;
+
+  void Push(WriteBatch&& b) {
+    {
+      std::unique_lock<std::mutex> lk(mutex);
+      not_full.wait(lk, [this] { return queue.size() < kMaxQueue || closed; });
+      if (closed) return;
+      queue.push_back(std::move(b));
+    }
+    cv.notify_one();
+  }
+
+  bool Pop(WriteBatch& b) {
+    std::unique_lock<std::mutex> lk(mutex);
+    cv.wait(lk, [this] { return !queue.empty() || closed; });
+    if (queue.empty()) return false;
+    b = std::move(queue.front());
+    queue.pop_front();
+    lk.unlock();
+    not_full.notify_one();  // 释放一个写者槽位，唤醒阻塞的 reader
+    return true;
+  }
+
+  void Close() {
+    {
+      std::lock_guard<std::mutex> lk(mutex);
+      closed = true;
+    }
+    cv.notify_all();
+    not_full.notify_all();  // 唤醒阻塞在 Push 的 reader，使其看到 closed=true 后退出
+  }
+};
+
 struct ImportStats {
   std::atomic<int64_t> total_bars{0};
   std::atomic<int> code_count{0};
   std::atomic<int> progress{0};
 };
 
-void ImportWorker(const std::vector<std::pair<Market, std::string>>& targets,
-                  const std::string& tdx_home, tdx::query::DuckDBQuery& db,
-                  std::mutex& db_mutex, bool full, ImportStats& stats,
+// Reader 线程：读 vipdoc → 重采样 → Push 到队列
+void ReaderWorker(const std::vector<std::pair<Market, std::string>>& targets,
+                  const std::string& tdx_home, bool full,
+                  const LastDtMap& last_dt,
+                  TaskQueue& queue, ImportStats& stats,
                   int start, int end) {
   tdx::proto::VipdocReader reader(tdx_home);
   for (int i = start; i < end; ++i) {
     const auto& [market, code] = targets[static_cast<size_t>(i)];
+    auto batch = ReadAndResample(reader, code, market, full, last_dt);
     int64_t n = 0;
-    {
-      std::lock_guard<std::mutex> lk(db_mutex);
-      n = ImportCodeLocal(db, reader, code, market, full);
-    }
+    for (const auto& te : batch.tables) n += te.bars.size();
+    queue.Push(std::move(batch));
     if (n > 0) {
       stats.total_bars.fetch_add(n, std::memory_order_relaxed);
       stats.code_count.fetch_add(1, std::memory_order_relaxed);
@@ -228,49 +276,111 @@ void ImportWorker(const std::vector<std::pair<Market, std::string>>& targets,
   }
 }
 
-// ponytail: 复权因子进度（串行，简单 printf）
-static void AdjProgress(int cur, int total, const std::string& code) {
-  int pct = total > 0 ? (cur * 100 / total) : 0;
-  std::cout << "\r[" << pct << "%] " << cur << "/" << total << "  " << code
-            << " (复权因子)                    " << std::flush;
-}
+// Writer 线程：从队列 Pop → Appender 写入 → 周期性 COMMIT
+void WriterThread(const std::string& db_path, TaskQueue& queue, int batch_commit) {
+  tdx::query::DuckDBQuery db(db_path);
+  int since_commit = 0;
 
-// 网络获取复权因子（增量：仅获取 adjust 表中不存在的 code）
-int ImportAdjustFactors(quotes::StdQuotes& sq,
-                         tdx::query::DuckDBQuery& db,
-                         const std::vector<std::pair<Market, std::string>>& targets,
-                         bool full) {
-  int total = 0;
-  for (size_t i = 0; i < targets.size(); ++i) {
-    const auto& [market, code] = targets[i];
-    AdjProgress(static_cast<int>(i), static_cast<int>(targets.size()), code);
-
-    // 增量：检查该 code 是否已有复权因子
-    if (!full) {
-      char check[256];
-      std::snprintf(check, sizeof(check),
-                    "SELECT COUNT(*) FROM adjust WHERE code = '%s'", code.c_str());
-      if (db.Exec(check) > 0) continue;  // 已有，跳过
-    }
-
+  WriteBatch batch;
+  while (queue.Pop(batch)) {
     try {
-      auto xdxr_list = sq.GetXdxr(market, code);
-      for (const auto& x : xdxr_list) {
-        char sql[600];
-        std::snprintf(sql, sizeof(sql),
-                      "INSERT OR REPLACE INTO adjust VALUES "
-                      "('%s', '%s', 1.0, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
-                      code.c_str(), x.date.c_str(),
-                      x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
-                      x.category, x.name.c_str());
-        db.Exec(sql);
-        ++total;
+      db.Exec("BEGIN TRANSACTION");
+      for (const auto& te : batch.tables) {
+        if (te.bars.empty()) continue;
+        db.InsertKlines(te.table, te.bars, batch.code, te.replace);
       }
+      for (const auto& r : batch.state_rows)
+        db.Exec("INSERT OR REPLACE INTO import_state VALUES " + r);
+      db.Exec("COMMIT");
     } catch (const std::exception& e) {
-      std::cerr << "\n  " << code << " 复权因子获取失败: " << e.what() << "\n";
+      db.Exec("ROLLBACK");
+      std::cerr << "\n  write error(" << batch.code << "): " << e.what() << "\n";
+    }
+    if (++since_commit >= batch_commit) {
+      // 周期性 WAL checkpoint（防 WAL 无限增长）
+      db.Exec("CHECKPOINT");
+      since_commit = 0;
     }
   }
-  return total;
+}
+
+// 复权因子：串行获取（单连接，无竞态；通达信 XDXR 限流严重，并行收益低于限流风险）。
+// 增量模式：per-code SELECT COUNT 已有则跳过（本地查询，远快于网络）。
+// 每个 code 后 sleep 50ms 防限流；连续 3 次错误退避 3 秒。
+int ImportAdjustFactors(const std::vector<std::pair<Market, std::string>>& targets,
+                         const std::string& db_path, bool full) {
+  tdx::query::DuckDBQuery db(db_path);
+  // 增量模式：预载 adjust 已有 code 集合（一次查询），per-code O(1) 查找跳过。
+  // 不能用 Exec(SELECT COUNT)——它返回 RowCount（COUNT 恒 1 行）而非 count 值。
+  std::unordered_set<std::string> existing;
+  if (!full) existing = db.LoadAdjustCodes();
+
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) {
+    std::cerr << "连接失败: " << ec.message() << " — 跳过复权因子\n";
+    return 0;
+  }
+
+  int n_total = static_cast<int>(targets.size());
+  int total_events = 0;
+  int consecutive_errors = 0;
+  auto t0 = std::chrono::steady_clock::now();
+
+  for (int i = 0; i < n_total; ++i) {
+    const auto& [market, code] = targets[static_cast<size_t>(i)];
+
+    // 增量：已有复权因子则跳过（预载集合 O(1) 查找）
+    bool skipped = (!full) && existing.count(code);
+    if (skipped) consecutive_errors = 0;
+
+    if (!skipped) {
+      try {
+        auto xdxr_list = sq.GetXdxr(market, code);
+        consecutive_errors = 0;
+        if (!xdxr_list.empty()) {
+          db.Exec("BEGIN TRANSACTION");
+          int inserted = 0;  // 检查 Exec 返回值，避免静默写入失败
+          for (const auto& x : xdxr_list) {
+            char sql[600];
+            std::snprintf(sql, sizeof(sql),
+                          "INSERT OR REPLACE INTO adjust VALUES "
+                          "('%s', '%s', 1.0, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
+                          code.c_str(), x.date.c_str(),
+                          x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
+                          x.category, x.name.c_str());
+            if (db.Exec(sql) >= 0) ++inserted;
+          }
+          db.Exec("COMMIT");
+          total_events += inserted;
+          if (inserted < static_cast<int>(xdxr_list.size()))
+            std::cerr << "\n  " << code << " 复权写入部分失败: " << inserted
+                      << "/" << xdxr_list.size() << "（INSERT OR REPLACE 需 UNIQUE 约束）\n";
+        }
+      } catch (const std::exception& e) {
+        // GetXdxr 在事务外，网络失败无需回滚；连续错误退避
+        std::cerr << "\n  " << code << " 复权因子获取失败: " << e.what() << "\n";
+        if (++consecutive_errors >= 3) {
+          std::this_thread::sleep_for(std::chrono::seconds(3));
+          consecutive_errors = 0;
+        }
+      }
+      // 防限流：每请求间 50ms
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    int pct = n_total > 0 ? ((i + 1) * 100 / n_total) : 0;
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    std::cout << "\r[" << pct << "%] " << (i + 1) << "/" << n_total
+              << "  复权事件 " << total_events << " 条  " << elapsed << "s" << std::flush;
+  }
+
+  sq.Close();
+  auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+      std::chrono::steady_clock::now() - t0).count();
+  std::cout << "\r[100%] " << n_total << "/" << n_total
+            << "  复权事件: " << total_events << " 条  " << elapsed << "s\n";
+  return total_events;
 }
 
 }  // namespace
@@ -307,6 +417,7 @@ int DoImport(int argc, char** argv, int jobs) {
   // 2. 初始化数据库表结构
   {
     tdx::query::DuckDBQuery db(cfg.db_path);
+    db.ConfigureForImport();
     const std::vector<std::string> tables = {
         "kline_1m", "kline_5m", "kline_15m", "kline_30m", "kline_60m",
         "kline_1d", "kline_1w", "kline_1mon"
@@ -316,29 +427,41 @@ int DoImport(int argc, char** argv, int jobs) {
             "(code VARCHAR, date VARCHAR, factor DOUBLE, fenhong DOUBLE, "
             "peigujia DOUBLE, songzhuangu DOUBLE, peigu DOUBLE, "
             "category INTEGER, name VARCHAR)");
-    db.Exec("CREATE INDEX IF NOT EXISTS adjust_idx ON adjust (code, date)");
+    db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS adjust_idx ON adjust (code, date, category)");
     db.Exec("CREATE TABLE IF NOT EXISTS import_state "
             "(code VARCHAR, period VARCHAR, last_datetime BIGINT, "
             "PRIMARY KEY (code, period))");
   }
 
-  // 3. 并行导入——共享一个 DuckDB 实例 + mutex 保护
+  // 增量模式：预载 import_state 到 LastDtMap（主线程一次查询，reader 线程只读共享，线程安全）。
+  // 全量模式无需预载（不过滤）。key = code|period。
+  LastDtMap last_dt_map;
+  if (!cfg.full) {
+    tdx::query::DuckDBQuery db(cfg.db_path);
+    last_dt_map = db.LoadImportState();
+  }
+
+  // 3. 方案 B：Reader 线程（读文件+重采样）→ Queue → Writer 线程（Appender 写入，单连接）
   std::cout << "=== 本地数据导入 ===\n";
-  tdx::query::DuckDBQuery db(cfg.db_path);
-  std::mutex db_mutex;
+  TaskQueue queue;
   ImportStats stats;
   std::vector<std::thread> workers;
+
+  // Writer 线程：独占 DuckDB Connection + Appender
+  std::thread writer(WriterThread, cfg.db_path, std::ref(queue), /*batch_commit=*/100);
+
+  // Reader 线程：并行读文件 + 重采样，Push 到队列
   int chunk = (n_total + cfg.jobs - 1) / cfg.jobs;
   for (int j = 0; j < cfg.jobs; ++j) {
     int start = j * chunk;
     int end = std::min(start + chunk, n_total);
     if (start >= n_total) break;
-    workers.emplace_back(ImportWorker, std::cref(targets), tdx_home,
-                         std::ref(db), std::ref(db_mutex), cfg.full,
-                         std::ref(stats), start, end);
+    workers.emplace_back(ReaderWorker, std::cref(targets), tdx_home,
+                         cfg.full, std::cref(last_dt_map),
+                         std::ref(queue), std::ref(stats), start, end);
   }
 
-  // 主线程：刷新进度
+  // 主线程：进度刷新
   auto t0 = std::chrono::steady_clock::now();
   while (true) {
     int done = stats.progress.load(std::memory_order_relaxed);
@@ -349,10 +472,11 @@ int DoImport(int argc, char** argv, int jobs) {
     std::cout << "\r[" << pct << "%] " << done << "/" << n_total
               << "  已导入 " << stats.total_bars.load(std::memory_order_relaxed)
               << " 根K线  " << elapsed << "s" << std::flush;
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // 避免 busy-spin 刷屏
   }
-
+  queue.Close();  // 通知 writer 完成
   for (auto& w : workers) w.join();
+  writer.join();
   auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
       std::chrono::steady_clock::now() - t0).count();
   std::cout << "\r[100%] " << n_total << "/" << n_total
@@ -360,23 +484,14 @@ int DoImport(int argc, char** argv, int jobs) {
             << stats.code_count.load() << " 只股票有新数据）  "
             << elapsed << "s\n";
 
-  // 4. 复权因子（网络，串行——StdQuotes 内部已有 fiber 池）
+  // 4. 复权因子（并行，每线程独立 StdQuotes 连接 + 50ms 延迟防限流）
   if (cfg.no_adjust) {
     std::cout << "\n跳过复权因子。\n完成。\n";
     return 0;
   }
 
-  std::cout << "\n=== 复权因子 ===\n";
-  quotes::StdQuotes sq;
-  if (auto ec = sq.Connect()) {
-    std::cerr << "连接失败: " << ec.message() << " — 跳过复权因子\n";
-    std::cout << "完成（无复权因子）。\n";
-    return 0;
-  }
-
-  tdx::query::DuckDBQuery db2(cfg.db_path);
-  int n_adjust = ImportAdjustFactors(sq, db2, targets, cfg.full);
-  sq.Close();
+  std::cout << "\n=== 复权因子（串行 + 50ms 限流） ===\n";
+  int n_adjust = ImportAdjustFactors(targets, cfg.db_path, cfg.full);
   std::cout << "\n复权事件: " << n_adjust << " 条\n";
 
   std::cout << "\n全部完成。数据库: " << cfg.db_path << "\n";

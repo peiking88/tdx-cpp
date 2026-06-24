@@ -17,7 +17,7 @@
 
 #include "tdx/consts.hpp"
 
-ABSL_FLAG(uint32_t, import_jobs, 1, "import 并行线程数 (0=CPU 核数)");
+ABSL_FLAG(uint32_t, jobs, 1, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
@@ -189,7 +189,7 @@ int main(int argc, char** argv) {
   if (cmd == "fetch-history") return DoFetchHistory(argc, argv);
   if (cmd == "sql") return DoSql(argc, argv);
   if (cmd == "batch-fetch") return DoBatchFetch(argc, argv);
-  if (cmd == "import") return DoImport(argc, argv, static_cast<int>(absl::GetFlag(FLAGS_import_jobs)));
+  if (cmd == "import") return DoImport(argc, argv, static_cast<int>(absl::GetFlag(FLAGS_jobs)));
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

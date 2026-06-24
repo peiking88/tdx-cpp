@@ -1,10 +1,12 @@
-// DuckDB 查询层实现。编译 -D_GLIBCXX_USE_CXX11_ABI=0 匹配 vendored libduckdb.so。
-// 接口 string_view，内部 std::string（旧 ABI）转换后调 duckdb.hpp。
+// DuckDB 查询层实现。编译 -D_GLIBCXX_USE_CXX11_ABI=1 匹配 vendored libduckdb.so v1.5.2（新 CXX11 ABI）。
+// 接口 string_view，内部 std::string 转换后调 duckdb.hpp。
 #include "tdx/query/duckdb_query.hpp"
 
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <duckdb.hpp>
 
@@ -25,20 +27,32 @@ std::string EscapeSql(std::string_view s) {
 }  // namespace
 
 struct DuckDBQuery::Impl {
-  duckdb::DuckDB db;
+  std::shared_ptr<duckdb::DuckDB> db;
   duckdb::Connection con;
-  Impl() : db(nullptr), con(db) {
+  Impl() : db(std::make_shared<duckdb::DuckDB>(nullptr)), con(*db) {
     con.Query("CREATE TABLE bars(code VARCHAR, datetime BIGINT, open DOUBLE, high DOUBLE, "
               "low DOUBLE, close DOUBLE, volume DOUBLE, amount DOUBLE)");
     con.Query("CREATE TABLE latest(code VARCHAR, price DOUBLE, ts BIGINT)");
   }
-  explicit Impl(const std::string& path) : db(path), con(db) {}
+  explicit Impl(const std::string& path)
+      : db(std::make_shared<duckdb::DuckDB>(path)), con(*db) {}
+  // 共享连接：从已有 DB 实例创建新 Connection（多线程并发安全）
+  explicit Impl(std::shared_ptr<duckdb::DuckDB> shared_db) : db(shared_db), con(*db) {}
 };
 
 DuckDBQuery::DuckDBQuery() : impl_(std::make_unique<Impl>()) {}
 DuckDBQuery::DuckDBQuery(std::string_view db_path)
     : impl_(std::make_unique<Impl>(std::string(db_path))) {}
 DuckDBQuery::~DuckDBQuery() = default;
+
+std::unique_ptr<DuckDBQuery> DuckDBQuery::OpenSharedConnection() const {
+  // 从当前 DB 实例创建新 Connection（引用计数保护 DB 生命周期）
+  return std::unique_ptr<DuckDBQuery>(
+      new DuckDBQuery(std::make_unique<Impl>(impl_->db)));
+}
+
+// 私有构造：从 Impl unique_ptr 构造（绕过公开构造）
+DuckDBQuery::DuckDBQuery(std::unique_ptr<Impl> p) : impl_(std::move(p)) {}
 
 void DuckDBQuery::WriteKlineParquet(std::string_view path, const std::vector<KLine>& bars,
                                     std::string_view code) {
@@ -98,6 +112,13 @@ int64_t DuckDBQuery::Exec(std::string_view sql) {
   return static_cast<int64_t>(result->RowCount());
 }
 
+void DuckDBQuery::ConfigureForImport() {
+  // DuckDB 原生 SET（非 SQLite PRAGMA——PRAGMA journal_mode/synchronous 等是 SQLite 语法，DuckDB 忽略）
+  impl_->con.Query("SET threads=8");
+  impl_->con.Query("SET memory_limit='4GB'");
+  impl_->con.Query("SET enable_progress_bar=false");
+}
+
 void DuckDBQuery::EnsureKlineTable(std::string_view table_name) {
   std::string t(table_name);
   std::string sql = "CREATE TABLE IF NOT EXISTS " + t +
@@ -118,10 +139,11 @@ int64_t DuckDBQuery::InsertKlines(std::string_view table,
     impl_->con.Query("DELETE FROM " + t + " WHERE code = '" + ec + "'");
   }
   int64_t total = 0;
-  // 每 500 行一个 INSERT 批量写入
-  for (size_t i = 0; i < bars.size(); i += 500) {
+  // INSERT OR REPLACE 批量 SQL（Appender 只做纯 INSERT 不支持 ON CONFLICT）。
+  // 事务内批量写入，fsync 由调用方 BEGIN/COMMIT 控制。
+  for (size_t i = 0; i < bars.size(); i += 1000) {
     std::string sql = "INSERT OR REPLACE INTO " + t + " VALUES ";
-    size_t end = std::min(i + 500, bars.size());
+    size_t end = std::min(i + 1000, bars.size());
     for (size_t j = i; j < end; ++j) {
       if (j > i) sql += ", ";
       char row[384];
@@ -133,7 +155,7 @@ int64_t DuckDBQuery::InsertKlines(std::string_view table,
       sql += row;
     }
     auto result = impl_->con.Query(sql);
-    if (result && !result->HasError()) total += result->RowCount();
+    if (result && !result->HasError()) total += static_cast<int64_t>(end - i);
   }
   return total;
 }
@@ -168,6 +190,31 @@ std::vector<KLine> DuckDBQuery::ReadKlines(std::string_view table,
     bars.push_back(b);
   }
   return bars;
+}
+
+std::unordered_map<std::string, int64_t> DuckDBQuery::LoadImportState() {
+  std::unordered_map<std::string, int64_t> out;
+  auto result = impl_->con.Query(
+      "SELECT code, period, last_datetime FROM import_state");
+  if (!result || result->HasError()) return out;
+  for (size_t i = 0; i < result->RowCount(); ++i) {
+    // 用 non-template GetValue 取 duckdb::Value 再 ToString（QueryResult::GetValue<string>
+    // 模板特化有缺陷，内部强转 int64_t，编译失败）
+    std::string code = result->GetValue(0, i).ToString();
+    std::string period = result->GetValue(1, i).ToString();
+    int64_t dt = result->GetValue<int64_t>(2, i);
+    out[code + "|" + period] = dt;
+  }
+  return out;
+}
+
+std::unordered_set<std::string> DuckDBQuery::LoadAdjustCodes() {
+  std::unordered_set<std::string> out;
+  auto result = impl_->con.Query("SELECT DISTINCT code FROM adjust");
+  if (!result || result->HasError()) return out;
+  for (size_t i = 0; i < result->RowCount(); ++i)
+    out.insert(result->GetValue(0, i).ToString());
+  return out;
 }
 
 }  // namespace tdx::query
