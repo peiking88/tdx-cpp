@@ -32,9 +32,12 @@ struct DuckDBQuery::Impl {
               "low DOUBLE, close DOUBLE, volume DOUBLE, amount DOUBLE)");
     con.Query("CREATE TABLE latest(code VARCHAR, price DOUBLE, ts BIGINT)");
   }
+  explicit Impl(const std::string& path) : db(path), con(db) {}
 };
 
 DuckDBQuery::DuckDBQuery() : impl_(std::make_unique<Impl>()) {}
+DuckDBQuery::DuckDBQuery(std::string_view db_path)
+    : impl_(std::make_unique<Impl>(std::string(db_path))) {}
 DuckDBQuery::~DuckDBQuery() = default;
 
 void DuckDBQuery::WriteKlineParquet(std::string_view path, const std::vector<KLine>& bars,
@@ -93,6 +96,78 @@ int64_t DuckDBQuery::Exec(std::string_view sql) {
   auto result = impl_->con.Query(s);
   if (!result || result->HasError()) return -1;
   return static_cast<int64_t>(result->RowCount());
+}
+
+void DuckDBQuery::EnsureKlineTable(std::string_view table_name) {
+  std::string t(table_name);
+  std::string sql = "CREATE TABLE IF NOT EXISTS " + t +
+                    " (code VARCHAR, datetime BIGINT, open DOUBLE, high DOUBLE, "
+                    "low DOUBLE, close DOUBLE, volume DOUBLE, amount DOUBLE)";
+  impl_->con.Query(sql);
+  // 唯一索引：防重复 + 加速增量查询
+  impl_->con.Query("CREATE UNIQUE INDEX IF NOT EXISTS " + t +
+                   "_idx ON " + t + " (code, datetime)");
+}
+
+int64_t DuckDBQuery::InsertKlines(std::string_view table,
+                                   const std::vector<KLine>& bars,
+                                   std::string_view code, bool replace) {
+  if (bars.empty()) return 0;
+  std::string t(table), c(code), ec = EscapeSql(c);
+  if (replace) {
+    impl_->con.Query("DELETE FROM " + t + " WHERE code = '" + ec + "'");
+  }
+  int64_t total = 0;
+  // 每 500 行一个 INSERT 批量写入
+  for (size_t i = 0; i < bars.size(); i += 500) {
+    std::string sql = "INSERT OR REPLACE INTO " + t + " VALUES ";
+    size_t end = std::min(i + 500, bars.size());
+    for (size_t j = i; j < end; ++j) {
+      if (j > i) sql += ", ";
+      char row[384];
+      std::snprintf(row, sizeof(row),
+                    "('%s', %lld, %.4f, %.4f, %.4f, %.4f, %.2f, %.2f)",
+                    ec.c_str(), static_cast<long long>(bars[j].datetime),
+                    bars[j].open, bars[j].high, bars[j].low, bars[j].close,
+                    bars[j].volume, bars[j].amount);
+      sql += row;
+    }
+    auto result = impl_->con.Query(sql);
+    if (result && !result->HasError()) total += result->RowCount();
+  }
+  return total;
+}
+
+int64_t DuckDBQuery::LastDatetime(std::string_view table, std::string_view code) {
+  std::string t(table), c(code);
+  auto result = impl_->con.Query(
+      "SELECT MAX(datetime) FROM " + t + " WHERE code = '" + EscapeSql(c) + "'");
+  if (!result || result->HasError() || result->RowCount() == 0) return 0;
+  auto val = result->GetValue(0, 0);  // non-template → Value
+  if (val.IsNull()) return 0;
+  return val.GetValue<int64_t>();
+}
+
+std::vector<KLine> DuckDBQuery::ReadKlines(std::string_view table,
+                                            std::string_view code) {
+  std::vector<KLine> bars;
+  std::string t(table), c(code);
+  auto result = impl_->con.Query(
+      "SELECT datetime, open, high, low, close, volume, amount FROM " + t +
+      " WHERE code = '" + EscapeSql(c) + "' ORDER BY datetime");
+  if (!result || result->HasError()) return bars;
+  for (size_t i = 0; i < result->RowCount(); ++i) {
+    KLine b;
+    b.datetime = result->GetValue<int64_t>(0, i);
+    b.open = result->GetValue<double>(1, i);
+    b.high = result->GetValue<double>(2, i);
+    b.low = result->GetValue<double>(3, i);
+    b.close = result->GetValue<double>(4, i);
+    b.volume = result->GetValue<double>(5, i);
+    b.amount = result->GetValue<double>(6, i);
+    bars.push_back(b);
+  }
+  return bars;
 }
 
 }  // namespace tdx::query

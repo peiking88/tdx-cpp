@@ -31,7 +31,7 @@ double PerShare(double value) {
   return value >= 1.0 ? value / 10.0 : value;
 }
 
-std::vector<FactorPoint> ComputeFactorFromXdxr(const std::vector<XdxrEvent>& xdxr,
+std::vector<FactorPoint> ComputeFactorFromXdxr(const std::vector<Xdxr>& xdxr,
                                                const std::vector<KLine>& kline,
                                                AdjustType adjust) {
   std::vector<FactorPoint> result;
@@ -41,7 +41,7 @@ std::vector<FactorPoint> ComputeFactorFromXdxr(const std::vector<XdxrEvent>& xdx
   auto events = xdxr;
   bool qfq = (adjust == AdjustType::Qfq);
   std::sort(events.begin(), events.end(),
-            [qfq](const XdxrEvent& a, const XdxrEvent& b) {
+            [qfq](const Xdxr& a, const Xdxr& b) {
               return qfq ? a.date > b.date : a.date < b.date;
             });
 

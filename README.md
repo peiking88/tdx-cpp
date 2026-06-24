@@ -1,10 +1,10 @@
 # tdx-cpp
 
-通达信（TDX）行情数据 C++ 单库 v0.5.0。用 C++17 重写 [opentdx](https://github.com/rainx/opentdx)（协议层）+ [mootdx](https://github.com/mootdx/mootdx)（行情接口层）+ [tdxdata](https://github.com/rainx/tdxdata)（数据管理层），消除 Python 运行时依赖，获得确定性性能与协议字节级正确性。
+通达信（TDX）行情数据 C++ 单库 v0.6.0。用 C++17 重写 [opentdx](https://github.com/rainx/opentdx)（协议层）+ [mootdx](https://github.com/mootdx/mootdx)（行情接口层）+ [tdxdata](https://github.com/rainx/tdxdata)（数据管理层），消除 Python 运行时依赖，获得确定性性能与协议字节级正确性。
 
 异步 IO 采用 [helio](https://github.com/romange/helio)（io_uring + fiber 协程，C++17），存储采用 [DuckDB](https://duckdb.org/) 嵌入式引擎（Parquet 读写 + SQL 查询 + 内存热表，无 Arrow 依赖）。
 
-## 当前状态：Phase 1-4 全部完成（v0.5.0）
+## 当前状态：Phase 1-4 全部完成（v0.6.0）
 
 | 能力 | 模块 | 状态 |
 |---|---|---|
@@ -219,7 +219,7 @@ external/    第三方依赖（不入 git）
   ├─ zlib-ng/               zlib-ng 2.3.3 tarball（替代系统 zlib）
 output/      程序输出（不入 git）
 ```
-### 2026-06-23 v0.5.0
+### 2026-06-23 v0.6.0
 
 **zlib-ng 替代系统 zlib**：`find_package(ZLIB)` → FetchContent zlib-ng 2.3.3（ZLIB_COMPAT 模式），API 100% 兼容，零代码改动。消除项目最后一个系统包依赖，实现完全 vendored 离线可复现构建。
 

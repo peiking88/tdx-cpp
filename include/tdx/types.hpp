@@ -76,13 +76,16 @@ struct Quote {
   }
 };
 
-// 除权除息事件（对齐 opentdx xdxr；精确字段在 Task 8 从 server.py/client 确认）。
+// 除权除息事件（对齐 opentdx parser/quotation/company_info.py:XDXR，0x0f 响应）。
+// 字段名与上游 Python 逐字一致，PerShare 归一由 adjust 模块完成。
 struct Xdxr {
-  int64_t datetime = 0;
-  double send = 0.0;           // 每股送股
-  double dividend = 0.0;       // 每股分红（元）
-  double rationed = 0.0;       // 每股配股
-  double rationed_price = 0.0; // 配股价
+  std::string date;            // YYYY-MM-DD
+  double fenhong = 0.0;        // 分红（每10股，需 PerShare 归一）
+  double peigujia = 0.0;       // 配股价
+  double songzhuangu = 0.0;    // 送转股（每10股，需 PerShare 归一）
+  double peigu = 0.0;          // 配股（每10股，需 PerShare 归一）
+  int category = 1;            // 1=除权除息 2=送配股上市 3=非流通股上市 ...
+  std::string name;            // 事件名称（GBK→UTF8）
 };
 
 // 股票列表项（对齐 opentdx list.py）

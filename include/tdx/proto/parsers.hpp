@@ -18,6 +18,7 @@ namespace tdx::proto {
 // msg_id 常量（对齐 opentdx register_parser）
 inline constexpr uint16_t kMsgLogin = 0x0d;
 inline constexpr uint16_t kMsgHeartbeat = 0x04;
+inline constexpr uint16_t kMsgXdxr = 0x0f;
 inline constexpr uint16_t kMsgKline = 0x523;
 inline constexpr uint16_t kMsgTick = 0x537;
 inline constexpr uint16_t kMsgTransaction = 0xfc5;
@@ -62,5 +63,9 @@ std::vector<uint8_t> serialize_login();
 
 // ---- 心跳 0x04（请求体空）----
 std::vector<uint8_t> serialize_heartbeat();
+
+// ---- 除权除息 0x0f（请求 <HB6s；响应 count + N×29B）----
+std::vector<uint8_t> serialize_xdxr(Market market, std::string_view code);
+std::vector<Xdxr> deserialize_xdxr(const uint8_t* data, std::size_t len);
 
 }  // namespace tdx::proto

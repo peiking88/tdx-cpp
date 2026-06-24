@@ -188,4 +188,12 @@ uint16_t StdQuotes::StockCount(Market market) {
   });
 }
 
+std::vector<Xdxr> StdQuotes::GetXdxr(Market market, std::string_view code) {
+  auto body = proto::serialize_xdxr(market, code);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgXdxr, body);
+    return proto::deserialize_xdxr(resp.body.data(), resp.body.size());
+  });
+}
+
 }  // namespace tdx::quotes

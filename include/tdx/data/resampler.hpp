@@ -11,7 +11,7 @@
 namespace tdx::data {
 
 // 重采样目标频率
-enum class Freq { Min5, Min15, Min30, Hour1, Daily, Weekly, Monthly };
+enum class Freq { Min1, Min5, Min15, Min30, Hour1, Daily, Weekly, Monthly };
 
 // A 股时段感知的 bar 结束时间（base.py:56-76）。
 // 上午 9:30 开盘、下午 13:00 开盘；t<720 切上下午分支。

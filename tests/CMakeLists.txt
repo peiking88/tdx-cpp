@@ -1,6 +1,8 @@
 # tdx-cpp 测试
 # 测试链接 helio FetchContent 提供的 gtest（不用系统 /usr/include/gtest，避免同名 target 冲突）。
 # 测试代码豁免 fiber 纪律（评审决策 #3：gtest 跑在 Proactor 线程外）。
+# 测试可执行文件输出到 build/tests（与 CLI/demos 分离）
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 set(TDX_TEST_LIBS tdx_proto gtest gtest_main)
 
 function(tdx_test name)

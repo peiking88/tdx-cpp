@@ -3,7 +3,7 @@
 # 异步 IO 采用 helio（io_uring + fiber），逐字移植 opentdx 协议层。
 cmake_minimum_required(VERSION 3.16)
 
-project(tdx-cpp VERSION 0.5.1 LANGUAGES C CXX)
+project(tdx-cpp VERSION 0.6.0 LANGUAGES C CXX)
 
 # ---- C++ 标准（helio 要求 C++17）----
 set(CMAKE_CXX_STANDARD 17)
@@ -96,6 +96,10 @@ message(STATUS "tdx-cpp: 使用 abseil-cpp mirror/git → ${_ABSL_URL}")
 
 add_subdirectory(${HELIO_PATH} ${CMAKE_BINARY_DIR}/helio)
 
+# helio 的 cmake/internal.cmake 强制设 CMAKE_RUNTIME_OUTPUT_DIRECTORY=${CMAKE_BINARY_DIR}，
+# 此处恢复为 build/bin/ 供 tdx-cpp 自身 target 使用（helio target 由末尾 redirect 块处理）。
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # gcs_demo 需要 GCP，但 tdx-cpp 用 WITH_GCP=OFF。将其排除出默认构建。
 if(TARGET gcs_demo AND NOT WITH_GCP)
   set_target_properties(gcs_demo PROPERTIES EXCLUDE_FROM_ALL TRUE)
@@ -178,9 +182,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"
   add_compile_options(-Wno-unused-parameter)
 endif()
 
-# 可执行统一输出到 build/bin（便于 CLI 调用）
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-
 # ---- zlib-ng（vendored 替代系统 zlib，ZLIB_COMPAT 模式，API/ABI 100% 兼容）----
 # 通达信协议响应解压必需。zlib-ng 兼容模式提供标准 zlib.h + libz.a，
 # 零代码改动，消除项目最后一个 find_package 系统依赖。
@@ -208,3 +209,30 @@ add_subdirectory(src)
 
 enable_testing()
 add_subdirectory(tests)
+
+# ---- 将 helio 内置 test / server 可执行文件分拣到对应子目录 ----
+# helio 的 cmake/internal.cmake 强制 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})，
+# 导致其 target 散落在 build/ 根目录。通过 target 级 RUNTIME_OUTPUT_DIRECTORY 覆盖。
+# 使用硬编码列表（get_cmake_property(TARGETS) 无法获取嵌套 subdirectory 的 target）。
+# file_test 内部使用相对路径（testdata/ids.txt.zst），需从 build/ 根目录运行，
+# 不重定向。CMake test 属性作用域限制无法从顶层改 WORKING_DIRECTORY。
+set(_helio_tests
+    abseil_test accept_server_test arena_test cuckoo_map_test cxx_test
+    expected_test fiber_socket_test fibers_test flit_test
+    hash_test histogram_test io_buf_test io_test mpmc_bounded_queue_test
+    mpsc_intrusive_queue_test pod_array_test ring_buffer_test strings_test
+    string_view_sso_test tls_engine_test tls_socket_test uring_file_test)
+set(_helio_servers echo_server ping_iouring_server raw_echo_server)
+set(_helio_demos http_main https_client_cli)
+
+foreach(_t IN LISTS _helio_tests)
+  if(TARGET ${_t})
+    set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+  endif()
+endforeach()
+foreach(_s IN LISTS _helio_servers _helio_demos)
+  if(TARGET ${_s})
+    set_target_properties(${_s} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/demos)
+  endif()
+endforeach()
+

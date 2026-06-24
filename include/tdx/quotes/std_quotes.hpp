@@ -48,6 +48,9 @@ class StdQuotes {
   // 股票数量
   uint16_t StockCount(Market market);
 
+  // 除权除息事件（msg_id 0x0f）。对齐 opentdx tdxClient.stock_xdxr。
+  std::vector<Xdxr> GetXdxr(Market market, std::string_view code);
+
   // 默认服务器列表（供 CLI/batch 等复用，避免多处硬编码）
   static std::vector<proto::ServerInfo> DefaultHosts();
 

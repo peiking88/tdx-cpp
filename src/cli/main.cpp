@@ -13,7 +13,11 @@
 #include "base/init.h"
 #include "util/fibers/pool.h"
 
+#include "absl/flags/flag.h"
+
 #include "tdx/consts.hpp"
+
+ABSL_FLAG(uint32_t, import_jobs, 1, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
@@ -164,6 +168,9 @@ int DoBatchFetch(int argc, char** argv) {
 
 }  // namespace
 
+// import 子命令（定义在 cli/import.cpp，不在 namespace 内）
+int DoImport(int argc, char** argv, int jobs);
+
 int main(int argc, char** argv) {
   MainInitGuard guard(&argc, &argv);
   if (argc < 2) {
@@ -171,7 +178,8 @@ int main(int argc, char** argv) {
               << "  tdx server-test                    测速服务器\n"
               << "  tdx bars <code> <period> <count>   拉K线（如 tdx bars 600000 4 10）\n"
               << "  tdx ex-bars <market> <code> <period> <count>  扩展行情\n"
-              << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n";
+              << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n"
+              << "  tdx import [-p PATH] [-d DB] [-f] [codes...]  本地数据→DuckDB\n";
     return 1;
   }
   std::string cmd = argv[1];
@@ -181,6 +189,7 @@ int main(int argc, char** argv) {
   if (cmd == "fetch-history") return DoFetchHistory(argc, argv);
   if (cmd == "sql") return DoSql(argc, argv);
   if (cmd == "batch-fetch") return DoBatchFetch(argc, argv);
+  if (cmd == "import") return DoImport(argc, argv, static_cast<int>(absl::GetFlag(FLAGS_import_jobs)));
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

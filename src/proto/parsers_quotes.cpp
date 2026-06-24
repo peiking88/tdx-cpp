@@ -89,4 +89,71 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
   return result;
 }
 
+// ---- 除权除息 0x0f（对齐 opentdx parser/quotation/company_info.py:XDXR）----
+std::vector<uint8_t> serialize_xdxr(Market market, std::string_view code) {
+  // 请求体 <HB6s>：type(H=1) + market(B) + code(6s GBK)
+  std::vector<uint8_t> body;
+  body.reserve(9);
+  push_u16(body, 1);  // type
+  body.push_back(static_cast<uint8_t>(market));
+  push_code(body, code, 6);
+  return body;
+}
+
+std::vector<Xdxr> deserialize_xdxr(const uint8_t* data, std::size_t len) {
+  std::vector<Xdxr> result;
+  if (len < 11) return result;
+
+  // 头部 <HB6sH>：market(H) marketOR(B) code(6s) count(H) = 11 字节
+  uint16_t count = util::rd_u16(data + 9);
+  for (uint16_t i = 0; i < count; ++i) {
+    std::size_t pos = 11 + static_cast<std::size_t>(i) * 29;
+    if (pos + 29 > len) break;
+
+    // <B6sBIB>：market(B) code(6s) unknown(B) date(I) category(B) = 13 字节
+    uint32_t date_raw = util::rd_u32(data + pos + 8);
+    uint8_t category = data[pos + 12];
+
+    Xdxr x;
+    // date: YYYYMMDD → "YYYY-MM-DD"
+    char dbuf[16];
+    int y = static_cast<int>(date_raw / 10000);
+    int m = static_cast<int>((date_raw % 10000) / 100);
+    int d = static_cast<int>(date_raw % 100);
+    std::snprintf(dbuf, sizeof(dbuf), "%04d-%02d-%02d", y, m, d);
+    x.date = dbuf;
+    x.category = category;
+
+    // 后 16 字节：按 category 解析
+    const uint8_t* ld = data + pos + 13;
+    if (category == 1) {
+      x.fenhong = static_cast<double>(util::rd_f32(ld));
+      x.peigujia = static_cast<double>(util::rd_f32(ld + 4));
+      x.songzhuangu = static_cast<double>(util::rd_f32(ld + 8));
+      x.peigu = static_cast<double>(util::rd_f32(ld + 12));
+      x.name = "除权除息";
+    } else {
+      // category != 1 的字段不解析，仅保留 date/category/name
+      switch (category) {
+        case 2: x.name = "送配股上市"; break;
+        case 3: x.name = "非流通股上市"; break;
+        case 4: x.name = "未知股本变动"; break;
+        case 5: x.name = "股本变化"; break;
+        case 6: x.name = "增发新股"; break;
+        case 7: x.name = "股份回购"; break;
+        case 8: x.name = "增发新股上市"; break;
+        case 9: x.name = "转配股上市"; break;
+        case 10: x.name = "可转债上市"; break;
+        case 11: x.name = "扩缩股"; break;
+        case 12: x.name = "非流通股缩股"; break;
+        case 13: x.name = "送认购权证"; break;
+        case 14: x.name = "送认沽权证"; break;
+        default: x.name = "未知"; break;
+      }
+    }
+    result.push_back(std::move(x));
+  }
+  return result;
+}
+
 }  // namespace tdx::proto

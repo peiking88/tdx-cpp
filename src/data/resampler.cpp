@@ -123,7 +123,8 @@ std::vector<KLine> ResampleDaily(const std::vector<KLine>& kline, Freq target) {
 std::vector<KLine> ResampleKline(const std::vector<KLine>& kline, Freq target) {
   if (kline.empty()) return kline;
   switch (target) {
-    case Freq::Min5: return kline;
+    case Freq::Min1: return kline;
+    case Freq::Min5: return ResampleMinute(kline, 5);
     case Freq::Min15: return ResampleMinute(kline, 15);
     case Freq::Min30: return ResampleMinute(kline, 30);
     case Freq::Hour1: return ResampleMinute(kline, 60);

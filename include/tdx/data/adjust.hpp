@@ -13,17 +13,6 @@ namespace tdx::data {
 
 enum class AdjustType { None, Qfq, Hfq };
 
-// xdxr 事件（对齐 tdxdata）
-struct XdxrEvent {
-  std::string date;        // YYYY-MM-DD
-  double fenhong = 0.0;    // 分红（元，每 10 股单位需 _per_share 归一）
-  double peigujia = 0.0;   // 配股价
-  double songzhuangu = 0.0;// 送转股
-  double peigu = 0.0;      // 配股
-  int category = 1;        // 事件类别（1/2=除权除息）
-  std::string name;        // 事件名
-};
-
 // 复权因子点
 struct FactorPoint {
   std::string date;   // YYYY-MM-DD
@@ -34,7 +23,7 @@ struct FactorPoint {
 double PerShare(double value);
 
 // 从 xdxr 事件流自算复权因子（adjust.py:49-104）
-std::vector<FactorPoint> ComputeFactorFromXdxr(const std::vector<XdxrEvent>& xdxr,
+std::vector<FactorPoint> ComputeFactorFromXdxr(const std::vector<Xdxr>& xdxr,
                                                const std::vector<KLine>& kline,
                                                AdjustType adjust);
 

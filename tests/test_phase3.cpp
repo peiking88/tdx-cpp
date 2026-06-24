@@ -71,7 +71,7 @@ TEST(Adjust, PerShare) {
 
 TEST(Adjust, ComputeFactorQfq) {
   // 单个除权除息事件：每10股送1股（songzhuangu=1.0 → PerShare=0.1）
-  std::vector<XdxrEvent> events = {
+  std::vector<Xdxr> events = {
       {"2024-06-15", 0.0, 0.0, 1.0, 0.0, 1, "除权除息"},
   };
   std::vector<KLine> kline;
@@ -93,7 +93,7 @@ TEST(Adjust, ComputeFactorQfq) {
 TEST(Adjust, ApplyAdjustQfq) {
   // qfq 末尾归一：最新事件后因子=1（基准），事件前无匹配默认因子=1。
   // 单事件归一后 factor=1.0，所有 K 线价格不变。
-  std::vector<XdxrEvent> events = {{"2024-06-15", 0.0, 0.0, 1.0, 0.0, 1, "除权除息"}};
+  std::vector<Xdxr> events = {{"2024-06-15", 0.0, 0.0, 1.0, 0.0, 1, "除权除息"}};
   std::vector<KLine> kline;
   for (int d = 13; d <= 17; ++d) {
     KLine k;
@@ -117,7 +117,7 @@ TEST(Adjust, ApplyAdjustQfq) {
 TEST(Adjust, ApplyAdjustHfq) {
   // hfq（后复权）：event_factor=denominator/numerator=11/10=1.1，无归一化。
   // forward-asof：事件前 K 线乘因子=1.1(→11.0)，事件后因子默认=1.0(→10.0)。
-  std::vector<XdxrEvent> events = {{"2024-06-15", 0.0, 0.0, 1.0, 0.0, 1, "除权除息"}};
+  std::vector<Xdxr> events = {{"2024-06-15", 0.0, 0.0, 1.0, 0.0, 1, "除权除息"}};
   std::vector<KLine> kline;
   for (int d = 13; d <= 17; ++d) {
     KLine k;

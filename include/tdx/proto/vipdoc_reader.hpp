@@ -32,8 +32,9 @@ class VipdocReader {
   void set_tdx_home(std::string home) { tdx_home_ = std::move(home); }
   const std::string& tdx_home() const { return tdx_home_; }
 
+  static std::string MarketDir(Market m);  // sh/sz/bj（import 扫描目录复用）
+
  private:
-  static std::string MarketDir(Market m);  // sh/sz/bj
   std::string FilePath(Market m, std::string_view code,
                        std::string_view subdir, std::string_view ext) const;
   std::vector<KLine> ReadMin(Market market, std::string_view code,
