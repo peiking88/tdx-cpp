@@ -1,10 +1,10 @@
 # tdx-cpp
 
-通达信（TDX）行情数据 C++ 单库 v0.7.0。用 C++17 重写 [opentdx](https://github.com/rainx/opentdx)（协议层）+ [mootdx](https://github.com/mootdx/mootdx)（行情接口层）+ [tdxdata](https://github.com/rainx/tdxdata)（数据管理层），消除 Python 运行时依赖，获得确定性性能与协议字节级正确性。
+通达信（TDX）行情数据 C++ 单库 v0.7.1。用 C++17 重写 [opentdx](https://github.com/rainx/opentdx)（协议层）+ [mootdx](https://github.com/mootdx/mootdx)（行情接口层）+ [tdxdata](https://github.com/rainx/tdxdata)（数据管理层），消除 Python 运行时依赖，获得确定性性能与协议字节级正确性。
 
 异步 IO 采用 [helio](https://github.com/romange/helio)（io_uring + fiber 协程，C++17），存储支持 [DuckDB](https://duckdb.org/) 嵌入式引擎（Parquet 读写 + SQL 查询）和 [TDengine](https://tdengine.com/) 时序数据库（多线程并发导入）。
 
-## 当前状态：Phase 1-5 全部完成（v0.7.0）
+## 当前状态：Phase 1-5 全部完成（v0.7.1）
 
 | 能力 | 模块 | 状态 |
 |---|---|---|
@@ -22,7 +22,7 @@
 | 股票级断点续传（JSON 状态持久化 + 崩溃恢复） | `tdx_data` | ✅ |
 | DuckDB Parquet 落盘 + 即席 SQL | `tdx_query` | ✅ |
 | CLI 工具（bars / ex-bars / fetch-history / import） | `tdx` | ✅ |
-| TDengine 多线程导入（本地数据+复权因子） | `tdx_taos` | ✅ v0.7.0 |
+| TDengine 多线程导入（自动增量/全量） | `tdx_taos` | ✅ v0.7.1 |
 | 真网端到端集成测试 | `test_e2e` | ✅ |
 
 ## 构建
@@ -266,4 +266,21 @@ CLAUDE.md/README.md                    文档更新
  src/data/adjust.cpp                 |   4 +-
  src/data/resampler.cpp              |   3 +-
  src/proto/parsers_quotes.cpp        |  67 +++++++++++++++++++++
+```
+
+### 2026-06-25 12:56:49
+```
+ CMakeLists.txt                       |   2 +-
+ README.md                            |  48 +++++++++---------
+ include/tdx/consts.hpp               |  19 ++++---
+ include/tdx/taos/taos_bind.hpp       | 216 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ include/tdx/taos/taos_connection.hpp |  73 +++++++++++++++++++++++++++
+ include/tdx/taos/taos_import.hpp     |  33 +++++++++++++
+ src/CMakeLists.txt                   |   5 +-
+ src/cli/import.cpp                   |  42 +++++++++++++---
+ src/cli/main.cpp                     |   2 +-
+ src/taos/CMakeLists.txt              |  22 +++++++++
+ src/taos/taos_connection.cpp         | 135 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/taos/taos_import.cpp             | 310 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 12 files changed, 867 insertions(+), 40 deletions(-)
 ```

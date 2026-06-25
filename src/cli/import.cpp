@@ -78,7 +78,7 @@ ImportConfig ParseArgs(int argc, char** argv) {
                 << "  TDX_TAOS_DB      数据库名（默认 tdx）\n\n"
                 << "示例:\n"
                 << "  tdx import                      增量导入（DuckDB）\n"
-                << "  tdx import taos full            全量导入（TDengine）\n"
+                << "  tdx import taos                导入（TDengine，自动增量）\n"
                 << "  tdx import taos 600000          导入单只股票\n"
                 << "  tdx import taos 600000 -n 4     4 线程并发导入\n";
       std::exit(0);
@@ -206,12 +206,11 @@ int DoImport(int argc, char** argv, int jobs) {
     tdx::taos::ImportTaosConfig tcfg;
     tcfg.taos       = cfg.taos;
     tcfg.vipdoc_path = cfg.vipdoc_path;
-    tcfg.full        = cfg.full;
     tcfg.no_adjust   = cfg.no_adjust;
     tcfg.jobs        = jobs;
     tcfg.codes       = cfg.codes;
     auto result = tdx::taos::DoImportTaos(tcfg);
-    return (result.codes_ok > 0) ? 0 : 1;
+    return (result.kline_rows >= 0) ? 0 : 1;  // 0 行也是正常增量
   }
 
   // ---- DuckDB 引擎（原有逻辑）----

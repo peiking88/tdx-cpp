@@ -82,6 +82,21 @@ int64_t ExecAffected(TAOS* conn, const std::string& sql) {
   return n;
 }
 
+// 查询子表最新 ts（毫秒），表不存在或无数据返回 0
+int64_t LastTimestamp(TAOS* conn, const std::string& tbname) {
+  std::string sql = "SELECT MAX(ts) FROM " + tbname;
+  TAOS_RES* res = ::taos_query(conn, sql.c_str());
+  if (!res || ::taos_errno(res) != 0) {
+    ::taos_free_result(res);
+    return 0;
+  }
+  TAOS_ROW row = ::taos_fetch_row(res);
+  if (!row || !row[0]) { ::taos_free_result(res); return 0; }
+  int64_t val = *static_cast<int64_t*>(row[0]);
+  ::taos_free_result(res);
+  return val;
+}
+
 // ---- 单线程 worker ----
 struct Worker {
   int id;
@@ -124,11 +139,13 @@ struct Worker {
           auto xdxr = sq->GetXdxr(market, code);
           if (!xdxr.empty()) {
             std::string tb = "a_" + code;
+            int64_t last_ts_a = LastTimestamp(conn.native(), tb);
             for (const auto& x : xdxr) {
               int64_t ts = tdx::util::date_to_epoch(
                   std::stoi(x.date.substr(0, 4)),
                   std::stoi(x.date.substr(5, 2)),
                   std::stoi(x.date.substr(8, 2))) * 1000LL;
+              if (last_ts_a > 0 && ts <= last_ts_a) continue;  // 增量跳过
               char sql[1024];
               std::snprintf(sql, sizeof(sql),
                 "INSERT INTO %s USING adjust TAGS('%s') "
@@ -162,18 +179,30 @@ struct Worker {
     if (bars.empty()) return 0;
 
     std::string tb = "k_" + code + "_" + period;
+
+    // 自动判断增量/全量：查子表最新 ts
+    int64_t last_ts = LastTimestamp(conn, tb);
+    std::vector<KLine> new_bars;
+    if (last_ts > 0) {
+      for (auto& b : bars)
+        if (b.datetime * 1000LL > last_ts) new_bars.push_back(std::move(b));
+    } else {
+      new_bars = std::move(bars);
+    }
+    if (new_bars.empty()) return 0;
+
     std::string esc_code = EscapeSql(code);
     std::string esc_period = EscapeSql(period);
 
     int64_t written = 0;
-    for (size_t i = 0; i < bars.size(); i += kBatchSize) {
-      size_t end = std::min(i + kBatchSize, bars.size());
+    for (size_t i = 0; i < new_bars.size(); i += kBatchSize) {
+      size_t end = std::min(i + kBatchSize, new_bars.size());
       std::ostringstream sql;
       sql << "INSERT INTO " << tb << " USING kline TAGS('"
           << esc_code << "','" << esc_period << "') VALUES";
       for (size_t j = i; j < end; ++j) {
         if (j > i) sql << ' ';
-        const auto& b = bars[j];
+        const auto& b = new_bars[j];
         char row[256];
         std::snprintf(row, sizeof(row),
           "(%lld,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f)",
@@ -216,7 +245,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
   result.codes_total = static_cast<int>(targets.size());
 
   // 3. 连接 TDengine + 建库建表
-  // 先不选库连 server（DROP DATABASE 后 db=tdx 不存在时 taos_connect 会失败）
+  // 先不选库连 server（db=tdx 不存在时 taos_connect(db="tdx") 会失败）
   {
     TaosConfig init_cfg = cfg.taos;
     init_cfg.db.clear();
@@ -229,15 +258,11 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
             "CREATE DATABASE IF NOT EXISTS tdx "
             "KEEP 36500 DURATION 50 REPLICA 1");
   }
-  // 再连 tdx 库建超级表
   TaosConnection conn(cfg.taos);
   if (!conn) {
     std::cerr << "TDengine 连接 tdx 库失败。\n";
     return result;
   }
-  ExecSQL(conn.native(),
-          "CREATE DATABASE IF NOT EXISTS tdx "
-          "KEEP 36500 DURATION 50 REPLICA 1");
   ExecSQL(conn.native(), "USE tdx");
   ExecSQL(conn.native(),
           "CREATE STABLE IF NOT EXISTS kline ("
@@ -267,6 +292,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
             << "股票数:   " << targets.size() << "\n"
             << "线程数:   " << n_threads << "\n"
             << "复权:     " << (cfg.no_adjust ? "跳过" : "开启") << "\n"
+            << "模式:     自动（查 MAX(ts) 增量/全量）\n"
             << "写入:     batch INSERT (1000行/批)\n\n";
 
   std::vector<std::thread> threads;

@@ -14,7 +14,6 @@ namespace tdx::taos {
 struct ImportTaosConfig {
   TaosConfig taos;
   std::string vipdoc_path = "/home/li/.local/share/tdxcfv/drive_c/tc/vipdoc";
-  bool full = false;
   bool no_adjust = false;
   int  jobs = 1;  // 0 = auto (hardware_concurrency)
   std::vector<std::string> codes;
