@@ -71,6 +71,9 @@ add_subdirectory(query)
 # ---- tdx_batch：并发批量拉取（Phase 4，helio fiber 分片）----
 add_subdirectory(batch)
 
+# ---- tdx_taos：TDengine 导入层（多线程 + STMT 批量绑定）----
+add_subdirectory(taos)
+
 # ---- Task 1 smoke：验证 helio 集成（输出到 build/demos）----
 add_executable(tdx_smoke smoke.cc)
 set_target_properties(tdx_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/demos)
@@ -78,4 +81,4 @@ target_link_libraries(tdx_smoke PRIVATE base fibers2)
 
 # ---- tdx_cli：命令行工具（server-test / bars / ex-bars / fetch-history / import）----
 add_executable(tdx cli/main.cpp cli/import.cpp)
-target_link_libraries(tdx PRIVATE tdx_data tdx_query tdx_batch tdx_quotes base fibers2)
+target_link_libraries(tdx PRIVATE tdx_data tdx_query tdx_batch tdx_quotes tdx_taos base fibers2)

@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
               << "  tdx bars <code> <period> <count>   拉K线（如 tdx bars 600000 4 10）\n"
               << "  tdx ex-bars <market> <code> <period> <count>  扩展行情\n"
               << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n"
-              << "  tdx import [-p PATH] [-d DB] [-f] [codes...]  本地数据→DuckDB\n";
+              << "  tdx import [taos|duckdb] [full] [codes...]  本地数据→DuckDB/TDengine\n";
     return 1;
   }
   std::string cmd = argv[1];

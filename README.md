@@ -1,10 +1,10 @@
 # tdx-cpp
 
-通达信（TDX）行情数据 C++ 单库 v0.6.0。用 C++17 重写 [opentdx](https://github.com/rainx/opentdx)（协议层）+ [mootdx](https://github.com/mootdx/mootdx)（行情接口层）+ [tdxdata](https://github.com/rainx/tdxdata)（数据管理层），消除 Python 运行时依赖，获得确定性性能与协议字节级正确性。
+通达信（TDX）行情数据 C++ 单库 v0.7.0。用 C++17 重写 [opentdx](https://github.com/rainx/opentdx)（协议层）+ [mootdx](https://github.com/mootdx/mootdx)（行情接口层）+ [tdxdata](https://github.com/rainx/tdxdata)（数据管理层），消除 Python 运行时依赖，获得确定性性能与协议字节级正确性。
 
-异步 IO 采用 [helio](https://github.com/romange/helio)（io_uring + fiber 协程，C++17），存储采用 [DuckDB](https://duckdb.org/) 嵌入式引擎（Parquet 读写 + SQL 查询 + 内存热表，无 Arrow 依赖）。
+异步 IO 采用 [helio](https://github.com/romange/helio)（io_uring + fiber 协程，C++17），存储支持 [DuckDB](https://duckdb.org/) 嵌入式引擎（Parquet 读写 + SQL 查询）和 [TDengine](https://tdengine.com/) 时序数据库（多线程并发导入）。
 
-## 当前状态：Phase 1-4 全部完成（v0.6.0）
+## 当前状态：Phase 1-5 全部完成（v0.7.0）
 
 | 能力 | 模块 | 状态 |
 |---|---|---|
@@ -21,7 +21,8 @@
 | 并发批量拉取（helio fiber 分片，`-n` 并发数） | `tdx_batch` | ✅ |
 | 股票级断点续传（JSON 状态持久化 + 崩溃恢复） | `tdx_data` | ✅ |
 | DuckDB Parquet 落盘 + 即席 SQL | `tdx_query` | ✅ |
-| CLI 工具（bars / ex-bars / fetch-history） | `tdx` | ✅ |
+| CLI 工具（bars / ex-bars / fetch-history / import） | `tdx` | ✅ |
+| TDengine 多线程导入（本地数据+复权因子） | `tdx_taos` | ✅ v0.7.0 |
 | 真网端到端集成测试 | `test_e2e` | ✅ |
 
 ## 构建
@@ -139,25 +140,25 @@ test_e2e            # 端到端集成测试（真网）
 ```
                           tdx（CLI）
                             │
-              ┌─────────────┼─────────────┐
-              │             │             │
-          tdx_batch     tdx_data      tdx_query
-              │             │             │
-              ├─────────────┤             │
-              │         tdx_quotes ───────┘
-              │             │
-              └──────┬──────┘
-                     │
-                tdx_proto（INTERFACE umbrella）
-          ┌──────────┼──────────┬──────────┐
-          │          │          │          │
-   tdx_proto_core  parsers   local    transport
-   (frame/codec)   (7文件) (vipdoc) (conn/retry)
-          │
-       tdx_util（gbk/zlib-ng/absl::Time）
-          │
-    ┌─────┴──────────┐
-   zlib-ng    absl::time
+              ┌─────────────┼─────────────┬──────────┐
+              │             │             │          │
+          tdx_batch     tdx_data      tdx_query  tdx_taos
+              │             │             │          │
+              ├─────────────┤             │          │
+              │         tdx_quotes ───────┘          │
+              │             │                        │
+              └──────┬──────┘                        │
+                     │                               │
+                tdx_proto（INTERFACE umbrella）       │
+          ┌──────────┼──────────┬──────────┐         │
+          │          │          │          │         │
+   tdx_proto_core  parsers   local    transport      │
+   (frame/codec)   (7文件) (vipdoc) (conn/retry)     │
+          │                                          │
+       tdx_util（gbk/zlib-ng/absl::Time）             │
+          │                                          │
+    ┌─────┴──────────┐                               │
+   zlib-ng    absl::time                    libtaos.so (TDengine)
 ```
 
 ### 命名空间
@@ -169,6 +170,7 @@ test_e2e            # 端到端集成测试（真网）
 | `tdx::data` | 数据管理层（Calendar / Adjust / Resampler / SyncState / TdxData） |
 | `tdx::query` | DuckDB 查询层 |
 | `tdx::batch` | 并发批量拉取 |
+| `tdx::taos` | TDengine 导入层（多线程 + 批量 INSERT） |
 | `tdx::util` | 工具（GBK iconv、zlib-ng 解压、absl::Time 时区、字节序） |
 
 ### helio fiber 纪律

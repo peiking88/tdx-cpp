@@ -73,13 +73,20 @@ inline constexpr int kTickMaxCount  = 2000;  // 分笔单次上限
 inline constexpr double kPriceScale  = 100.0;  // 实时行情价格 /100
 inline constexpr double kAmountScale = 100.0;  // 金额 *100
 
-// 由股票代码首位推断市场（6/5/9/7 开头 SH，0/2/3 开头 SZ，4/8 开头 BJ）。
+// 由股票代码前两位推断市场（6/5/7/90/99 开头 SH，0/2/3 开头 SZ，4/8/89/92 开头 BJ）。
+// 88xxxx 是板块指数存储在 sh/；89/92xxxx 是北交所在 bj/。
+// 注意：前缀映射有歧义（如 00/13/20 同时存在于 SH 和 SZ），全量扫描优先。
 inline Market MarketFromCode(std::string_view code) {
-  if (code.empty()) return Market::SH;
-  char c = code[0];
-  if (c == '6' || c == '5' || c == '9' || c == '7') return Market::SH;
-  if (c == '0' || c == '2' || c == '3') return Market::SZ;
-  if (c == '4' || c == '8') return Market::BJ;
+  if (code.empty() || code.size() < 2) return Market::SH;
+  char c0 = code[0], c1 = code[1];
+  if (c0 == '6' || c0 == '5' || c0 == '7') return Market::SH;
+  if (c0 == '8' && c1 == '8') return Market::SH;  // 88xxxx 板块指数
+  if (c0 == '4' || c0 == '8') return Market::BJ;
+  if (c0 == '9') {
+    if (c1 == '2' || c1 == '8') return Market::BJ;  // 92/89xxxx 北交所
+    return Market::SH;  // 90/99xxxx SH bonds
+  }
+  if (c0 == '0' || c0 == '2' || c0 == '3') return Market::SZ;
   return Market::SH;  // ETF/可转债等默认 SH
 }
 

@@ -27,6 +27,7 @@
 #include "tdx/proto/vipdoc_reader.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/query/duckdb_query.hpp"
+#include "tdx/taos/taos_import.hpp"
 #include "tdx/types.hpp"
 #include "tdx/util/time_util.hpp"
 
@@ -38,9 +39,11 @@ namespace {
 struct ImportConfig {
   std::string vipdoc_path = "/home/li/.local/share/tdxcfv/drive_c/tc/vipdoc";
   std::string db_path = "output/tdx_kline.db";
+  std::string engine = "duckdb";  // "duckdb" | "taos"
   bool full = false;
   bool no_adjust = false;
   std::vector<std::string> codes;
+  tdx::taos::TaosConfig taos = tdx::taos::TaosConfig::FromEnv();
 };
 
 ImportConfig ParseArgs(int argc, char** argv) {
@@ -57,18 +60,27 @@ ImportConfig ParseArgs(int argc, char** argv) {
     if (a == "--jobs") { ++i; continue; }
     if (a.rfind("--jobs=", 0) == 0) continue;
     if (a == "full") cfg.full = true;
+    else if (a == "taos") cfg.engine = "taos";
+    else if (a == "duckdb") cfg.engine = "duckdb";
     else if (a == "help") {
-      std::cout << "用法: tdx import [full] [codes...]\n\n"
-                << "  full            全量导入（默认增量）\n"
-                << "  codes...        股票代码（默认扫描 vipdoc 全部）\n\n"
+      std::cout << "用法: tdx import [taos|duckdb] [full] [codes...]\n\n"
+                << "  taos|duckdb      存储引擎（默认 duckdb）\n"
+                << "  full             全量导入（默认增量）\n"
+                << "  codes...         股票代码（默认扫描 vipdoc 全部）\n\n"
                 << "环境变量:\n"
                 << "  TDX_HOME         vipdoc 路径（当前: " << cfg.vipdoc_path << "）\n"
                 << "  TDX_IMPORT_DB    DuckDB 路径（当前: " << cfg.db_path << "）\n"
-                << "  TDX_NO_ADJUST=1  跳过复权因子\n\n"
+                << "  TDX_NO_ADJUST=1  跳过复权因子\n"
+                << "  TDX_TAOS_HOST    TDengine 主机（默认 localhost）\n"
+                << "  TDX_TAOS_PORT    TDengine 端口（默认 6030）\n"
+                << "  TDX_TAOS_USER    TDengine 用户（默认 root）\n"
+                << "  TDX_TAOS_PASS    TDengine 密码（默认 taosdata）\n"
+                << "  TDX_TAOS_DB      数据库名（默认 tdx）\n\n"
                 << "示例:\n"
-                << "  tdx import                 增量导入全部\n"
-                << "  tdx import full            全量导入\n"
-                << "  tdx import 600000 000001   导入指定代码\n";
+                << "  tdx import                      增量导入（DuckDB）\n"
+                << "  tdx import taos full            全量导入（TDengine）\n"
+                << "  tdx import taos 600000          导入单只股票\n"
+                << "  tdx import taos 600000 -n 4     4 线程并发导入\n";
       std::exit(0);
     } else {
       cfg.codes.push_back(a);
@@ -186,9 +198,23 @@ int64_t ReadResampleWrite(tdx::proto::VipdocReader& reader,
 
 }  // namespace
 
-int DoImport(int argc, char** argv, int /*jobs*/) {
+int DoImport(int argc, char** argv, int jobs) {
   auto cfg = ParseArgs(argc, argv);
 
+  // ---- TDengine 引擎路由 ----
+  if (cfg.engine == "taos") {
+    tdx::taos::ImportTaosConfig tcfg;
+    tcfg.taos       = cfg.taos;
+    tcfg.vipdoc_path = cfg.vipdoc_path;
+    tcfg.full        = cfg.full;
+    tcfg.no_adjust   = cfg.no_adjust;
+    tcfg.jobs        = jobs;
+    tcfg.codes       = cfg.codes;
+    auto result = tdx::taos::DoImportTaos(tcfg);
+    return (result.codes_ok > 0) ? 0 : 1;
+  }
+
+  // ---- DuckDB 引擎（原有逻辑）----
   // tdx_home = vipdoc 父目录（VipdocReader 自动拼接 /vipdoc/...）
   std::string tdx_home = cfg.vipdoc_path;
   if (tdx_home.size() > 7 && tdx_home.substr(tdx_home.size() - 7) == "/vipdoc")
