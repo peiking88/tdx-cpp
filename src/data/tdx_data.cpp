@@ -14,8 +14,7 @@ std::vector<KLine> TdxData::FetchHistory(const std::vector<std::string>& codes,
                                          const std::string& end,
                                          const std::string& period,
                                          const std::string& dividend,
-                                         const std::string& batch_id,
-                                         const std::string& parquet_dir) {
+                                         const std::string& batch_id) {
   (void)start;
   (void)end;
   (void)dividend;  // TODO: 复权需 xdxr 事件流，v1 暂忽略
@@ -39,12 +38,6 @@ std::vector<KLine> TdxData::FetchHistory(const std::vector<std::string>& codes,
       sync_.MarkStockComplete(code, "history_kline", batch_id);
     } else {
       sync_.UpdateSync(code, "history_kline");
-    }
-    // T5 DuckDB Parquet 落盘
-    if (!parquet_dir.empty() && !bars.empty()) {
-      query::DuckDBQuery dq;
-      std::string path = parquet_dir + "/" + code + "_" + period + ".parquet";
-      dq.WriteKlineParquet(path, bars, code);
     }
     for (auto& b : bars) all.push_back(std::move(b));
   }

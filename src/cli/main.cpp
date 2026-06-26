@@ -22,7 +22,6 @@ ABSL_FLAG(uint32_t, jobs, 1, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/data/tdx_data.hpp"
-#include "tdx/query/duckdb_query.hpp"
 #include "tdx/batch/batch_fetch.hpp"
 #include "tdx/util/time_util.hpp"
 
@@ -132,18 +131,6 @@ int DoFetchHistory(int argc, char** argv) {
   return 0;
 }
 
-// DuckDB 即席 SQL 查询：tdx sql "SELECT ..."
-int DoSql(int argc, char** argv) {
-  if (argc < 3) {
-    std::cerr << "用法: tdx sql \"<SQL>\"（如 tdx sql \"SELECT * FROM 'k.parquet'\"）\n";
-    return 1;
-  }
-  tdx::query::DuckDBQuery q;
-  auto n = q.Exec(argv[2]);
-  std::cout << (n >= 0 ? "OK rows=" + std::to_string(n) : "ERROR") << "\n";
-  return 0;
-}
-
 // 并发批量拉取：tdx batch-fetch <code> [code...] [concurrency]
 int DoBatchFetch(int argc, char** argv) {
   std::vector<std::string> codes;
@@ -179,7 +166,7 @@ int main(int argc, char** argv) {
               << "  tdx bars <code> <period> <count>   拉K线（如 tdx bars 600000 4 10）\n"
               << "  tdx ex-bars <market> <code> <period> <count>  扩展行情\n"
               << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n"
-              << "  tdx import [taos|duckdb] [full] [codes...]  本地数据→DuckDB/TDengine\n";
+              << "  tdx import [taos] [codes...]  本地数据→TDengine\n";
     return 1;
   }
   std::string cmd = argv[1];
@@ -187,7 +174,6 @@ int main(int argc, char** argv) {
   if (cmd == "bars") return DoBars(argc, argv);
   if (cmd == "ex-bars") return DoExBars(argc, argv);
   if (cmd == "fetch-history") return DoFetchHistory(argc, argv);
-  if (cmd == "sql") return DoSql(argc, argv);
   if (cmd == "batch-fetch") return DoBatchFetch(argc, argv);
   if (cmd == "import") return DoImport(argc, argv, static_cast<int>(absl::GetFlag(FLAGS_jobs)));
   std::cerr << "未知命令: " << cmd << "\n";

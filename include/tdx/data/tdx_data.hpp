@@ -11,7 +11,6 @@
 
 #include "tdx/data/calendar.hpp"
 #include "tdx/data/sync_state.hpp"
-#include "tdx/query/duckdb_query.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/types.hpp"
 
@@ -31,13 +30,12 @@ class TdxData {
   bool IsConnected() const { return sq_.IsConnected(); }
 
   // fetch_history（对齐 api.py:47）。
-  // batch_id 非空时启用断点续传（跳过已完成股票）；parquet_dir 非空时落盘 Parquet。
+  // batch_id 非空时启用断点续传（跳过已完成股票）。
   std::vector<KLine> FetchHistory(const std::vector<std::string>& codes,
                                   const std::string& start, const std::string& end,
                                   const std::string& period = "1d",
                                   const std::string& dividend = "none",
-                                  const std::string& batch_id = "",
-                                  const std::string& parquet_dir = "");
+                                  const std::string& batch_id = "");
 
   // 增量同步状态查询（对齐 api.py:204）
   std::string SyncStatus(const std::string& code,

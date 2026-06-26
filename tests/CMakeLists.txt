@@ -28,14 +28,6 @@ function(tdx_test_data name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-# DuckDB 查询层测试：链 tdx_query（duckdb IMPORTED，无 Arrow）
-function(tdx_test_query name)
-  add_executable(${name} ${name}.cpp)
-  target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
-  target_link_libraries(${name} PRIVATE tdx_query gtest gtest_main)
-  add_test(NAME ${name} COMMAND ${name})
-endfunction()
-
 # 精细链接：仅链接所需子 target，避免冗余 fibers2 依赖
 add_executable(test_codec test_codec.cpp)
 target_include_directories(test_codec PRIVATE ${CMAKE_SOURCE_DIR}/include)
@@ -91,7 +83,6 @@ add_executable(test_sync4 test_sync4.cpp)
 target_include_directories(test_sync4 PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_sync4 PRIVATE tdx_data base fibers2 gtest)
 add_test(NAME test_sync4 COMMAND test_sync4)
-tdx_test_query(test_duckdb)
 # 需要 transport 的测试：core + transport + fibers2（含 ProactorPool 编排）
 add_executable(test_retry test_retry.cpp)
 target_include_directories(test_retry PRIVATE ${CMAKE_SOURCE_DIR}/include)
@@ -106,7 +97,7 @@ add_test(NAME test_server_pool COMMAND test_server_pool)
 # 端到端集成测试（真网通达信服务器 7709）：custom main + ProactorPool
 add_executable(test_e2e test_e2e.cpp)
 target_include_directories(test_e2e PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(test_e2e PRIVATE tdx_quotes tdx_query tdx_data base fibers2 gtest)
+target_link_libraries(test_e2e PRIVATE tdx_quotes tdx_data base fibers2 gtest)
 add_test(NAME test_e2e COMMAND test_e2e)
 
 # golden 测试需 fixtures 路径

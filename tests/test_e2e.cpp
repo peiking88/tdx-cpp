@@ -1,11 +1,11 @@
-// 端到端集成测试：真网连接通达信服务器（端口 7709）→ 登录 → 取数据 → 落盘 DuckDB。
+// 端到端集成测试：真网连接通达信服务器（端口 7709）→ 登录 → 取数据。
 // 仅在通达信服务器可达时执行（不可达时 GTEST_SKIP，不视为失败）。
 // custom main（MainInitGuard）：需 helio ProactorPool fiber 编排。
 //
 // 覆盖链路：TCP Connect → Login(0x0d) → Heartbeat(0x04)
 //           → StockCount(0x44e) → StockList(0x44d)
 //           → Kline(0x523) → Quotes(0x53e) → Transaction(0xfc5)
-//           → DuckDB Parquet 读写 → SyncState 批次记录
+//           → SyncState 批次记录
 //
 // 验证策略：返回数量 > 50 的，仅验证样本或总数（遵循全局规范）。
 //
@@ -20,7 +20,6 @@
 #include "base/init.h"
 
 #include "tdx/data/sync_state.hpp"
-#include "tdx/query/duckdb_query.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 
 using namespace tdx;
@@ -123,22 +122,6 @@ TEST_F(E2ETest, Transaction600000) {
                 txns[i].buy_sell == BuySell::Sell ||
                 txns[i].buy_sell == BuySell::Neutral);
   }
-}
-
-// ==================== DuckDB Parquet 落盘 + 读回 ====================
-TEST_F(E2ETest, DuckDBParquetRoundTrip) {
-  auto bars = g_sq->Bars(Market::SH, "600000", Period::DAILY, 0, 20);
-  ASSERT_GE(bars.size(), 1u) << "需至少 1 根 K 线才能测试 Parquet";
-
-  query::DuckDBQuery dq;
-  std::string path = "/tmp/tdx_e2e_600000.parquet";
-  dq.WriteKlineParquet(path, bars, "600000");
-
-  auto read = dq.ReadKlineParquet(path);
-  ASSERT_EQ(read.size(), bars.size()) << "Parquet 读写数量应一致";
-  EXPECT_EQ(read[0].datetime, bars[0].datetime);
-  EXPECT_EQ(read.back().datetime, bars.back().datetime);
-  std::remove(path.c_str());
 }
 
 // ==================== SyncState 断点续传记录 ====================

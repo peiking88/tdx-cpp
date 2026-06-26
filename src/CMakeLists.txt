@@ -65,9 +65,6 @@ target_link_libraries(tdx_quotes PUBLIC tdx_proto)
 # ---- tdx_data：数据管理层（Phase 3）----
 add_subdirectory(data)
 
-# ---- tdx_query：DuckDB 查询层（Phase 4，Parquet 读写+SQL，无 Arrow）----
-add_subdirectory(query)
-
 # ---- tdx_batch：并发批量拉取（Phase 4，helio fiber 分片）----
 add_subdirectory(batch)
 
@@ -81,4 +78,4 @@ target_link_libraries(tdx_smoke PRIVATE base fibers2)
 
 # ---- tdx_cli：命令行工具（server-test / bars / ex-bars / fetch-history / import）----
 add_executable(tdx cli/main.cpp cli/import.cpp)
-target_link_libraries(tdx PRIVATE tdx_data tdx_query tdx_batch tdx_quotes tdx_taos base fibers2)
+target_link_libraries(tdx PRIVATE tdx_data tdx_batch tdx_quotes tdx_taos base fibers2)
