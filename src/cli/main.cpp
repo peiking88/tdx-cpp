@@ -23,7 +23,12 @@ ABSL_FLAG(uint32_t, jobs, 1, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/data/tdx_data.hpp"
 #include "tdx/batch/batch_fetch.hpp"
+#include "tdx/taos/taos_connection.hpp"
+#include "tdx/taos/taos_import.hpp"
 #include "tdx/util/time_util.hpp"
+
+#include <set>
+#include <taos.h>
 
 using namespace tdx;
 
@@ -153,6 +158,121 @@ int DoBatchFetch(int argc, char** argv) {
   return 0;
 }
 
+// TDengine VARCHAR 字段：row[0] 指向数据，2字节LE长度前缀在 row[0]-2
+static std::string ReadVarChar(void* col) {
+  if (!col) return {};
+  const auto* p = static_cast<const unsigned char*>(col);
+  uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
+  return std::string(reinterpret_cast<const char*>(p), len);
+}
+
+// 检查库中股票代码是否都有名称：tdx check-names
+int DoCheckNames() {
+  using tdx::taos::TaosConfig;
+  using tdx::taos::TaosConnection;
+  using tdx::taos::ExecSQL;
+
+  TaosConfig cfg = TaosConfig::FromEnv();
+  TaosConnection conn(cfg);
+  if (!conn) {
+    std::cerr << "TDengine 连接失败\n";
+    return 1;
+  }
+  ExecSQL(conn.native(), "USE tdx");
+
+  // 拉取 kline 中所有 distinct code（tag 查询）
+  std::set<std::string> kline_codes;
+  {
+    TAOS_RES* res = ::taos_query(conn.native(), "SELECT DISTINCT code FROM kline");
+    if (!res || ::taos_errno(res) != 0) {
+      std::cerr << "查询 kline code 失败: " << (res ? ::taos_errstr(res) : "null") << "\n";
+      ::taos_free_result(res);
+      return 1;
+    }
+    TAOS_ROW row;
+    while ((row = ::taos_fetch_row(res))) {
+      if (row[0]) kline_codes.insert(ReadVarChar(row[0]));
+    }
+    ::taos_free_result(res);
+  }
+
+  // 拉取 stock_name 中所有 code（表不存在不视为错误）
+  std::set<std::string> name_codes;
+  {
+    TAOS_RES* res = ::taos_query(conn.native(), "SELECT code FROM stock_name");
+    if (res && ::taos_errno(res) == 0) {
+      TAOS_ROW row;
+      while ((row = ::taos_fetch_row(res))) {
+        if (row[0]) name_codes.insert(ReadVarChar(row[0]));
+      }
+    }
+    // 表不存在 = 空集合，后续报告为全部缺名称
+    ::taos_free_result(res);
+  }
+
+  // 比较
+  std::vector<std::string> missing_names;  // 有 K 线无名称
+  std::vector<std::string> orphan_names;   // 有名称无 K 线
+  for (const auto& c : kline_codes)
+    if (!name_codes.count(c)) missing_names.push_back(c);
+  for (const auto& c : name_codes)
+    if (!kline_codes.count(c)) orphan_names.push_back(c);
+
+  std::cout << "K 线代码:   " << kline_codes.size() << " 个\n"
+            << "名称记录:   " << name_codes.size() << " 个\n";
+
+  if (missing_names.empty() && orphan_names.empty()) {
+    std::cout << "结论:       全部匹配 ✓\n";
+  } else {
+    if (!missing_names.empty()) {
+      std::cout << "缺名称:     " << missing_names.size() << " 个\n";
+      for (size_t i = 0; i < missing_names.size() && i < 20; ++i)
+        std::cout << "  " << missing_names[i] << "\n";
+      if (missing_names.size() > 20)
+        std::cout << "  ... 共 " << missing_names.size() << " 个\n";
+    }
+    if (!orphan_names.empty()) {
+      std::cout << "孤立名称:   " << orphan_names.size() << " 个\n";
+      for (size_t i = 0; i < orphan_names.size() && i < 20; ++i)
+        std::cout << "  " << orphan_names[i] << "\n";
+      if (orphan_names.size() > 20)
+        std::cout << "  ... 共 " << orphan_names.size() << " 个\n";
+    }
+  }
+  return 0;
+}
+
+// 独立同步股票名称：tdx sync-names
+int DoSyncNames() {
+  using tdx::taos::TaosConfig;
+  using tdx::taos::TaosConnection;
+  using tdx::taos::ExecSQL;
+
+  TaosConfig cfg = TaosConfig::FromEnv();
+  TaosConnection conn(cfg);
+  if (!conn) { std::cerr << "TDengine 连接失败\n"; return 1; }
+  ExecSQL(conn.native(), "USE tdx");
+  int n = tdx::taos::SyncStockNames(conn.native());
+  std::cout << "同步完成: " << n << " 条名称\n";
+  return 0;
+}
+
+// 清理非 A 股及退市标的：tdx cleanup
+int DoCleanup() {
+  using tdx::taos::TaosConfig;
+  using tdx::taos::TaosConnection;
+  using tdx::taos::ExecSQL;
+
+  TaosConfig cfg = TaosConfig::FromEnv();
+  TaosConnection conn(cfg);
+  if (!conn) { std::cerr << "TDengine 连接失败\n"; return 1; }
+  ExecSQL(conn.native(), "USE tdx");
+  int n = tdx::taos::CleanupStaleCodes(conn.native());
+  if (n < 0) { std::cerr << "清理失败（stock_name 表不存在？请先运行 sync-names）\n"; return 1; }
+  std::cout << "清理完成: " << n << " 只过期标的\n";
+  return 0;
+}
+
 }  // namespace
 
 // import 子命令（定义在 cli/import.cpp，不在 namespace 内）
@@ -166,7 +286,10 @@ int main(int argc, char** argv) {
               << "  tdx bars <code> <period> <count>   拉K线（如 tdx bars 600000 4 10）\n"
               << "  tdx ex-bars <market> <code> <period> <count>  扩展行情\n"
               << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n"
-              << "  tdx import [taos] [codes...]  本地数据→TDengine\n";
+              << "  tdx import [taos] [codes...]  本地数据→TDengine\n"
+              << "  tdx check-names                 检查代码名称完整性\n"
+              << "  tdx sync-names                  独立同步代码→名称对照表\n"
+              << "  tdx cleanup                     清理非A股/退市标的子表\n";
     return 1;
   }
   std::string cmd = argv[1];
@@ -176,6 +299,9 @@ int main(int argc, char** argv) {
   if (cmd == "fetch-history") return DoFetchHistory(argc, argv);
   if (cmd == "batch-fetch") return DoBatchFetch(argc, argv);
   if (cmd == "import") return DoImport(argc, argv, static_cast<int>(absl::GetFlag(FLAGS_jobs)));
+  if (cmd == "check-names") return DoCheckNames();
+  if (cmd == "sync-names") return DoSyncNames();
+  if (cmd == "cleanup") return DoCleanup();
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

@@ -30,4 +30,10 @@ struct ImportResult {
 // 主入口：扫描 vipdoc → 多线程导入 TDengine
 ImportResult DoImportTaos(const ImportTaosConfig& cfg);
 
+// 独立同步股票代码→名称对照表（可脱离 import 单独调用）
+int SyncStockNames(TAOS* conn);
+
+// 独立清理非 A 股及退市标的子表（可脱离 import 单独调用）
+int CleanupStaleCodes(TAOS* conn);
+
 }  // namespace tdx::taos

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <iostream>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -33,6 +34,16 @@ inline constexpr int kBatchSize = 1000;
 
 namespace {
 
+// ponytail: 只保留 A 股——排除债券(1x/2x)、ETF/LOF(5x)、B 股(9x)、板块指数(88)、港股通(7x)
+static bool IsAStock(const std::string& code) {
+  if (code.size() < 6) return false;
+  char c0 = code[0];
+  if (c0 == '0' || c0 == '3') return true;   // 深市 000-003 / 创业板 300-301
+  if (c0 == '6') return true;                 // 沪市 600-605 / 科创板 688
+  if (c0 == '8' && code[1] != '8') return true; // 北交所(8x)，排除板块指数(88)
+  return false;
+}
+
 // ---- vipdoc 代码扫描（复用 import.cpp 逻辑）----
 std::vector<std::pair<Market, std::string>> ScanCodes(const std::string& tdx_root) {
   std::vector<std::pair<Market, std::string>> result;
@@ -50,6 +61,7 @@ std::vector<std::pair<Market, std::string>> ScanCodes(const std::string& tdx_roo
       for (char c : code)
         if (!std::isdigit(static_cast<unsigned char>(c))) { all_digit = false; break; }
       if (!all_digit) continue;
+      if (!IsAStock(code)) continue;  // 跳过债券/ETF/B股
       result.emplace_back(m, code);
     }
   }
@@ -222,6 +234,100 @@ struct Worker {
 
 namespace tdx::taos {
 
+// 清理非 A 股及退市标的：遍历 kline/adjust 子表，删除不在 stock_name 中的代码。
+int CleanupStaleCodes(TAOS* conn) {
+  std::cout << "清理:     扫描过期标的..." << std::flush;
+
+  // 收集 stock_name 中的有效代码
+  std::set<std::string> valid;
+  TAOS_RES* res = ::taos_query(conn, "SELECT code FROM stock_name");
+  if (res && ::taos_errno(res) == 0) {
+    TAOS_ROW row;
+    while ((row = ::taos_fetch_row(res))) {
+      if (row[0]) {
+        const auto* p = static_cast<const unsigned char*>(row[0]);
+        uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
+        valid.insert(std::string(reinterpret_cast<const char*>(p), len));
+      }
+    }
+  }
+  ::taos_free_result(res);
+  if (valid.empty()) { std::cout << " stock_name 为空，跳过\n"; return 0; }
+
+  // 扫描 kline 子表
+  std::set<std::string> stale;
+  const char* periods[] = {"1d", "1m", "5m"};
+  res = ::taos_query(conn, "SELECT DISTINCT code FROM kline");
+  if (res && ::taos_errno(res) == 0) {
+    TAOS_ROW row;
+    while ((row = ::taos_fetch_row(res))) {
+      if (!row[0]) continue;
+      const auto* p = static_cast<const unsigned char*>(row[0]);
+      uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
+      std::string code(reinterpret_cast<const char*>(p), len);
+      if (!valid.count(code)) stale.insert(code);
+    }
+  }
+  ::taos_free_result(res);
+
+  if (stale.empty()) { std::cout << " 无需清理\n"; return 0; }
+
+  int dropped = 0;
+  for (const auto& code : stale) {
+    for (auto* period : periods) {
+      std::string tb = "k_" + code + "_" + period;
+      if (ExecAffected(conn, "DROP TABLE IF EXISTS " + tb) >= 0) ++dropped;
+    }
+    if (ExecAffected(conn, "DROP TABLE IF EXISTS a_" + code) >= 0) ++dropped;
+  }
+  std::cout << " " << stale.size() << " 只代码 / " << dropped << " 张子表\n";
+  return static_cast<int>(stale.size());
+}
+
+// 全量拉取沪深京 A 股名称写入 TDengine stock_name 表。
+// ponytail: DROP+CREATE+批量INSERT，保证一致性。
+int SyncStockNames(TAOS* conn) {
+  std::cout << "股票名称: 同步中..." << std::flush;
+
+  ExecSQL(conn, "DROP TABLE IF EXISTS stock_name");
+  ExecSQL(conn,
+          "CREATE TABLE stock_name ("
+          "ts TIMESTAMP, code VARCHAR(10), name VARCHAR(64))");
+
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect(); ec) {
+    std::cerr << " StdQuotes 连接失败（" << ec.message() << "）\n";
+    return 0;
+  }
+
+  int count = 0;
+  int64_t ts_seq = 0;
+  for (auto market : {Market::SH, Market::SZ, Market::BJ}) {
+    uint16_t total = sq.StockCount(market);
+    for (uint16_t start = 0; start < total; start += 1600) {
+      auto stocks = sq.Stocks(market, start, 1600);
+      if (stocks.empty()) continue;
+
+      std::ostringstream sql;
+      sql << "INSERT INTO stock_name VALUES";
+      size_t batch_cnt = 0;
+      for (size_t i = 0; i < stocks.size(); ++i) {
+        if (!IsAStock(stocks[i].code)) continue;
+        if (batch_cnt > 0) sql << ' ';
+        sql << "(" << ts_seq++ << ", '" << EscapeSql(stocks[i].code) << "', '"
+            << EscapeSql(stocks[i].name) << "')";
+        ++batch_cnt;
+      }
+      if (batch_cnt == 0) continue;
+      ExecAffected(conn, sql.str());
+      count += static_cast<int>(batch_cnt);
+    }
+  }
+  sq.Close();
+  std::cout << " " << count << " 条\n";
+  return count;
+}
+
 ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
   ImportResult result;
 
@@ -233,8 +339,13 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
   // 2. 扫描代码
   std::vector<std::pair<Market, std::string>> targets;
   if (!cfg.codes.empty()) {
-    for (const auto& c : cfg.codes)
+    for (const auto& c : cfg.codes) {
+      if (!IsAStock(c)) {
+        std::cerr << "跳过非 A 股代码: " << c << "\n";
+        continue;
+      }
       targets.emplace_back(MarketFromCode(c), c);
+    }
   } else {
     targets = ScanCodes(tdx_home);
   }
@@ -320,40 +431,11 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     result.adjust_events += w.adjust_events;
   }
 
-  // 6. 同步股票代码→名称对照表（ponytail: 每次导入后全量重建，保证一致性）
-  {
-    std::cout << "股票名称: 同步中..." << std::flush;
+  // 6. 同步股票代码→名称对照表
+  result.stock_names = SyncStockNames(conn.native());
 
-    ExecSQL(conn.native(), "DROP TABLE IF EXISTS stock_name");
-    ExecSQL(conn.native(),
-            "CREATE TABLE stock_name ("
-            "ts TIMESTAMP, code VARCHAR(10), name VARCHAR(64))");
-
-    quotes::StdQuotes sq;
-    if (auto ec = sq.Connect(); ec) {
-      std::cerr << " StdQuotes 连接失败（" << ec.message() << "），跳过\n";
-    } else {
-      for (auto market : {Market::SH, Market::SZ, Market::BJ}) {
-        uint16_t total = sq.StockCount(market);
-        for (uint16_t start = 0; start < total; start += 1600) {
-          auto stocks = sq.Stocks(market, start, 1600);
-          if (stocks.empty()) continue;
-
-          std::ostringstream sql;
-          sql << "INSERT INTO stock_name VALUES";
-          for (size_t i = 0; i < stocks.size(); ++i) {
-            if (i > 0) sql << ' ';
-            sql << "(NOW, '" << EscapeSql(stocks[i].code) << "', '"
-                << EscapeSql(stocks[i].name) << "')";
-          }
-          ExecAffected(conn.native(), sql.str());
-          result.stock_names += static_cast<int>(stocks.size());
-        }
-      }
-      sq.Close();
-    }
-    std::cout << " " << result.stock_names << " 条\n";
-  }
+  // 7. 清理非 A 股及退市标的子表
+  int cleaned = CleanupStaleCodes(conn.native());
 
   auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
       std::chrono::steady_clock::now() - t0).count();
@@ -363,6 +445,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
             << "K线:    " << result.kline_rows << " 行\n"
             << "复权:   " << result.adjust_events << " 条\n"
             << "名称:   " << result.stock_names << " 条\n"
+            << "清理:   " << cleaned << " 只\n"
             << "耗时:   " << elapsed << "s\n"
             << "数据库: tdx @ " << cfg.taos.host << ":" << cfg.taos.port << "\n";
 
