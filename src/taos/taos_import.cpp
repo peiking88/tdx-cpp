@@ -34,13 +34,26 @@ inline constexpr int kBatchSize = 1000;
 
 namespace {
 
-// ponytail: 只保留 A 股——排除债券(1x/2x)、ETF/LOF(5x)、B 股(9x)、板块指数(88)、港股通(7x)
+// 保留 A 股 + 指数 + ETF + 基金，排除债券(1x/2x)、B 股(9x)、港股通(7x)
 static bool IsAStock(const std::string& code) {
   if (code.size() < 6) return false;
   char c0 = code[0];
-  if (c0 == '0' || c0 == '3') return true;   // 深市 000-003 / 创业板 300-301
-  if (c0 == '6') return true;                 // 沪市 600-605 / 科创板 688
-  if (c0 == '8' && code[1] != '8') return true; // 北交所(8x)，排除板块指数(88)
+  char c1 = code[1];
+  // A 股
+  if (c0 == '0' || c0 == '3') return true;   // 深市主板/中小 000-003 / 创业板 300-301 / 深证指数 399
+  if (c0 == '6') return true;                 // 沪市主板 600-605 / 科创板 688
+  // 北交所 A 股
+  if (c0 == '4') return true;                 // 4xxxxx
+  if (c0 == '8' && c1 != '8') return true;    // 8xxxxx（非板块指数）
+  // 指数
+  if (c0 == '8' && c1 == '8') return true;    // 88xxxx 板块指数
+  // ETF / LOF 基金
+  if (c0 == '5') return true;                 // 沪市 ETF/LOF (5xxxxx)
+  if (c0 == '1') {
+    if (c1 == '5' && code[2] == '9') return true;  // 深市 ETF (159xxx)
+    if (c1 == '6') return true;                    // 深市 LOF (16xxxx)
+  }
+  // 排除: 1xxxxx(债券,除 159/16), 2xxxxx(B 股/债券), 7xxxxx(港股通), 9xxxxx(B 股)
   return false;
 }
 
@@ -61,7 +74,7 @@ std::vector<std::pair<Market, std::string>> ScanCodes(const std::string& tdx_roo
       for (char c : code)
         if (!std::isdigit(static_cast<unsigned char>(c))) { all_digit = false; break; }
       if (!all_digit) continue;
-      if (!IsAStock(code)) continue;  // 跳过债券/ETF/B股
+      if (!IsAStock(code)) continue;  // 跳过债券/B 股/港股通
       result.emplace_back(m, code);
     }
   }
