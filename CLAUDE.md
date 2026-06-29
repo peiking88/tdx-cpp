@@ -4,7 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**Phase 1-4 全部完成（v0.5.0）。** 协议层 + A股标准行情（Phase 1, v0.1.0）+ 扩展行情/SP/MAC（Phase 2, v0.2.0）+ 数据管理核心 Calendar/Adjust/Resampler/SyncState/TdxData（Phase 3, v0.3.0）+ v2 改进 external/统一/断点续传/并发批量（Phase 4, v0.4.0）+ 加固 time_util abseil 替代 POSIX / SQL 注入防护 / 离线构建 / e2e 真网测试（v0.5.0）。本文件作为 C++ 实现的设计蓝图与协议知识库。
+**Phase 1-5 全部完成（v0.9.2）。** 协议层 + A股标准行情（Phase 1, v0.1.0）+ 扩展行情/SP/MAC（Phase 2, v0.2.0）+ 数据管理核心 Calendar/Adjust/Resampler/SyncState/TdxData（Phase 3, v0.3.0）+ v2 改进 external/统一/断点续传/并发批量（Phase 4, v0.4.0）+ 加固 time_util abseil 替代 POSIX / SQL 注入防护 / 离线构建 / e2e 真网测试（v0.5.0）+ TDengine 导入与代码名称管理（Phase 5, v0.9.2）。本文件作为 C++ 实现的设计蓝图与协议知识库。
+
+**近期里程碑（v0.6.0 → v0.9.2）：**
+- **v0.6.0**：`tdx import` 本地 vipdoc 数据导入 + XDXR 除权除息协议 + 构建路径重构
+- **v0.7.0**：TDengine 多线程并发导入 + 增量/全量自动判断
+- **v0.8.0**：移除 DuckDB，统一存储后端为 TDengine
+- **v0.9.0**：导入后自动建立股票代码→名称对照表
+- **v0.9.1**：A股代码名称管理三件套（`sync-names` / `cleanup` / `check-names`）
+- **v0.9.2**：导入过滤修复——补全北交所/ETF/LOF/板块指数遗漏
 
 ## 项目目标
 
@@ -61,6 +69,28 @@ C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser
 - **SP/MAC 高级行情**：板块列表/成员、资金流向、集合竞价、异动监控（需 `client.sp()` 切换到 mac_hosts）。
 - **本地数据**：`.day/.lc1/.lc5` 读取与时效性校验。
 - **数据管理（tdxdata 层）**：统一 API、熔断器+指数退避重试、增量同步（JSON 状态持久化）、本地优先+网络补缺的混合数据源、自算复权因子、A 股交易时段感知的 K 线重采样、标准化输出 schema。
+
+### 本地数据导入与过滤（v0.9.2）
+
+`tdx import` 从本地 vipdoc 目录导入日线到 TDengine，通过 `IsAStock()` 过滤代码：
+
+| 包含 | 代码段 | 说明 |
+|---|---|---|
+| 深市主板/中小 | `0xxxxx` | A股 |
+| 创业板 | `3xxxxx` | 含深证指数 `399xxx` |
+| 沪市主板/科创板 | `6xxxxx` | A股 |
+| 北交所 | `4xxxxx`, `8xxxxx` | 不含 `88` 板块指数 |
+| 板块/沪深指数 | `88xxxx` | 通达信板块指数 |
+| 沪市 ETF/LOF | `5xxxxx` | 基金 |
+| 深市 ETF | `159xxx` | 基金 |
+| 深市 LOF | `16xxxx` | 基金 |
+| **排除** | | |
+| 债券 | `1xxxxx`(非159/16) | 含可转债 |
+| B股/债券 | `2xxxxx` | |
+| 港股通 | `7xxxxx` | |
+| B股 | `9xxxxx` | |
+
+对照表 `stock_names.json` 由 `sync-names` 建立，`check-names` 校验完整性，`cleanup` 清理对照表中已不再覆盖的冗余条目。
 
 ## 上游短板与改进路线（Phase 4 全部完成 ✅）
 
@@ -125,7 +155,7 @@ C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser
 | `tdx::data` | `tdx_data` | 数据管理层（Calendar / Adjust / Resampler / SyncState / TdxData） |
 | `tdx::taos` | `tdx_taos` | TDengine 导入层（多线程 + 批量 INSERT） |
 | `tdx::batch` | `tdx_batch` | 并发批量拉取（helio fiber 池分片 + `-n` 并发数） |
-| `tdx` (exe) | `tdx` | CLI 入口（server-test / bars / ex-bars / fetch-history） |
+| `tdx` (exe) | `tdx` | CLI 入口（server-test / bars / ex-bars / import / sync-names / cleanup / check-names / batch-fetch） |
 
 ## helio fiber 编码纪律（关键约束）
 
@@ -167,8 +197,12 @@ ctest --test-dir build -R <test_name> -V
 ./build/bin/tdx server-test                              # 测速选服
 ./build/bin/tdx bars 600000 4 10                         # 拉日 K
 ./build/bin/tdx ex-bars 31 HSImain 4 10                  # 扩展行情 K 线
-./build/bin/tdx fetch-history --stock-list stock.txt \
+./build/bin/tdx batch-fetch --stock-list stock.txt \
     --start 2024-01-01 --end 2024-06-01 -n 16 --resume   # 批量拉取+断点续传
+./build/bin/tdx import --tdx-root ~/.wine/.../tdx        # 本地 vipdoc 导入 TDengine
+./build/bin/tdx sync-names                               # 同步股票代码→名称对照表
+./build/bin/tdx cleanup                                   # 清理冗余代码
+./build/bin/tdx check-names                               # 检查名称表覆盖完整性
 ```
 
 **真实网络测试**（连接通达信服务器）优先级高于 mock，参考上游的 `pytest -m live`（连真服）与 `-m local`（读本地文件）划分。e2e 测试（`test_e2e`）在服务器不可达时自动 `GTEST_SKIP`，不视为失败。
