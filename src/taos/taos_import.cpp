@@ -320,6 +320,41 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     result.adjust_events += w.adjust_events;
   }
 
+  // 6. 同步股票代码→名称对照表（ponytail: 每次导入后全量重建，保证一致性）
+  {
+    std::cout << "股票名称: 同步中..." << std::flush;
+
+    ExecSQL(conn.native(), "DROP TABLE IF EXISTS stock_name");
+    ExecSQL(conn.native(),
+            "CREATE TABLE stock_name ("
+            "ts TIMESTAMP, code VARCHAR(10), name VARCHAR(64))");
+
+    quotes::StdQuotes sq;
+    if (auto ec = sq.Connect(); ec) {
+      std::cerr << " StdQuotes 连接失败（" << ec.message() << "），跳过\n";
+    } else {
+      for (auto market : {Market::SH, Market::SZ, Market::BJ}) {
+        uint16_t total = sq.StockCount(market);
+        for (uint16_t start = 0; start < total; start += 1600) {
+          auto stocks = sq.Stocks(market, start, 1600);
+          if (stocks.empty()) continue;
+
+          std::ostringstream sql;
+          sql << "INSERT INTO stock_name VALUES";
+          for (size_t i = 0; i < stocks.size(); ++i) {
+            if (i > 0) sql << ' ';
+            sql << "(NOW, '" << EscapeSql(stocks[i].code) << "', '"
+                << EscapeSql(stocks[i].name) << "')";
+          }
+          ExecAffected(conn.native(), sql.str());
+          result.stock_names += static_cast<int>(stocks.size());
+        }
+      }
+      sq.Close();
+    }
+    std::cout << " " << result.stock_names << " 条\n";
+  }
+
   auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
       std::chrono::steady_clock::now() - t0).count();
 
@@ -327,6 +362,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
             << "股票:   " << result.codes_ok << "/" << result.codes_total << "\n"
             << "K线:    " << result.kline_rows << " 行\n"
             << "复权:   " << result.adjust_events << " 条\n"
+            << "名称:   " << result.stock_names << " 条\n"
             << "耗时:   " << elapsed << "s\n"
             << "数据库: tdx @ " << cfg.taos.host << ":" << cfg.taos.port << "\n";
 

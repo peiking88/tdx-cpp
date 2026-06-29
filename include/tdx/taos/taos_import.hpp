@@ -24,6 +24,7 @@ struct ImportResult {
   int codes_ok = 0;
   int64_t kline_rows = 0;
   int adjust_events = 0;
+  int stock_names = 0;
 };
 
 // 主入口：扫描 vipdoc → 多线程导入 TDengine
