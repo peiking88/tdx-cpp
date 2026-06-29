@@ -14,6 +14,7 @@
 #include <iostream>
 #include <mutex>
 #include <set>
+#include <unordered_map>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -31,6 +32,40 @@ using namespace tdx::taos;
 using tdx::proto::VipdocReader;
 
 inline constexpr int kBatchSize = 1000;
+
+// 复权缓存：代码 → 除权除息事件列表
+using XdxrCache = std::unordered_map<std::string, std::vector<tdx::Xdxr>>;
+
+// 单 StdQuotes 预取全部标的复权因子，避免多 worker 各创 ProactorPool(64 IO 线程)
+// 引发 helio fiber scheduler 冲突（"Fibers belong to different schedulers"）。
+// 返回 code → Xdxr 映射；网络失败容错（打印警告并继续）。
+static XdxrCache PrefetchXdxr(
+    const std::vector<std::pair<Market, std::string>>& targets) {
+  XdxrCache cache;
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect(); ec) {
+    std::fprintf(stderr, "复权预取: StdQuotes 连接失败 (%s)，跳过复权\n",
+                 ec.message().c_str());
+    return cache;
+  }
+
+  int ok = 0, fail = 0;
+  for (const auto& [market, code] : targets) {
+    try {
+      auto xdxr = sq.GetXdxr(market, code);
+      if (!xdxr.empty()) {
+        cache[code] = std::move(xdxr);
+        ++ok;
+      }
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "复权预取: %s 失败 %s\n", code.c_str(), e.what());
+      ++fail;
+    }
+  }
+  sq.Close();
+  std::cout << "复权预取: " << ok << " 只有效 / " << fail << " 失败\n";
+  return cache;
+}
 
 namespace {
 
@@ -127,6 +162,7 @@ struct Worker {
   int id;
   const ImportTaosConfig& cfg;
   std::vector<std::pair<Market, std::string>> subset;
+  const XdxrCache& xdxr_cache;  // 主线程预取的复权因子（只读，多线程安全）
 
   int codes_ok = 0;
   int64_t kline_rows = 0;
@@ -141,16 +177,6 @@ struct Worker {
 
     VipdocReader reader(cfg.vipdoc_path);
 
-    // 复权
-    bool have_adjust = !cfg.no_adjust;
-    std::unique_ptr<quotes::StdQuotes> sq;
-    bool sq_ok = false;
-    if (have_adjust) {
-      sq = std::make_unique<quotes::StdQuotes>();
-      if (!sq->Connect()) sq_ok = true;
-      else std::fprintf(stderr, "[w%d] StdQuotes 连接失败，跳过复权\n", id);
-    }
-
     for (const auto& [market, code] : subset) {
       // === K 线 ===
       int64_t n = ImportKlineRaw(conn.native(), reader, market, code, "lday", "day", "1d");
@@ -158,35 +184,29 @@ struct Worker {
       n += ImportKlineRaw(conn.native(), reader, market, code, "fzline", "lc5", "5m");
       if (n > 0) { kline_rows += n; ++codes_ok; }
 
-      // === 复权 ===
-      if (sq_ok && sq) {
-        try {
-          auto xdxr = sq->GetXdxr(market, code);
-          if (!xdxr.empty()) {
-            std::string tb = "a_" + code;
-            int64_t last_ts_a = LastTimestamp(conn.native(), tb);
-            for (const auto& x : xdxr) {
-              int64_t ts = tdx::util::date_to_epoch(
-                  std::stoi(x.date.substr(0, 4)),
-                  std::stoi(x.date.substr(5, 2)),
-                  std::stoi(x.date.substr(8, 2))) * 1000LL;
-              if (last_ts_a > 0 && ts <= last_ts_a) continue;  // 增量跳过
-              char sql[1024];
-              std::snprintf(sql, sizeof(sql),
-                "INSERT INTO %s USING adjust TAGS('%s') "
-                "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
-                tb.c_str(), code.c_str(), (long long)ts,
-                x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
-                x.category, EscapeSql(x.name).c_str());
-              if (ExecAffected(conn.native(), sql) >= 0) ++adjust_events;
-            }
-          }
-        } catch (const std::exception& e) {
-          std::fprintf(stderr, "[w%d] 复权失败 %s: %s\n", id, code.c_str(), e.what());
-        }
+      // === 复权（从预取缓存读取，无网络调用）===
+      auto it = xdxr_cache.find(code);
+      if (it == xdxr_cache.end() || it->second.empty()) continue;
+
+      const auto& xdxr = it->second;
+      std::string tb = "a_" + code;
+      int64_t last_ts_a = LastTimestamp(conn.native(), tb);
+      for (const auto& x : xdxr) {
+        int64_t ts = tdx::util::date_to_epoch(
+            std::stoi(x.date.substr(0, 4)),
+            std::stoi(x.date.substr(5, 2)),
+            std::stoi(x.date.substr(8, 2))) * 1000LL;
+        if (last_ts_a > 0 && ts <= last_ts_a) continue;  // 增量跳过
+        char sql[1024];
+        std::snprintf(sql, sizeof(sql),
+          "INSERT INTO %s USING adjust TAGS('%s') "
+          "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
+          tb.c_str(), code.c_str(), (long long)ts,
+          x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
+          x.category, EscapeSql(x.name).c_str());
+        if (ExecAffected(conn.native(), sql) >= 0) ++adjust_events;
       }
     }
-    if (sq) sq->Close();
   }
 
  private:
@@ -399,7 +419,14 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
           "peigu DOUBLE, category INT, name VARCHAR(64)) "
           "TAGS (code VARCHAR(10))");
 
-  // 4. 多线程导入
+  // 4. 预取复权因子（单 StdQuotes，避免多 worker 各创 ProactorPool 引发
+  //    helio "Fibers belong to different schedulers" 告警）
+  XdxrCache xdxr_cache;
+  if (!cfg.no_adjust) {
+    xdxr_cache = PrefetchXdxr(targets);
+  }
+
+  // 5. 多线程导入
   int n_threads = cfg.jobs > 0 ? cfg.jobs
                                : static_cast<int>(std::thread::hardware_concurrency());
   if (n_threads < 1) n_threads = 1;
@@ -424,7 +451,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
   workers.reserve(n_threads);
 
   for (int w = 0; w < n_threads; ++w) {
-    Worker worker{w, worker_cfg, {}};
+    Worker worker{w, worker_cfg, {}, xdxr_cache};
     size_t total = targets.size();
     size_t start = total * w / n_threads;
     size_t end = total * (w + 1) / n_threads;
@@ -437,17 +464,17 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     threads.emplace_back(&Worker::Run, &w);
   for (auto& t : threads) t.join();
 
-  // 5. 汇总
+  // 6. 汇总
   for (const auto& w : workers) {
     result.codes_ok += w.codes_ok;
     result.kline_rows += w.kline_rows;
     result.adjust_events += w.adjust_events;
   }
 
-  // 6. 同步股票代码→名称对照表
+  // 7. 同步股票代码→名称对照表
   result.stock_names = SyncStockNames(conn.native());
 
-  // 7. 清理非 A 股及退市标的子表
+  // 8. 清理非 A 股及退市标的子表
   int cleaned = CleanupStaleCodes(conn.native());
 
   auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
