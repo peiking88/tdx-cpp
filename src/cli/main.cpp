@@ -257,6 +257,21 @@ int DoSyncNames() {
   return 0;
 }
 
+// 清空实时行情表：tdx truncate-quotes
+int DoTruncateQuotes() {
+  using tdx::taos::TaosConfig;
+  using tdx::taos::TaosConnection;
+  using tdx::taos::ExecSQL;
+
+  TaosConfig cfg = TaosConfig::FromEnv();
+  TaosConnection conn(cfg);
+  if (!conn) { std::cerr << "TDengine 连接失败\n"; return 1; }
+  ExecSQL(conn.native(), "USE tdx");
+  ExecSQL(conn.native(), "DROP STABLE IF EXISTS tdx.quote");
+  std::cout << "实时行情表已清空\n";
+  return 0;
+}
+
 // 清理非 A 股及退市标的：tdx cleanup
 int DoCleanup() {
   using tdx::taos::TaosConfig;
@@ -278,6 +293,9 @@ int DoCleanup() {
 // import 子命令（定义在 cli/import.cpp，不在 namespace 内）
 int DoImport(int argc, char** argv, int jobs);
 
+// fetch-quotes 子命令（定义在 cli/fetch_quotes.cpp）
+int DoFetchQuotes(int argc, char** argv);
+
 int main(int argc, char** argv) {
   MainInitGuard guard(&argc, &argv);
   if (argc < 2) {
@@ -287,9 +305,11 @@ int main(int argc, char** argv) {
               << "  tdx ex-bars <market> <code> <period> <count>  扩展行情\n"
               << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n"
               << "  tdx import [taos] [codes...]  本地数据→TDengine\n"
+              << "  tdx fetch-quotes [--loop] [--codes ...]    实时行情采集→TDengine\n"
               << "  tdx check-names                 检查代码名称完整性\n"
               << "  tdx sync-names                  独立同步代码→名称对照表\n"
-              << "  tdx cleanup                     清理非A股/退市标的子表\n";
+              << "  tdx cleanup                     清理非A股/退市标的子表\n"
+              << "  tdx truncate-quotes             清空实时行情表（DROP+重建）\n";
     return 1;
   }
   std::string cmd = argv[1];
@@ -299,9 +319,11 @@ int main(int argc, char** argv) {
   if (cmd == "fetch-history") return DoFetchHistory(argc, argv);
   if (cmd == "batch-fetch") return DoBatchFetch(argc, argv);
   if (cmd == "import") return DoImport(argc, argv, static_cast<int>(absl::GetFlag(FLAGS_jobs)));
+  if (cmd == "fetch-quotes") return DoFetchQuotes(argc, argv);
   if (cmd == "check-names") return DoCheckNames();
   if (cmd == "sync-names") return DoSyncNames();
   if (cmd == "cleanup") return DoCleanup();
+  if (cmd == "truncate-quotes") return DoTruncateQuotes();
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

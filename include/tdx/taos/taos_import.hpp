@@ -36,4 +36,7 @@ int SyncStockNames(TAOS* conn);
 // 独立清理非 A 股及退市标的子表（可脱离 import 单独调用）
 int CleanupStaleCodes(TAOS* conn);
 
+// 股票代码过滤：保留 A 股 + 指数 + ETF/LOF 基金，排除债券/B 股/港股通
+bool IsAStock(const std::string& code);
+
 }  // namespace tdx::taos

@@ -56,9 +56,10 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
     auto s_amount = get_price(data, len, pos); pos = s_amount.new_pos;
     auto open_amount = get_price(data, len, pos); pos = open_amount.new_pos;
     (void)neg_price; (void)cur_vol; (void)s_vol; (void)b_vol;
-    (void)s_amount; (void)open_amount; (void)server_time;
+    (void)s_amount; (void)open_amount;
 
     Quote q;
+    q.datetime = to_datetime(server_time.value, true);  // realtime quote: with_time
     int64_t base = price.value;
     q.price = static_cast<double>(base);
     q.pre_close = static_cast<double>(base + pre_close.value);

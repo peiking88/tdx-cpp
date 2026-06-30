@@ -67,30 +67,12 @@ static XdxrCache PrefetchXdxr(
   return cache;
 }
 
+// 前置声明（IsAStock 定义在文件末尾 tdx::taos 段，匿名 namespace ScanCodes 需可见）
+namespace tdx::taos { bool IsAStock(const std::string& code); }
+
 namespace {
 
-// 保留 A 股 + 指数 + ETF + 基金，排除债券(1x/2x)、B 股(9x)、港股通(7x)
-static bool IsAStock(const std::string& code) {
-  if (code.size() < 6) return false;
-  char c0 = code[0];
-  char c1 = code[1];
-  // A 股
-  if (c0 == '0' || c0 == '3') return true;   // 深市主板/中小 000-003 / 创业板 300-301 / 深证指数 399
-  if (c0 == '6') return true;                 // 沪市主板 600-605 / 科创板 688
-  // 北交所 A 股
-  if (c0 == '4') return true;                 // 4xxxxx
-  if (c0 == '8' && c1 != '8') return true;    // 8xxxxx（非板块指数）
-  // 指数
-  if (c0 == '8' && c1 == '8') return true;    // 88xxxx 板块指数
-  // ETF / LOF 基金
-  if (c0 == '5') return true;                 // 沪市 ETF/LOF (5xxxxx)
-  if (c0 == '1') {
-    if (c1 == '5' && code[2] == '9') return true;  // 深市 ETF (159xxx)
-    if (c1 == '6') return true;                    // 深市 LOF (16xxxx)
-  }
-  // 排除: 1xxxxx(债券,除 159/16), 2xxxxx(B 股/债券), 7xxxxx(港股通), 9xxxxx(B 股)
-  return false;
-}
+using tdx::taos::IsAStock;
 
 // ---- vipdoc 代码扫描（复用 import.cpp 逻辑）----
 std::vector<std::pair<Market, std::string>> ScanCodes(const std::string& tdx_root) {
@@ -490,6 +472,24 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
             << "数据库: tdx @ " << cfg.taos.host << ":" << cfg.taos.port << "\n";
 
   return result;
+}
+
+// 保留 A 股 + 指数 + ETF + 基金，排除债券(1x/2x)、B 股(9x)、港股通(7x)
+bool IsAStock(const std::string& code) {
+  if (code.size() < 6) return false;
+  char c0 = code[0];
+  char c1 = code[1];
+  if (c0 == '0' || c0 == '3') return true;
+  if (c0 == '6') return true;
+  if (c0 == '4') return true;
+  if (c0 == '8' && c1 != '8') return true;
+  if (c0 == '8' && c1 == '8') return true;
+  if (c0 == '5') return true;
+  if (c0 == '1') {
+    if (c1 == '5' && code[2] == '9') return true;
+    if (c1 == '6') return true;
+  }
+  return false;
 }
 
 }  // namespace tdx::taos

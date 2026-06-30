@@ -22,6 +22,8 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 | `tdx sync-names` | 同步股票代码→名称对照表 |
 | `tdx check-names` | 检查名称表覆盖完整性 |
 | `tdx cleanup` | 清理对照表中已失效的冗余条目 |
+| `tdx fetch-quotes [--quote_loop] [--quote_codes ...]` | 实时行情采集入库（支持循环） |
+| `tdx truncate-quotes` | 清空实时行情表 |
 | `tdx server-test` | 服务器测速选服 |
 
 ## 导入覆盖
@@ -41,4 +43,4 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.9.2`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.9.4`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
