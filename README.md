@@ -18,7 +18,8 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 | `tdx bars <code> [period] [count]` | A 股 K 线（支持前/后复权） |
 | `tdx ex-bars <market> <code> [period] [count]` | 扩展行情 K 线（期货/港美股） |
 | `tdx batch-fetch --stock-list <file> --start <date> --end <date> -n <N>` | 并发批量拉取 + 断点续传 |
-| `tdx import --tdx-root <path>` | 本地 vipdoc 导入 TDengine |
+| `tdx import --tdx-root <path>` | 本地 vipdoc 导入 TDengine（码表驱动 + 网络回退） |
+| `tdx pull-kline <code> [code...]` | 网络拉取 K 线(1d/1m/5m) 补导缺失代码 |
 | `tdx sync-names` | 同步股票代码→名称对照表 |
 | `tdx check-names` | 检查名称表覆盖完整性 |
 | `tdx cleanup` | 清理对照表中已失效的冗余条目 |
@@ -43,4 +44,20 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.9.4`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.10.0`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-06-30 16:44:42
+```
+ CMakeLists.txt                   |   2 +-
+ README.md                        |   5 +-
+ include/tdx/taos/taos_import.hpp |   9 ++
+ src/cli/main.cpp                 |  32 +++++-
+ src/taos/taos_import.cpp         | 651 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++------------------------------------
+ 5 files changed, 496 insertions(+), 203 deletions(-)
+```
+
+### 2026-06-30 16:44:51
+```
+ README.md | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+```

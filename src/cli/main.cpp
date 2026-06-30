@@ -17,7 +17,7 @@
 
 #include "tdx/consts.hpp"
 
-ABSL_FLAG(uint32_t, jobs, 1, "import 并行线程数 (0=CPU 核数)");
+ABSL_FLAG(uint32_t, jobs, 16, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
@@ -288,6 +288,32 @@ int DoCleanup() {
   return 0;
 }
 
+// 从网络拉取日线写入 TDengine（本地 vipdoc 无 .day 文件的代码补导）。
+// 用法: tdx pull-kline <code> [code...]
+int DoPullKline(int argc, char** argv) {
+  std::vector<std::string> codes;
+  for (int i = 2; i < argc; ++i) codes.emplace_back(argv[i]);
+  if (codes.empty()) {
+    std::cerr << "用法: tdx pull-kline <code> [code...]\n"
+              << "  从网络拉取日线写入 TDengine（本地无 vipdoc 文件时使用）\n";
+    return 1;
+  }
+
+  using tdx::taos::TaosConfig;
+  using tdx::taos::TaosConnection;
+  using tdx::taos::ExecSQL;
+  TaosConfig cfg = TaosConfig::FromEnv();
+  TaosConnection conn(cfg);
+  if (!conn) { std::cerr << "TDengine 连接失败\n"; return 1; }
+  ExecSQL(conn.native(), "USE tdx");
+
+  auto result = tdx::taos::ImportKlineFromNetwork(conn.native(), codes);
+  std::cout << "\n=== 网络补导完成 ===\n"
+            << "股票: " << result.codes_ok << "/" << codes.size() << "\n"
+            << "K线:  " << result.kline_rows << " 行\n";
+  return (result.kline_rows >= 0) ? 0 : 1;
+}
+
 }  // namespace
 
 // import 子命令（定义在 cli/import.cpp，不在 namespace 内）
@@ -309,7 +335,8 @@ int main(int argc, char** argv) {
               << "  tdx check-names                 检查代码名称完整性\n"
               << "  tdx sync-names                  独立同步代码→名称对照表\n"
               << "  tdx cleanup                     清理非A股/退市标的子表\n"
-              << "  tdx truncate-quotes             清空实时行情表（DROP+重建）\n";
+              << "  tdx truncate-quotes             清空实时行情表（DROP+重建）\n"
+              << "  tdx pull-kline <code> [code...] 网络拉取日线→TDengine（补导缺失代码）\n";
     return 1;
   }
   std::string cmd = argv[1];
@@ -324,6 +351,7 @@ int main(int argc, char** argv) {
   if (cmd == "sync-names") return DoSyncNames();
   if (cmd == "cleanup") return DoCleanup();
   if (cmd == "truncate-quotes") return DoTruncateQuotes();
+  if (cmd == "pull-kline") return DoPullKline(argc, argv);
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

@@ -39,4 +39,13 @@ int CleanupStaleCodes(TAOS* conn);
 // 股票代码过滤：保留 A 股 + 指数 + ETF/LOF 基金，排除债券/B 股/港股通
 bool IsAStock(const std::string& code);
 
+// 从网络拉取日线写入 TDengine（用于本地 vipdoc 无 .day 文件的代码，如 589xxx ETF）。
+// 返回成功导入行数。
+struct NetworkImportResult {
+  int codes_ok = 0;
+  int64_t kline_rows = 0;
+};
+NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
+                                           const std::vector<std::string>& codes);
+
 }  // namespace tdx::taos
