@@ -44,12 +44,16 @@ using tdx::proto::VipdocReader;
 
 inline constexpr int kBatchSize = 1000;
 
-// 前置声明（IsAStock 定义在文件末尾）
-namespace tdx::taos { bool IsAStock(const std::string& code); }
+// 前置声明（IsAStock/NeedsAdjust 定义在文件末尾）
+namespace tdx::taos {
+bool IsAStock(const std::string& code);
+bool NeedsAdjust(const std::string& code);
+}
 
 namespace {
 
 using tdx::taos::IsAStock;
+using tdx::taos::NeedsAdjust;
 
 // 转义 SQL 单引号（ponytail: 股票名含引号概率极低，但安全第一）
 std::string EscapeSql(const std::string& s) {
@@ -235,8 +239,16 @@ static std::vector<tdx::Xdxr> ReadAdjustFromDB(TAOS* conn, const std::string& co
 }
 
 // ---- 批量网络拉取：单 ProactorPool + N fiber（避免 StdQuotes 多池冲突） ----
-// 对每只 code：若在 missing_set 中则拉 1d/1m/5m K线 + 复权，否则只拉复权。
+// 两阶段：fiber 只做网络 I/O（proto::Connection 异步 io_uring），
+// 阻塞的 TDengine 操作全部移到主线程。
 struct NetImportResult { int kline_ok = 0; int64_t kline_rows = 0; int adj_ok = 0; int adj_events = 0; };
+
+struct NetFetchItem {
+  std::string code;
+  std::vector<KLine> bars_1d, bars_1m, bars_5m;
+  std::vector<tdx::Xdxr> xdxr;
+};
+
 static NetImportResult BatchNetImport(
     const ImportTaosConfig& cfg,
     const std::set<std::string>& missing,          // 需拉 K 线的代码
@@ -250,129 +262,179 @@ static NetImportResult BatchNetImport(
   using mutex_type = ::util::fb2::Mutex;
   mutex_type mu;
 
-  std::unique_ptr<::util::ProactorPool> pool(::util::fb2::Pool::IOUring(64));
-  pool->Run();
-  auto* pb = pool->GetNextProactor();
+  // 线程安全的结果收集容器（fiber 写入，主线程读取）
+  std::vector<NetFetchItem> fetch_results;
+  fetch_results.reserve(all_codes.size());
 
-  proto::ServerPool sp(pool.get());
-  auto best = sp.SelectBest(quotes::StdQuotes::DefaultHosts());
-  if (!best) { pool->Stop(); return r; }
+  // --- 阶段 A：fiber 网络拉取（只用 proto::Connection，不触 TDengine） ---
+  {
+    std::unique_ptr<::util::ProactorPool> pool(::util::fb2::Pool::IOUring(64));
+    pool->Run();
+    auto* pb = pool->GetNextProactor();
 
-  auto addr = boost::asio::ip::make_address(best->ip);
-  ::util::FiberSocketBase::endpoint_type ep(addr, best->port);
+    proto::ServerPool sp(pool.get());
+    auto best = sp.SelectBest(quotes::StdQuotes::DefaultHosts());
+    if (!best) { pool->Stop(); return r; }
 
-  pb->Await([&] {
-    std::vector<::util::fb2::Fiber> workers;
-    workers.reserve(n_fibers);
-    for (int wi = 0; wi < n_fibers; ++wi) {
-      workers.push_back(::util::MakeFiber([&, wi] {
-        TaosConnection tconn(cfg.taos);
-        if (!tconn) return;
-        ExecSQL(tconn.native(), "USE tdx");
+    auto addr = boost::asio::ip::make_address(best->ip);
+    ::util::FiberSocketBase::endpoint_type ep(addr, best->port);
 
-        proto::Connection conn(pb);
-        if (conn.Connect(ep)) return;
-        try {
-          auto login = proto::serialize_login();
-          auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgLogin,
-                                         login.data(), login.size());
-          conn.Call(req);
-        } catch (...) {
-          std::fprintf(stderr, "BatchNetImport: fiber %d 登录失败，跳过\n", wi);
-          return;
-        }
-
-        int loc_kl = 0, loc_adj = 0;
-        int64_t loc_rows = 0;
-
-        // 拉取单周期 K 线并增量入库
-        auto PullKline = [&](const std::string& code, Market market, Period period, const char* tag) {
-          std::string tb = "k_" + code + "_" + tag;
-          int64_t last_ts = LastTimestamp(tconn.native(), tb);
-          std::vector<KLine> new_bars;
-          for (uint16_t off = 0; off < kKlineMaxCount; off += 800) {
-            auto body = proto::serialize_kline(market, code, period, 1, off, 800, Adjust::NONE);
-            auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgKline,
-                                   body.data(), body.size()));
-            auto bars = proto::deserialize_kline(resp.body.data(), resp.body.size(), period);
-            if (bars.empty()) break;
-            for (auto& b : bars) {
-              if (last_ts <= 0 || b.datetime * 1000LL > last_ts) new_bars.push_back(std::move(b));
-            }
-            if (bars.size() < 800) break;
-          }
-          if (new_bars.empty()) return false;
-
-          int64_t n = InsertKlineBatch(tconn.native(), tb, code, tag, new_bars);
-          if (n < 0) return false;  // DB 写入错误，已写部分保留
-          loc_rows += n;
-          return true;
-        };
-
-        // 拉取复权因子并增量入库
-        auto PullAdjust = [&](const std::string& code, Market market) {
-          std::string tb = "a_" + code;
-          int64_t last_ts = LastTimestamp(tconn.native(), tb);
-
-          std::vector<tdx::Xdxr> xdxr;
+    pb->Await([&] {
+      std::vector<::util::fb2::Fiber> workers;
+      workers.reserve(n_fibers);
+      for (int wi = 0; wi < n_fibers; ++wi) {
+        workers.push_back(::util::MakeFiber([&, wi] {
+          proto::Connection conn(pb);
+          if (conn.Connect(ep)) return;
           try {
-            auto body = proto::serialize_xdxr(market, code);
-            auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgXdxr,
-                                   body.data(), body.size()));
-            xdxr = proto::deserialize_xdxr(resp.body.data(), resp.body.size());
-          } catch (const std::exception&) {
-            // 回退到库中已有数据，不中止
+            auto login = proto::serialize_login();
+            auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgLogin,
+                                           login.data(), login.size());
+            conn.Call(req);
+          } catch (...) {
+            std::fprintf(stderr, "BatchNetImport: fiber %d 登录失败\n", wi);
+            return;
           }
 
-          if (xdxr.empty())
-            xdxr = ReadAdjustFromDB(tconn.native(), code);
-          if (xdxr.empty()) return;
+          std::vector<NetFetchItem> local_items;
 
-          int n = 0;
-          for (const auto& x : xdxr) {
-            int64_t ts = tdx::util::date_to_epoch(
-                std::stoi(x.date.substr(0, 4)), std::stoi(x.date.substr(5, 2)),
-                std::stoi(x.date.substr(8, 2))) * 1000LL;
-            if (last_ts > 0 && ts <= last_ts) continue;
-            char sql[1024];
-            std::snprintf(sql, sizeof(sql),
-              "INSERT INTO %s USING adjust TAGS('%s') "
-              "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
-              tb.c_str(), code.c_str(), (long long)ts,
-              x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
-              x.category, EscapeSql(x.name).c_str());
-            if (ExecAffected(tconn.native(), sql) >= 0) ++n;
+          for (size_t i = static_cast<size_t>(wi); i < all_codes.size();
+               i += static_cast<size_t>(n_fibers)) {
+            const auto& code = all_codes[i];
+            auto market = tdx::MarketFromCode(code);
+            NetFetchItem item;
+            item.code = code;
+
+            // 拉取 K 线（仅 missing 代码）
+            if (missing.count(code)) {
+              for (auto [period, tag] : {std::pair{Period::DAILY, "1d"},
+                                         {Period::MIN_1, "1m"},
+                                         {Period::MIN_5, "5m"}}) {
+                std::vector<KLine>* dst = (tag[0] == '1' && tag[1] == 'd') ? &item.bars_1d
+                                        : (tag[0] == '1' && tag[1] == 'm') ? &item.bars_1m
+                                        : &item.bars_5m;
+                for (uint16_t off = 0; off < kKlineMaxCount; off += 800) {
+                  try {
+                    auto body = proto::serialize_kline(market, code, period, 1, off, 800, Adjust::NONE);
+                    auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgKline,
+                                           body.data(), body.size()));
+                    auto bars = proto::deserialize_kline(resp.body.data(), resp.body.size(), period);
+                    if (bars.empty()) break;
+                    dst->insert(dst->end(), bars.begin(), bars.end());
+                    if (bars.size() < 800) break;
+                  } catch (const std::exception&) { break; }
+                }
+              }
+            }
+
+            // 拉取复权因子（仅个股，指数/ETF/LOF 跳过）
+            if (!no_adjust && NeedsAdjust(code)) {
+              try {
+                auto body = proto::serialize_xdxr(market, code);
+                auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgXdxr,
+                                       body.data(), body.size()));
+                item.xdxr = proto::deserialize_xdxr(resp.body.data(), resp.body.size());
+              } catch (const std::exception&) {
+                // 回退到库中已有，不中止
+              }
+            }
+
+            local_items.push_back(std::move(item));
           }
-          if (n > 0) { loc_adj += n; }
-        };
+          conn.Close();
 
-        for (size_t i = static_cast<size_t>(wi); i < all_codes.size();
-             i += static_cast<size_t>(n_fibers)) {
-          const auto& code = all_codes[i];
-          auto market = tdx::MarketFromCode(code);
+          std::lock_guard<mutex_type> lk(mu);
+          for (auto& li : local_items)
+            fetch_results.push_back(std::move(li));
+        }));
+      }
+      for (auto& w : workers) w.Join();
+    });
 
-          if (missing.count(code)) {
-            bool ok_any = false;
-            if (PullKline(code, market, Period::DAILY, "1d")) ok_any = true;
-            if (PullKline(code, market, Period::MIN_1, "1m")) ok_any = true;
-            if (PullKline(code, market, Period::MIN_5, "5m")) ok_any = true;
-            if (ok_any) ++loc_kl;  // per-code, not per-period
-          }
-          if (!no_adjust) PullAdjust(code, market);
+    pool->Stop();
+  }
+  // ponytail: 等待 ProactorPool 线程彻底退出
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // --- 阶段 B：主线程 DB 写入（阻塞操作，不在 fiber 内） ---
+  TaosConnection tconn(cfg.taos);
+  if (!tconn) return r;
+  ExecSQL(tconn.native(), "USE tdx");
+
+  for (auto& item : fetch_results) {
+    const auto& code = item.code;
+    auto esc = EscapeSql(code);
+    bool kline_ok = false;
+
+    // 写 K 线（带增量过滤）
+    auto WriteKline = [&](const std::vector<KLine>& bars, const char* tag) {
+      if (bars.empty()) return;
+      std::string tb = "k_" + code + "_" + tag;
+      int64_t last_ts = LastTimestamp(tconn.native(), tb);
+      std::vector<KLine> new_bars;
+      if (last_ts > 0) {
+        for (const auto& b : bars)
+          if (b.datetime * 1000LL > last_ts) new_bars.push_back(b);
+      } else {
+        new_bars = bars;
+      }
+      if (new_bars.empty()) return;
+
+      int64_t n = InsertKlineBatch(tconn.native(), tb, code, tag, new_bars);
+      if (n > 0) { r.kline_rows += n; kline_ok = true; }
+    };
+
+    WriteKline(item.bars_1d, "1d");
+    WriteKline(item.bars_1m, "1m");
+    WriteKline(item.bars_5m, "5m");
+    if (kline_ok) ++r.kline_ok;
+
+    // 写复权因子
+    if (!item.xdxr.empty()) {
+      std::string tb = "a_" + code;
+      int64_t last_ts = LastTimestamp(tconn.native(), tb);
+      int n = 0;
+      for (const auto& x : item.xdxr) {
+        int64_t ts = tdx::util::date_to_epoch(
+            std::stoi(x.date.substr(0, 4)), std::stoi(x.date.substr(5, 2)),
+            std::stoi(x.date.substr(8, 2))) * 1000LL;
+        if (last_ts > 0 && ts <= last_ts) continue;
+        char sql[1024];
+        std::snprintf(sql, sizeof(sql),
+          "INSERT INTO %s USING adjust TAGS('%s') "
+          "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
+          tb.c_str(), code.c_str(), (long long)ts,
+          x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
+          x.category, EscapeSql(x.name).c_str());
+        if (ExecAffected(tconn.native(), sql) >= 0) ++n;
+      }
+      if (n > 0) { r.adj_events += n; ++r.adj_ok; }
+    } else if (!item.bars_1d.empty() || !item.bars_1m.empty() || !item.bars_5m.empty()) {
+      // 网络无复权数据，回退到 DB
+      auto fallback = ReadAdjustFromDB(tconn.native(), code);
+      if (!fallback.empty()) {
+        int n = 0;
+        std::string tb = "a_" + code;
+        int64_t last_ts = LastTimestamp(tconn.native(), tb);
+        for (const auto& x : fallback) {
+          int64_t ts = tdx::util::date_to_epoch(
+              std::stoi(x.date.substr(0, 4)), std::stoi(x.date.substr(5, 2)),
+              std::stoi(x.date.substr(8, 2))) * 1000LL;
+          if (last_ts > 0 && ts <= last_ts) continue;
+          char sql[1024];
+          std::snprintf(sql, sizeof(sql),
+            "INSERT INTO %s USING adjust TAGS('%s') "
+            "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
+            tb.c_str(), code.c_str(), (long long)ts,
+            x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
+            x.category, EscapeSql(x.name).c_str());
+          if (ExecAffected(tconn.native(), sql) >= 0) ++n;
         }
-        conn.Close();
-
-        std::lock_guard<mutex_type> lk(mu);
-        r.kline_ok += loc_kl;
-        r.kline_rows += loc_rows;
-        r.adj_ok += (loc_adj > 0 ? 1 : 0);
-        r.adj_events += loc_adj;
-      }));
+        if (n > 0) { r.adj_events += n; ++r.adj_ok; }
+      }
     }
-    for (auto& w : workers) w.Join();
-  });
+  }
 
-  pool->Stop();
   return r;
 }
 
@@ -545,6 +607,9 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     }
     std::cerr << "网络失败，回退到库中已有码表 (" << result.stock_names << " 条)" << std::endl;
   }
+  // ponytail: StdQuotes 析构 ProactorPool(64) 与后续 std::thread 创建存在竞态，
+  // 短暂等待让 io_uring 线程彻底退出。
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
   // === 第二步：读取码表 + 多线程本地导入 + 标记缺失 ===
   std::vector<std::pair<std::string, std::string>> all_codes;
@@ -645,7 +710,11 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
   {
     std::set<std::string> missing_set(missing_codes.begin(), missing_codes.end());
     std::vector<std::string> adjust_codes;
-    for (const auto& p : all_codes) adjust_codes.push_back(p.first);
+    size_t adjust_skip = 0;
+    for (const auto& p : all_codes) {
+      if (!NeedsAdjust(p.first)) { ++adjust_skip; continue; }
+      adjust_codes.push_back(p.first);
+    }
 
     int n_fibers = std::min(n_threads, static_cast<int>(adjust_codes.size()));
     if (n_fibers < 1) n_fibers = 1;
@@ -654,6 +723,8 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
               << " 只 / " << n_fibers << " fiber";
     if (!missing_codes.empty())
       std::cerr << ", K线缺 " << missing_codes.size() << " 只";
+    if (adjust_skip > 0)
+      std::cerr << ", 无复权 " << adjust_skip << " 只";
     std::cerr << "）===" << std::endl;
 
     auto nr = BatchNetImport(worker_cfg, missing_set, adjust_codes, n_fibers, cfg.no_adjust);
@@ -726,6 +797,20 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
   }
   sq.Close();
   return result;
+}
+
+// 股票是否需要复权因子（仅个股，指数/ETF/LOF 无分红送转）。
+// ponytail: 指数(99/88/399xxx) + ETF(5x/159xxx) + LOF(16xxxx) 无除权除息事件。
+bool NeedsAdjust(const std::string& code) {
+  if (code.size() < 6) return false;
+  char c0 = code[0], c1 = code[1];
+  if (c0 == '9' && c1 == '9') return false;   // 99xxxx 沪市指数
+  if (c0 == '8' && c1 == '8') return false;   // 88xxxx 板块指数
+  if (c0 == '3' && c1 == '9' && code[2] == '9') return false;  // 399xxx 深证指数
+  if (c0 == '5') return false;                // 5xxxxx ETF
+  if (c0 == '1' && c1 == '5' && code[2] == '9') return false;  // 159xxx 深市 ETF
+  if (c0 == '1' && c1 == '6') return false;   // 16xxxx 深市 LOF
+  return IsAStock(code);                       // 其余 A 股需要复权
 }
 
 // 保留 A 股 + 指数 + ETF + 基金，排除债券(1x/2x)、B 股(9x)、港股通(7x)

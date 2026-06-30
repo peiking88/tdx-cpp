@@ -44,7 +44,7 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.10.0`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.10.1`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
 
 ### 2026-06-30 16:44:42
 ```
@@ -60,4 +60,33 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 ```
  README.md | 10 ++++++++++
  1 file changed, 10 insertions(+)
+```
+
+### 2026-06-30 18:32:12
+```
+ CMakeLists.txt           |   2 +-
+ src/taos/taos_import.cpp | 287 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------------------------------------
+ 2 files changed, 175 insertions(+), 114 deletions(-)
+```
+
+### 2026-06-30 18:32:40
+```
+ CMakeLists.txt           |   2 +-
+ src/taos/taos_import.cpp | 287 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------------------------------------
+ 2 files changed, 175 insertions(+), 114 deletions(-)
+```
+
+### 2026-06-30 18:33:17
+```
+ CMakeLists.txt           |   2 +-
+ src/taos/taos_import.cpp | 287 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------------------------------------
+ 2 files changed, 175 insertions(+), 114 deletions(-)
+```
+
+### 2026-06-30 18:37:51
+```
+ CMakeLists.txt           |   2 +-
+ README.md                |  23 +++++++++-
+ src/taos/taos_import.cpp | 317 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----------------------------------------------
+ 3 files changed, 224 insertions(+), 118 deletions(-)
 ```
