@@ -82,15 +82,15 @@ void SPQuotes::SendHeartbeat() {
 }
 
 void SPQuotes::Close() {
-  if (heartbeat_) {
-    heartbeat_->Stop();
-    heartbeat_.reset();
-  }
-  if (conn_) {
-    conn_->Close();
-    conn_.reset();
+  // heartbeat Stop(CancelPeriodic) + conn Close(socket 操作) 都要求在 proactor 线程。
+  if (proactor_) {
+    proactor_->Await([&] {
+      if (heartbeat_) { heartbeat_->Stop(); heartbeat_.reset(); }
+      if (conn_) { conn_->Close(); conn_.reset(); }
+    });
   }
   connected_ = false;
+  server_pool_.reset();  // 须在 pool_ 销毁前释放（持有 pool_ 裸指针）
   if (pool_) {
     pool_->Stop();
     pool_.reset();
@@ -99,13 +99,17 @@ void SPQuotes::Close() {
 }
 
 proto::Response SPQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& body) {
-  // SP 帧头与标准一致（head=0x0c）。受 RetryPolicy + CircuitBreaker 保护。
+  // conn_->Call 的 socket 操作要求在 proactor 线程（DCHECK InMyThread）。
+  // Call 可从主线程（CLI/测试）调用，须派发到 proactor 线程。
+  // ponytail: 重试/熔断/异常逻辑保留，仅把 conn_->Call 包进 Await。
   if (!breaker_.AllowRequest()) throw TdxConnectionError("circuit breaker open");
   auto req = proto::pack_request(proto::kHeadNoZip, 0, msg_id, body.data(), body.size());
   proto::Response resp;
   std::error_code ec = retry_.Execute([&]() -> std::error_code {
     try {
-      resp = conn_->Call(req);
+      resp = proactor_->Await([&] {
+        return conn_->Call(req);
+      });
       return {};
     } catch (const TdxConnectionError&) {
       return std::make_error_code(std::errc::connection_reset);

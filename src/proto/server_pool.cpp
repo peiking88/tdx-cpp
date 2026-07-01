@@ -43,21 +43,26 @@ std::optional<ServerInfo> ServerPool::SelectBest(const std::vector<ServerInfo>& 
 
   std::vector<ProbeResult> results;
   ::util::fb2::Mutex mu;  // 保护 results
-  std::vector<::util::fb2::Fiber> fibers;
-  fibers.reserve(hosts.size());
 
-  // 每个 host 一个 fiber 并发测速（PATTERN 2，echo_server TLocalClient::Connect:580-596）
-  for (const auto& host : hosts) {
-    fibers.push_back(::util::MakeFiber([&, host] {
-      auto* pb = pool_->GetNextProactor();
-      auto lat = pb->Await([&] { return Probe(host, pb); });
-      if (lat) {
-        std::lock_guard<::util::fb2::Mutex> lk(mu);
-        results.push_back({host, *lat});
-      }
-    }));
-  }
-  for (auto& f : fibers) f.Join();  // 收集全部测速结果
+  // 单调度器并行（batch_fetch 模式）：所有探测 fiber 共用同一 proactor，
+  // socket 同属该调度器，io_uring/epoll 单线程多路复用 N 个 socket。
+  // 修复跨调度器违规：原实现 MakeFiber 后调 GetNextProactor()->Await 造成
+  // fiber 与 pb 分属不同调度器，触发 "Fibers belong to different schedulers"。
+  auto* pb = pool_->GetNextProactor();
+  pb->Await([&] {
+    std::vector<::util::fb2::Fiber> fibers;
+    fibers.reserve(hosts.size());
+    for (const auto& host : hosts) {
+      fibers.push_back(::util::MakeFiber([&, host] {
+        auto lat = Probe(host, pb);  // 直接调用（已在 pb 调度器内），不再 pb->Await
+        if (lat) {
+          std::lock_guard<::util::fb2::Mutex> lk(mu);
+          results.push_back({host, *lat});
+        }
+      }));
+    }
+    for (auto& f : fibers) f.Join();
+  });
 
   if (results.empty()) return std::nullopt;
   auto best = std::min_element(results.begin(), results.end(),

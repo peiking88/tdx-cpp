@@ -19,7 +19,9 @@
 
 ABSL_FLAG(uint32_t, jobs, 16, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/proto/server_pool.hpp"
+#include "tdx/proto/sp_parsers.hpp"
 #include "tdx/quotes/ext_quotes.hpp"
+#include "tdx/quotes/sp_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/data/tdx_data.hpp"
 #include "tdx/batch/batch_fetch.hpp"
@@ -314,6 +316,152 @@ int DoPullKline(int argc, char** argv) {
   return (result.kline_rows >= 0) ? 0 : 1;
 }
 
+// ---- 财务 0x10 ----
+int DoFinance(int argc, char** argv) {
+  if (argc < 3) { std::cerr << "用法: tdx finance <code>\n"; return 1; }
+  std::string code = argv[2];
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
+  auto f = sq.GetFinance(MarketFromCode(code), code);
+  printf("%s 财务:\n", code.c_str());
+  printf("  流通股本: %.0f万股  总股本: %.0f万股  每股收益: %.4f\n", f.liutongguben, f.zongguben, f.meigushouyi);
+  printf("  上市日期: %u  行业: %d  省份: %d\n", f.ipo_date, f.industry, f.province);
+  printf("  每股净资产: %.4f  营业收入: %.0f  净利润: %.0f\n", f.meigujinzichan, f.yinyezongshouru, f.guimujinlirun);
+  return 0;
+}
+
+// ---- F10 0x2cf/0x2d0 ----
+int DoF10(int argc, char** argv) {
+  if (argc < 3) { std::cerr << "用法: tdx f10 <code>\n"; return 1; }
+  std::string code = argv[2];
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
+  auto cats = sq.GetF10Category(MarketFromCode(code), code);
+  std::cout << code << " F10 目录 (" << cats.size() << " 项):\n";
+  for (const auto& c : cats)
+    printf("  %s [%s] start=%u len=%u\n", c.name.c_str(), c.filename.c_str(), c.start, c.length);
+  return 0;
+}
+
+// ---- 历史委托 0xfb4 ----
+int DoHistoryOrders(int argc, char** argv) {
+  if (argc < 4) { std::cerr << "用法: tdx history-orders <code> <YYYYMMDD>\n"; return 1; }
+  std::string code = argv[2];
+  uint32_t date = static_cast<uint32_t>(std::atol(argv[3]));
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
+  auto orders = sq.GetHistoryOrders(MarketFromCode(code), code, date);
+  std::cout << code << " " << date << " 委托 (" << orders.size() << " 条):\n";
+  for (const auto& o : orders)
+    printf("  price=%.2f vol=%ld\n", o.price, (long)o.vol);
+  return 0;
+}
+
+// ---- 历史逐笔 0xfb5 ----
+int DoHistoryTx(int argc, char** argv) {
+  if (argc < 4) { std::cerr << "用法: tdx history-tx <code> <YYYYMMDD>\n"; return 1; }
+  std::string code = argv[2];
+  uint32_t date = static_cast<uint32_t>(std::atol(argv[3]));
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
+  auto txns = sq.GetHistoryTransaction(MarketFromCode(code), code, date, 0, 2000);
+  std::cout << code << " " << date << " 逐笔 (" << txns.size() << " 条):\n";
+  for (size_t i = 0; i < std::min(txns.size(), size_t(20)); ++i) {
+    const auto& t = txns[i];
+    int h = t.minutes / 60 % 24, m = t.minutes % 60;
+    printf("  %02d:%02d price=%.2f vol=%ld bs=%d\n", h, m, t.price, (long)t.vol, t.buy_sell);
+  }
+  if (txns.size() > 20) std::cout << "  ... 共 " << txns.size() << " 条\n";
+  return 0;
+}
+
+// ---- 成交量分布 0x51a ----
+int DoVolProfile(int argc, char** argv) {
+  if (argc < 3) { std::cerr << "用法: tdx vol-profile <code>\n"; return 1; }
+  std::string code = argv[2];
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
+  auto vp = sq.GetVolumeProfile(MarketFromCode(code), code);
+  printf("%s 量价分布:\n", code.c_str());
+  printf("  现价: %.2f O:%.2f H:%.2f L:%.2f 昨收:%.2f 量:%.0f 额:%.0f\n",
+         vp.price, vp.open, vp.high, vp.low, vp.pre_close, vp.vol, vp.amount);
+  for (const auto& l : vp.levels)
+    printf("  P=%.2f vol=%ld buy=%ld sell=%ld\n", l.price, (long)l.vol, (long)l.buy, (long)l.sell);
+  return 0;
+}
+
+// ---- 指数信息 0x51d ----
+int DoIndexInfo(int argc, char** argv) {
+  if (argc < 3) { std::cerr << "用法: tdx index-info <code>\n"; return 1; }
+  std::string code = argv[2];
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
+  auto ii = sq.GetIndexInfo(MarketFromCode(code), code);
+  printf("%s: 现价%.2f 昨收%.2f 涨跌%.2f O%.2f H%.2f L%.2f 量%.0f 额%.0f\n",
+         code.c_str(), ii.close, ii.pre_close, ii.diff, ii.open, ii.high, ii.low, ii.vol, ii.amount);
+  printf("  上涨%ld 下跌%ld\n", (long)ii.up_count, (long)ii.down_count);
+  return 0;
+}
+
+// ---- 主力异动 0x563 ----
+int DoUnusual(int argc, char** argv) {
+  int market = argc > 2 ? std::atoi(argv[2]) : 1;
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
+  auto items = sq.GetUnusual(static_cast<Market>(market), 0, 600);
+  std::cout << "异动 (" << items.size() << " 条):\n";
+  for (const auto& u : items)
+    printf("  %s %02d:%02d:%02d %s %s\n", u.code.c_str(),
+           u.hour, u.minute, u.second, u.desc.c_str(), u.value_str.c_str());
+  return 0;
+}
+
+// ---- 板块列表 0x1231 ----
+int DoBoardList(int argc, char** argv) {
+  int type = argc > 2 ? std::atoi(argv[2]) : 1;  // BoardType
+  quotes::SPQuotes sp;
+  if (auto ec = sp.Connect()) { std::cerr << "SP连接失败: " << ec.message() << "\n"; return 1; }
+  auto body = proto::serialize_sp_board_list(static_cast<BoardType>(type), 0, 150);
+  auto resp = sp.Call(proto::kMsgSpBoardList, body);
+  if (resp.body.empty()) { std::cerr << "无数据\n"; return 0; }
+  auto boards = proto::deserialize_sp_board_list(resp.body.data(), resp.body.size());
+  std::cout << "板块 (" << boards.size() << " 个):\n";
+  for (size_t i = 0; i < std::min(boards.size(), size_t(20)); ++i)
+    printf("  %s %s %.2lf\n", boards[i].code.c_str(), boards[i].name.c_str(), boards[i].price);
+  if (boards.size() > 20) std::cout << "  ... 共 " << boards.size() << " 个\n";
+  return 0;
+}
+
+// ---- 板块成员报价 0x122C ----
+int DoBoardQuotes(int argc, char** argv) {
+  if (argc < 3) { std::cerr << "用法: tdx board-quotes <board_code>\n"; return 1; }
+  std::string code = argv[2];
+  quotes::SPQuotes sp;
+  if (auto ec = sp.Connect()) { std::cerr << "SP连接失败: " << ec.message() << "\n"; return 1; }
+  int board_code = std::atoi(code.c_str());
+  auto body = proto::serialize_sp_board_members(board_code, SortType::Code, 0, 80, SortOrder::None, {});
+  auto resp = sp.Call(proto::kMsgSpBoardMembers, body);
+  if (resp.body.empty()) { std::cerr << "无数据\n"; return 0; }
+  std::cout << "板块 " << code << " 成员报价请求已发送 (resp " << resp.body.size() << "B)\n";
+  return 0;
+}
+
+// ---- 资金流向 0x1218 ----
+int DoCapitalFlow(int argc, char** argv) {
+  if (argc < 3) { std::cerr << "用法: tdx capital-flow <code>\n"; return 1; }
+  std::string code = argv[2];
+  quotes::SPQuotes sp;
+  if (auto ec = sp.Connect()) { std::cerr << "SP连接失败: " << ec.message() << "\n"; return 1; }
+  auto body = proto::serialize_sp_capital_flow(static_cast<uint16_t>(MarketFromCode(code)), code);
+  auto resp = sp.Call(proto::kMsgSpCapitalFlow, body);
+  if (resp.body.empty()) { std::cerr << "无数据\n"; return 0; }
+  auto flows = proto::deserialize_sp_capital_flow(resp.body.data(), resp.body.size());
+  std::cout << code << " 资金流向:\n";
+  for (const auto& cf : flows)
+    printf("  主力净:%.0lf 散户净:%.0lf 5日主力:%.0lf\n", cf.main_net, cf.small_net, cf.five_day_main);
+  return 0;
+}
+
 }  // namespace
 
 // import 子命令（定义在 cli/import.cpp，不在 namespace 内）
@@ -336,7 +484,17 @@ int main(int argc, char** argv) {
               << "  tdx sync-names                  独立同步代码→名称对照表\n"
               << "  tdx cleanup                     清理非A股/退市标的子表\n"
               << "  tdx truncate-quotes             清空实时行情表（DROP+重建）\n"
-              << "  tdx pull-kline <code> [code...] 网络拉取日线→TDengine（补导缺失代码）\n";
+              << "  tdx pull-kline <code> [code...] 网络拉取日线→TDengine（补导缺失代码）\n"
+              << "  tdx finance <code>              财务数据\n"
+              << "  tdx f10 <code>                  F10基本资料\n"
+              << "  tdx history-orders <code> <date> 历史委托(YYYYMMDD)\n"
+              << "  tdx history-tx <code> <date>     历史逐笔(YYYYMMDD)\n"
+              << "  tdx vol-profile <code>           成交量分布\n"
+              << "  tdx index-info <code>            指数信息\n"
+              << "  tdx unusual [market=1]           主力异动\n"
+              << "  tdx board-list [type=1]          板块列表\n"
+              << "  tdx board-quotes <code>          板块成员报价\n"
+              << "  tdx capital-flow <code>          资金流向\n";
     return 1;
   }
   std::string cmd = argv[1];
@@ -352,6 +510,16 @@ int main(int argc, char** argv) {
   if (cmd == "cleanup") return DoCleanup();
   if (cmd == "truncate-quotes") return DoTruncateQuotes();
   if (cmd == "pull-kline") return DoPullKline(argc, argv);
+  if (cmd == "finance") return DoFinance(argc, argv);
+  if (cmd == "f10") return DoF10(argc, argv);
+  if (cmd == "history-orders") return DoHistoryOrders(argc, argv);
+  if (cmd == "history-tx") return DoHistoryTx(argc, argv);
+  if (cmd == "vol-profile") return DoVolProfile(argc, argv);
+  if (cmd == "index-info") return DoIndexInfo(argc, argv);
+  if (cmd == "unusual") return DoUnusual(argc, argv);
+  if (cmd == "board-list") return DoBoardList(argc, argv);
+  if (cmd == "board-quotes") return DoBoardQuotes(argc, argv);
+  if (cmd == "capital-flow") return DoCapitalFlow(argc, argv);
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

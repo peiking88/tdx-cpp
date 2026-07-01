@@ -100,6 +100,12 @@ target_include_directories(test_e2e PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_e2e PRIVATE tdx_quotes tdx_data base fibers2 gtest)
 add_test(NAME test_e2e COMMAND test_e2e)
 
+# SP/MAC 端到端测试（独立二进制：helio 不支持同进程先后两个 ProactorPool）
+add_executable(test_sp_e2e test_sp_e2e.cpp)
+target_include_directories(test_sp_e2e PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_sp_e2e PRIVATE tdx_quotes base fibers2 gtest)
+add_test(NAME test_sp_e2e COMMAND test_sp_e2e)
+
 # golden 测试需 fixtures 路径
 target_compile_definitions(test_golden PRIVATE
     FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/golden")

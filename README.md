@@ -23,8 +23,18 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 | `tdx sync-names` | 同步股票代码→名称对照表 |
 | `tdx check-names` | 检查名称表覆盖完整性 |
 | `tdx cleanup` | 清理对照表中已失效的冗余条目 |
-| `tdx fetch-quotes [--quote_loop] [--quote_codes ...]` | 实时行情采集入库（支持循环） |
+| `tdx fetch-quotes [--loop] [--codes ...] [--with_tx] [--with_tick] [--with_index] [--with_unusual] [--with_finance] [--with_f10] [--with_vol] [--with_hist]` | 实时行情采集入库（多类型，支持循环） |
 | `tdx truncate-quotes` | 清空实时行情表 |
+| `tdx finance <code>` | 财务数据（流通股本/总股本/每股收益等） |
+| `tdx f10 <code>` | F10 基本资料分类目录 |
+| `tdx history-orders <code> <YYYYMMDD>` | 历史委托队列 |
+| `tdx history-tx <code> <YYYYMMDD>` | 历史逐笔成交 |
+| `tdx vol-profile <code>` | 盘中成交量分布 |
+| `tdx index-info <code>` | 指数信息（涨跌家数/成分股订单） |
+| `tdx unusual [market=1]` | 主力异动监控 |
+| `tdx board-list [type=1]` | SP/MAC 板块列表 |
+| `tdx board-quotes <board_code>` | 板块成员报价 |
+| `tdx capital-flow <code>` | 资金流向（主力/散户净额） |
 | `tdx server-test` | 服务器测速选服 |
 
 ## 导入覆盖
@@ -44,49 +54,4 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.10.1`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
-
-### 2026-06-30 16:44:42
-```
- CMakeLists.txt                   |   2 +-
- README.md                        |   5 +-
- include/tdx/taos/taos_import.hpp |   9 ++
- src/cli/main.cpp                 |  32 +++++-
- src/taos/taos_import.cpp         | 651 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++------------------------------------
- 5 files changed, 496 insertions(+), 203 deletions(-)
-```
-
-### 2026-06-30 16:44:51
-```
- README.md | 10 ++++++++++
- 1 file changed, 10 insertions(+)
-```
-
-### 2026-06-30 18:32:12
-```
- CMakeLists.txt           |   2 +-
- src/taos/taos_import.cpp | 287 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------------------------------------
- 2 files changed, 175 insertions(+), 114 deletions(-)
-```
-
-### 2026-06-30 18:32:40
-```
- CMakeLists.txt           |   2 +-
- src/taos/taos_import.cpp | 287 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------------------------------------
- 2 files changed, 175 insertions(+), 114 deletions(-)
-```
-
-### 2026-06-30 18:33:17
-```
- CMakeLists.txt           |   2 +-
- src/taos/taos_import.cpp | 287 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------------------------------------
- 2 files changed, 175 insertions(+), 114 deletions(-)
-```
-
-### 2026-06-30 18:37:51
-```
- CMakeLists.txt           |   2 +-
- README.md                |  23 +++++++++-
- src/taos/taos_import.cpp | 317 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----------------------------------------------
- 3 files changed, 224 insertions(+), 118 deletions(-)
-```
+当前 `0.11.0`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。

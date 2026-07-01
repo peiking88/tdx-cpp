@@ -51,6 +51,26 @@ class StdQuotes {
   // 除权除息事件（msg_id 0x0f）。对齐 opentdx tdxClient.stock_xdxr。
   std::vector<Xdxr> GetXdxr(Market market, std::string_view code);
 
+  // 财务数据 0x10
+  Finance GetFinance(Market market, std::string_view code);
+  // F10 分类目录 0x2cf
+  std::vector<F10Category> GetF10Category(Market market, std::string_view code);
+  // F10 内容 0x2d0
+  F10Content GetF10Content(Market market, std::string_view code,
+                           std::string_view filename, uint32_t start, uint32_t length);
+  // 历史委托 0xfb4
+  std::vector<HistoryOrder> GetHistoryOrders(Market market, std::string_view code, uint32_t date_yyyymmdd);
+  // 历史逐笔 0xfb5
+  std::vector<HistoryTransaction> GetHistoryTransaction(Market market, std::string_view code,
+                                                         uint32_t date_yyyymmdd,
+                                                         uint16_t start, uint16_t count);
+  // 成交量分布 0x51a
+  VolProfile GetVolumeProfile(Market market, std::string_view code);
+  // 指数信息 0x51d
+  IndexInfo GetIndexInfo(Market market, std::string_view code);
+  // 主力异动 0x563
+  std::vector<UnusualItem> GetUnusual(Market market, uint16_t start = 0, uint16_t count = 600);
+
   // 默认服务器列表（供 CLI/batch 等复用，避免多处硬编码）
   static std::vector<proto::ServerInfo> DefaultHosts();
 

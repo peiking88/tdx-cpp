@@ -96,15 +96,16 @@ void StdQuotes::SendHeartbeat() {
 }
 
 void StdQuotes::Close() {
-  if (heartbeat_) {
-    heartbeat_->Stop();
-    heartbeat_.reset();
-  }
-  if (conn_) {
-    conn_->Close();
-    conn_.reset();
+  // heartbeat Stop(CancelPeriodic) + conn Close(socket 操作) 都要求在 proactor 线程。
+  // Close 常从主线程（析构）调用，须把整个 fiber 资源清理派发到 proactor 线程。
+  if (proactor_) {
+    proactor_->Await([&] {
+      if (heartbeat_) { heartbeat_->Stop(); heartbeat_.reset(); }
+      if (conn_) { conn_->Close(); conn_.reset(); }
+    });
   }
   connected_ = false;
+  server_pool_.reset();        // 须在 pool_ 销毁前释放（持有 pool_ 裸指针）
   if (pool_) {
     pool_->Stop();
     pool_.reset();
@@ -193,6 +194,74 @@ std::vector<Xdxr> StdQuotes::GetXdxr(Market market, std::string_view code) {
   return proactor_->Await([&] {
     auto resp = Call(proto::kMsgXdxr, body);
     return proto::deserialize_xdxr(resp.body.data(), resp.body.size());
+  });
+}
+
+Finance StdQuotes::GetFinance(Market market, std::string_view code) {
+  auto body = proto::serialize_finance(market, code);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgFinance, body);
+    return proto::deserialize_finance(resp.body.data(), resp.body.size());
+  });
+}
+
+std::vector<F10Category> StdQuotes::GetF10Category(Market market, std::string_view code) {
+  auto body = proto::serialize_f10_category(market, code);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgF10Category, body);
+    return proto::deserialize_f10_category(resp.body.data(), resp.body.size());
+  });
+}
+
+F10Content StdQuotes::GetF10Content(Market market, std::string_view code,
+                                     std::string_view filename, uint32_t start, uint32_t length) {
+  auto body = proto::serialize_f10_content(market, code, filename, start, length);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgF10Content, body);
+    return proto::deserialize_f10_content(resp.body.data(), resp.body.size());
+  });
+}
+
+std::vector<HistoryOrder> StdQuotes::GetHistoryOrders(Market market, std::string_view code,
+                                                       uint32_t date_yyyymmdd) {
+  auto body = proto::serialize_history_orders(market, code, date_yyyymmdd);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgHistoryOrders, body);
+    return proto::deserialize_history_orders(resp.body.data(), resp.body.size());
+  });
+}
+
+std::vector<HistoryTransaction> StdQuotes::GetHistoryTransaction(
+    Market market, std::string_view code, uint32_t date_yyyymmdd,
+    uint16_t start, uint16_t count) {
+  auto body = proto::serialize_history_transaction(market, code, date_yyyymmdd, start, count);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgHistoryTransaction, body);
+    return proto::deserialize_history_transaction(resp.body.data(), resp.body.size());
+  });
+}
+
+VolProfile StdQuotes::GetVolumeProfile(Market market, std::string_view code) {
+  auto body = proto::serialize_volume_profile(market, code);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgVolumeProfile, body);
+    return proto::deserialize_volume_profile(resp.body.data(), resp.body.size());
+  });
+}
+
+IndexInfo StdQuotes::GetIndexInfo(Market market, std::string_view code) {
+  auto body = proto::serialize_index_info(market, code);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgIndexInfo, body);
+    return proto::deserialize_index_info(resp.body.data(), resp.body.size());
+  });
+}
+
+std::vector<UnusualItem> StdQuotes::GetUnusual(Market market, uint16_t start, uint16_t count) {
+  auto body = proto::serialize_unusual(market, start, count);
+  return proactor_->Await([&] {
+    auto resp = Call(proto::kMsgUnusual, body);
+    return proto::deserialize_unusual(resp.body.data(), resp.body.size());
   });
 }
 

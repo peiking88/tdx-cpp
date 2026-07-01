@@ -13,6 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.9.0**：导入后自动建立股票代码→名称对照表
 - **v0.9.1**：A股代码名称管理三件套（`sync-names` / `cleanup` / `check-names`）
 - **v0.9.2**：导入过滤修复——补全北交所/ETF/LOF/板块指数遗漏
+- **v0.10.x**：网络 K 线 OHLC /1000 缩放修复 + vipdoc 基金/指数量价系数 + MarketFromCode 市场映射修复 + 统一字段缩放配置（`scaling.hpp`）+ 盘中实时数据落库
+- **v0.11.0**：补全 8 个盘中接口（财务/F10/历史委托/历史逐笔/成交量分布/指数信息/主力异动/资金流向）+ thread-affinity 修复（Close/Call 跨线程清理须经 `proactor_->Await`）+ SP/MAC 真网测试独立二进制 + SelectBest 单调度器并行
 
 ## 项目目标
 
@@ -209,6 +211,11 @@ ctest --test-dir build -R <test_name> -V
 
 ## 关键实现注意事项
 
+- **thread-affinity（v0.11.0 修复）**：helio 要求 Proactor/socket/Periodic 操作**必须在所属 Proactor 线程执行**。StdQuotes 内部方法（Bars/Quotes 等）已包 `proactor_->Await`，但 **`Close()` 的 heartbeat Stop（CancelPeriodic）+ conn Close（socket 操作）也必须包 Await**。同样 `SPQuotes::Call` 必须包 Await（raw `conn_->Call` 在主线程调违规）。Debug 下 `DCHECK(InMyThread)` abort，Release 静默 hang/SEGFAULT。新加任何 Proactor/fiber 操作用 `proactor_->Await` 或 `pb->Await` 包装。
+- **`Close()` 销毁顺序**：`server_pool_` 持有 `pool_` 裸指针，须在 `pool_->Stop()` 前 `server_pool_.reset()`。
+- **`SelectBest` 禁止跨调度器**：`MakeFiber` 后禁止 `GetNextProactor()->Await`——所有探测 fiber 用单一 `pb`。
+- **字段缩放**：`include/tdx/data/scaling.hpp`（纯头文件）——`SecurityClass × DataSource → FieldScaling`。7 条数据路径 × 4 类标的 × 7 字段。新增 parser/数据源必走此表。
+- **SP 测试**：独立二进制 `test_sp_e2e`（同进程两个 ProactorPool 增加 fiber 调度复杂度）。
 - **精度**：遵循全局规范——价位/金额 `%.2f`、数量 `%d`、百分比 `%d%%`。
 - **复权**：tdxdata 的复权因子是**基于 xdxr 事件流自行计算**（`tdxdata/sources/adjust.py:49`，区分前复权 qfq 的 backward-asof 与后复权 hfq 的 forward-asof），不是直接取交易所因子。移植时须对照其单测。
 - **A 股时段感知重采样**：15m/30m/1h 由 5m 重采样，1w/1mon 由 1d 重采样，且 K 线结束时间须按 A 股交易时段（上午 9:30、下午 13:00 开盘）标注。参考 `tdxdata/sources/base.py:56-132`。

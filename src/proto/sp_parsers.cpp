@@ -173,23 +173,31 @@ std::vector<uint8_t> serialize_sp_capital_flow(uint16_t market, std::string_view
 }
 
 std::vector<SpCapitalFlow> deserialize_sp_capital_flow(const uint8_t* data, std::size_t len) {
-  // symbol_capital_flow.py:12-33：27B 头 + GBK JSON 数组（today[4] + five_days[6]）
+  // symbol_capital_flow.py:12-33：27B 头 + GBK JSON 数组（today[4] + five_days[6]）。
+  // 通达信服务器 JSON 数值为字符串格式（"123.45"），需兼容解析。
   std::vector<SpCapitalFlow> result;
   if (len < 27) return result;
   std::string json_str = util::gbk_to_utf8(reinterpret_cast<const char*>(data + 27), len - 27);
+  // 截断尾随 null padding
+  size_t nul = json_str.find('\0');
+  if (nul != std::string::npos) json_str.resize(nul);
+  auto GetNum = [](const nlohmann::json& v) -> double {
+    if (v.is_number()) return v.get<double>();
+    if (v.is_string()) return std::stod(v.get<std::string>());
+    return 0.0;
+  };
   SpCapitalFlow cf;
   try {
     auto j = nlohmann::json::parse(json_str);
-    // j[0]=today[4]: 主力流入/流出, 散户流入/流出
     if (j.size() >= 1 && j[0].is_array() && j[0].size() >= 4) {
-      cf.main_net = j[0][0].get<double>() - j[0][1].get<double>();
-      cf.small_net = j[0][2].get<double>() - j[0][3].get<double>();
+      cf.main_net  = GetNum(j[0][0]) - GetNum(j[0][1]);
+      cf.small_net = GetNum(j[0][2]) - GetNum(j[0][3]);
     }
-    // j[1]=five_days[6]: 5日主买/主卖/超大单/大单/中单/小单
     if (j.size() >= 2 && j[1].is_array() && j[1].size() >= 2) {
-      cf.five_day_main = j[1][0].get<double>() - j[1][1].get<double>();
+      cf.five_day_main = GetNum(j[1][0]) - GetNum(j[1][1]);
     }
-  } catch (...) {
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "[WARN] capital_flow json parse: %s\n", e.what());
     return result;
   }
   result.push_back(cf);

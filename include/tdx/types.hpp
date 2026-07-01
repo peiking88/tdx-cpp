@@ -126,4 +126,162 @@ struct ExQuote {
   int64_t datetime = 0;  // date_raw → epoch（仅日期）
 };
 
+// ---- 财务数据 0x10（对齐 company_info.py:Finance） ----
+struct Finance {
+  std::string code;
+  double liutongguben = 0.0;   // 流通股本（万股）
+  int province = 0;
+  int industry = 0;            // 行业代码
+  uint32_t updated_date = 0;   // YYYYMMDD
+  uint32_t ipo_date = 0;       // 上市日期
+  double zongguben = 0.0;      // 总股本
+  double guojiagu = 0.0;
+  double faqirenfarengu = 0.0;
+  double farengu = 0.0;
+  double bgu = 0.0;
+  double hgu = 0.0;
+  double meigushouyi = 0.0;    // 每股收益
+  double zichanzongji = 0.0;
+  double liudongzichanzongji = 0.0;
+  double gudingzichanjine = 0.0;
+  double wuxingzichan = 0.0;
+  double gudongrenshu = 0.0;
+  double liudongfuzhaiheji = 0.0;
+  double changqifuzhai = 0.0;
+  double zibengongjijin = 0.0;
+  double guimuquanyineji = 0.0;
+  double yinyezongshouru = 0.0;
+  double yinyechengben = 0.0;
+  double yingshouzhanngkuan = 0.0;
+  double yinyelirun = 0.0;
+  double touzishouyi = 0.0;
+  double jingyinxianjinliujine = 0.0;
+  double zongxianjinliu = 0.0;
+  double cunhuo = 0.0;
+  double lirunzonge = 0.0;
+  double shuihoulirun = 0.0;
+  double guimujinlirun = 0.0;
+  double weifenlirun = 0.0;
+  double meigujinzichan = 0.0;
+};
+
+// ---- F10 分类目录 0x2cf（对齐 company_info.py:Category） ----
+struct F10Category {
+  std::string name;       // 分类名 (GBK→UTF8)
+  std::string filename;   // 文件名 (GBK→UTF8)
+  uint32_t start = 0;
+  uint32_t length = 0;
+};
+
+// ---- F10 内容 0x2d0（对齐 company_info.py:Content） ----
+struct F10Content {
+  int market = 0;
+  std::string code;
+  int category = 0;
+  uint32_t length = 0;
+  std::string content;    // GBK 文本
+};
+
+// ---- 历史委托 0xfb4（对齐 history_orders.py） ----
+struct HistoryOrder {
+  double price = 0.0;     // 增量累加价格
+  int64_t unknown = 0;
+  int64_t vol = 0;
+};
+
+// ---- 历史逐笔 0xfb5（对齐 history_transaction.py） ----
+struct HistoryTransaction {
+  int minutes = 0;        // 当日分钟数
+  double price = 0.0;     // 增量累加价格
+  int64_t vol = 0;
+  int buy_sell = 0;       // 0=BUY 1=SELL 2=NEUTRAL
+};
+
+// ---- 成交量分布档 0x51a（对齐 volume_profile.py） ----
+struct QuoteLevel {
+  double price = 0.0;
+  double vol = 0.0;
+};
+
+struct VolProfileLevel {
+  double price = 0.0;
+  int64_t vol = 0;
+  int64_t buy = 0;
+  int64_t sell = 0;
+};
+
+struct VolProfile {
+  int market = 0;
+  std::string code;
+  double price = 0.0;
+  double pre_close = 0.0;
+  double open = 0.0;
+  double high = 0.0;
+  double low = 0.0;
+  double vol = 0.0;
+  double amount = 0.0;
+  std::vector<QuoteLevel> handicap_bid;
+  std::vector<QuoteLevel> handicap_ask;
+  std::vector<VolProfileLevel> levels;
+};
+
+// ---- 指数信息 0x51d（对齐 index_info.py） ----
+struct IndexOrder {
+  int64_t price = 0;
+  int64_t unknown = 0;
+  int64_t vol = 0;
+};
+
+struct IndexInfo {
+  int market = 0;
+  std::string code;
+  double close = 0.0;
+  double pre_close = 0.0;
+  double diff = 0.0;       // pre_close - close
+  double open = 0.0;
+  double high = 0.0;
+  double low = 0.0;
+  double vol = 0.0;
+  double amount = 0.0;
+  int64_t up_count = 0;
+  int64_t down_count = 0;
+  std::vector<IndexOrder> orders;
+};
+
+// ---- 主力异动 0x563（对齐 unusual.py） ----
+struct UnusualItem {
+  int index = 0;
+  int market = 0;
+  std::string code;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  std::string desc;        // 异动类型描述（中文）
+  std::string value_str;   // 格式化数值（如 "3.50%/2.00%"）
+  double value = 0.0;      // 数值（用于排序/过滤）
+  int unusual_type = 0;
+};
+
+// ---- 板块列表 0x1231（对齐 board_list.py，已有 SpBoard） ----
+struct BoardItem {
+  int market = 0;
+  std::string code;
+  std::string name;
+  double price = 0.0;
+  double rise_speed = 0.0;
+  double pre_close = 0.0;
+};
+
+// ---- 资金流向 0x1218（对齐 symbol_capital_flow.py） ----
+struct CapitalFlow {
+  std::string symbol;
+  int market = 0;
+  double main_in = 0.0;      // 今日主力流入
+  double main_out = 0.0;     // 今日主力流出
+  double retail_in = 0.0;    // 今日散户流入
+  double retail_out = 0.0;   // 今日散户流出
+  double d5_main_buy = 0.0;  // 5日主买
+  double d5_main_sell = 0.0; // 5日主卖
+};
+
 }  // namespace tdx

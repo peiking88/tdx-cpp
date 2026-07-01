@@ -11,6 +11,9 @@ namespace tdx::proto {
 
 Connection::Connection(::util::fb2::ProactorBase* proactor) : proactor_(proactor) {
   socket_.reset(proactor_->CreateSocket());  // 对齐 echo_server.cc:405
+  // 默认 8s 超时：覆盖 Connect + 后续所有 Send/Recv。
+  // 防止服务器静默丢包（限流/防火墙 DROP）时 Call 永久 hang。
+  socket_->set_timeout(8000);
 }
 
 Connection::~Connection() { Close(); }

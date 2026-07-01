@@ -351,10 +351,8 @@ static NetImportResult BatchNetImport(
       for (auto& w : workers) w.Join();
     });
 
-    pool->Stop();
+    pool->Stop();  // pthread_join 同步等待线程退出
   }
-  // ponytail: 等待 ProactorPool 线程彻底退出
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
   // --- 阶段 B：主线程 DB 写入（阻塞操作，不在 fiber 内） ---
   TaosConnection tconn(cfg.taos);
@@ -607,9 +605,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     }
     std::cerr << "网络失败，回退到库中已有码表 (" << result.stock_names << " 条)" << std::endl;
   }
-  // ponytail: StdQuotes 析构 ProactorPool(64) 与后续 std::thread 创建存在竞态，
-  // 短暂等待让 io_uring 线程彻底退出。
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  // SyncStockNames 内部 sq.Close() → pool_->Stop() 已通过 pthread_join 同步等待
 
   // === 第二步：读取码表 + 多线程本地导入 + 标记缺失 ===
   std::vector<std::pair<std::string, std::string>> all_codes;

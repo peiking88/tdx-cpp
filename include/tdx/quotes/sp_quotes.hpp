@@ -30,10 +30,11 @@ class SPQuotes {
   void Close();
   bool IsConnected() const { return connected_; }
 
- protected:
-  // 供 SP API（Task 10-12 的 BoardList/Unusual/CapitalFlow 等）复用的请求入口。
+  // 请求入口（public，供 CLI 直接调用 parser）
   proto::Response Call(uint16_t msg_id, const std::vector<uint8_t>& body);
   ::util::fb2::ProactorBase* proactor() { return proactor_; }
+
+ private:
 
  private:
   std::error_code ConnectInFiber();
