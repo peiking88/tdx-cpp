@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <cstring>
@@ -107,15 +108,28 @@ static int64_t InsertKlineBatch(TAOS* conn, const std::string& tb,
     size_t end = std::min(i + kBatchSize, bars.size());
     std::ostringstream sql;
     sql << "INSERT INTO " << tb << " USING kline TAGS('" << esc << "','" << cycle << "') VALUES";
+    bool first = true;
     for (size_t j = i; j < end; ++j) {
-      if (j > i) sql << ' ';
       const auto& b = bars[j];
+      // 跳过损坏数据：NaN/Inf 来源于 .day 文件 float 字段位损坏；
+      // 非法时间戳来源于 .day 文件 date 字段损坏（0 或 0xFFFFFFFF）。
+      if (std::isnan(b.open) || std::isnan(b.high) || std::isnan(b.low) ||
+          std::isnan(b.close) || std::isnan(b.volume) || std::isnan(b.amount) ||
+          std::isinf(b.open) || std::isinf(b.high) || std::isinf(b.low) ||
+          std::isinf(b.close) || std::isinf(b.volume) || std::isinf(b.amount))
+        continue;
+      int64_t ts_ms = b.datetime * 1000LL;
+      if (b.datetime <= 0 || b.datetime > 4102444800LL)  // 1970-01-01 ~ 2100-01-01
+        continue;
+      if (!first) sql << ' ';
+      first = false;
       char row[256];
       std::snprintf(row, sizeof(row),
         "(%lld,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f)",
-        (long long)(b.datetime * 1000LL), b.open, b.high, b.low, b.close, b.volume, b.amount);
+        ts_ms, b.open, b.high, b.low, b.close, b.volume, b.amount);
       sql << row;
     }
+    if (first) continue;  // 整批全被跳过
     int64_t n = ExecAffected(conn, sql.str());
     if (n < 0) return -1;  // 中断，已写入数据保留（下次增量跳过）
     written += static_cast<int64_t>(end - i);

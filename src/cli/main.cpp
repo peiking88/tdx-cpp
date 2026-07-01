@@ -470,31 +470,46 @@ int DoImport(int argc, char** argv, int jobs);
 // fetch-quotes 子命令（定义在 cli/fetch_quotes.cpp）
 int DoFetchQuotes(int argc, char** argv);
 
+// 在 absl ParseCommandLine (由 MainInitGuard 触发) 之前拦截 --help/-h/help，
+// 否则 gflags 会吃掉 --help 直接 exit(0)，用户永远看不到子命令列表。
+static void PrintUsage() {
+  std::cerr << "用法:\n"
+            << "  tdx server-test                    测速服务器\n"
+            << "  tdx bars <code> <period> <count>   拉K线（如 tdx bars 600000 4 10）\n"
+            << "  tdx ex-bars <market> <code> <period> <count>  扩展行情\n"
+            << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n"
+            << "  tdx import [taos] [codes...]  本地数据→TDengine\n"
+            << "  tdx fetch-quotes [--loop] [--codes ...]    实时行情采集→TDengine\n"
+            << "  tdx check-names                 检查代码名称完整性\n"
+            << "  tdx sync-names                  独立同步代码→名称对照表\n"
+            << "  tdx cleanup                     清理非A股/退市标的子表\n"
+            << "  tdx truncate-quotes             清空实时行情表（DROP+重建）\n"
+            << "  tdx pull-kline <code> [code...] 网络拉取日线→TDengine（补导缺失代码）\n"
+            << "  tdx finance <code>              财务数据\n"
+            << "  tdx f10 <code>                  F10基本资料\n"
+            << "  tdx history-orders <code> <date> 历史委托(YYYYMMDD)\n"
+            << "  tdx history-tx <code> <date>     历史逐笔(YYYYMMDD)\n"
+            << "  tdx vol-profile <code>           成交量分布\n"
+            << "  tdx index-info <code>            指数信息\n"
+            << "  tdx unusual [market=1]           主力异动\n"
+            << "  tdx board-list [type=1]          板块列表\n"
+            << "  tdx board-quotes <code>          板块成员报价\n"
+            << "  tdx capital-flow <code>          资金流向\n";
+}
+
 int main(int argc, char** argv) {
+  // 在 gflags 解析前拦截 help 请求
+  if (argc > 1) {
+    std::string a1 = argv[1];
+    if (a1 == "--help" || a1 == "-h" || a1 == "help") {
+      PrintUsage();
+      return 0;
+    }
+  }
+
   MainInitGuard guard(&argc, &argv);
   if (argc < 2) {
-    std::cerr << "用法:\n"
-              << "  tdx server-test                    测速服务器\n"
-              << "  tdx bars <code> <period> <count>   拉K线（如 tdx bars 600000 4 10）\n"
-              << "  tdx ex-bars <market> <code> <period> <count>  扩展行情\n"
-              << "  tdx fetch-history <code> [--period 1d]        统一API拉取+同步状态\n"
-              << "  tdx import [taos] [codes...]  本地数据→TDengine\n"
-              << "  tdx fetch-quotes [--loop] [--codes ...]    实时行情采集→TDengine\n"
-              << "  tdx check-names                 检查代码名称完整性\n"
-              << "  tdx sync-names                  独立同步代码→名称对照表\n"
-              << "  tdx cleanup                     清理非A股/退市标的子表\n"
-              << "  tdx truncate-quotes             清空实时行情表（DROP+重建）\n"
-              << "  tdx pull-kline <code> [code...] 网络拉取日线→TDengine（补导缺失代码）\n"
-              << "  tdx finance <code>              财务数据\n"
-              << "  tdx f10 <code>                  F10基本资料\n"
-              << "  tdx history-orders <code> <date> 历史委托(YYYYMMDD)\n"
-              << "  tdx history-tx <code> <date>     历史逐笔(YYYYMMDD)\n"
-              << "  tdx vol-profile <code>           成交量分布\n"
-              << "  tdx index-info <code>            指数信息\n"
-              << "  tdx unusual [market=1]           主力异动\n"
-              << "  tdx board-list [type=1]          板块列表\n"
-              << "  tdx board-quotes <code>          板块成员报价\n"
-              << "  tdx capital-flow <code>          资金流向\n";
+    PrintUsage();
     return 1;
   }
   std::string cmd = argv[1];
