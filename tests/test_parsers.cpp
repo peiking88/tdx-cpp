@@ -62,11 +62,12 @@ TEST(KlineParser, OhlcOrder) {
   pf32(resp, 5000000.0f); // amount
   auto bars = deserialize_kline(resp.data(), resp.size(), Period::DAILY);
   ASSERT_EQ(bars.size(), 1u);
-  EXPECT_EQ(bars[0].open, 1000);
-  EXPECT_EQ(bars[0].close, 1010);
-  EXPECT_EQ(bars[0].high, 1020);
-  EXPECT_EQ(bars[0].low, 990);
-  EXPECT_EQ(bars[0].volume, 100000.0);
+  // get_price 原始值 /1000（对齐 quotationClient.py:133-136）
+  EXPECT_DOUBLE_EQ(bars[0].open, 1.0);
+  EXPECT_DOUBLE_EQ(bars[0].close, 1.01);
+  EXPECT_DOUBLE_EQ(bars[0].high, 1.02);
+  EXPECT_DOUBLE_EQ(bars[0].low, 0.99);
+  EXPECT_DOUBLE_EQ(bars[0].volume, 100000.0);
   auto c = util::epoch_to_cst(bars[0].datetime);
   EXPECT_EQ(c.year, 2024);
   EXPECT_EQ(c.month, 1);
@@ -92,9 +93,10 @@ TEST(TransactionParser, PriceIncrement) {
   ep(resp, 10); ep(resp, 50); ep(resp, 2); ep(resp, 1); ep(resp, 0);
   auto txns = deserialize_transaction(resp.data(), resp.size());
   ASSERT_EQ(txns.size(), 2u);
-  EXPECT_EQ(txns[0].price, 1000);  // 0 + 1000
+  // price 增量累加后 /100（对齐 quotationClient.py:199）
+  EXPECT_DOUBLE_EQ(txns[0].price, 10.0);     // 0 + 1000 → /100 = 10.0
   EXPECT_EQ(txns[0].buy_sell, BuySell::Buy);
-  EXPECT_EQ(txns[1].price, 1010);  // 1000 + 10
+  EXPECT_DOUBLE_EQ(txns[1].price, 10.1);     // (1000+10) / 100 = 10.1
   EXPECT_EQ(txns[1].buy_sell, BuySell::Sell);
 }
 
@@ -109,10 +111,11 @@ TEST(TickParser, DoubleIncrement) {
   ep(resp, 10); ep(resp, 15); ep(resp, 50);
   auto ticks = deserialize_tick(resp.data(), resp.size());
   ASSERT_EQ(ticks.size(), 2u);
-  EXPECT_EQ(ticks[0].price, 1000);
-  EXPECT_EQ(ticks[0].avg, 1005);
-  EXPECT_EQ(ticks[1].price, 1010);  // 1000 + 10
-  EXPECT_EQ(ticks[1].avg, 1020);    // 1005 + 15
+  // price/100, avg/10000（对齐 quotationClient.py:150-151）
+  EXPECT_DOUBLE_EQ(ticks[0].price, 10.0);
+  EXPECT_DOUBLE_EQ(ticks[0].avg,   0.1005);
+  EXPECT_DOUBLE_EQ(ticks[1].price, 10.1);    // (1000+10)/100 = 10.1
+  EXPECT_DOUBLE_EQ(ticks[1].avg,   0.1020);  // (1005+15)/10000 = 0.102
 }
 
 // ---------- 五档：price 基准 + OHLC/五档相对增量（D2）----------
@@ -148,15 +151,17 @@ TEST(QuotesParser, BaseAndRelativeIncrement) {
 
   auto quotes = deserialize_quotes_detail(resp.data(), resp.size());
   ASSERT_EQ(quotes.size(), 1u);
-  EXPECT_EQ(quotes[0].price, 1000);
-  EXPECT_EQ(quotes[0].pre_close, 990);
-  EXPECT_EQ(quotes[0].open, 1000);
-  EXPECT_EQ(quotes[0].high, 1020);
-  EXPECT_EQ(quotes[0].low, 995);
-  EXPECT_EQ(quotes[0].bid[0], 1000);   // 1000 + 0
-  EXPECT_EQ(quotes[0].ask[0], 1001);   // 1000 + 1
-  EXPECT_EQ(quotes[0].bid[1], 999);    // 1000 + (-1)
-  EXPECT_EQ(quotes[0].ask[1], 1002);   // 1000 + 2
+  // OHLC/price/pre_close/bid/ask /100, amount *100（对齐 quotationClient.py:36-42）
+  EXPECT_DOUBLE_EQ(quotes[0].price,     10.0);   // 1000 / 100
+  EXPECT_DOUBLE_EQ(quotes[0].pre_close,  9.9);   // (1000-10) / 100
+  EXPECT_DOUBLE_EQ(quotes[0].open,      10.0);
+  EXPECT_DOUBLE_EQ(quotes[0].high,      10.2);   // (1000+20) / 100
+  EXPECT_DOUBLE_EQ(quotes[0].low,        9.95);  // (1000-5) / 100
+  EXPECT_DOUBLE_EQ(quotes[0].bid[0],    10.0);   // (1000+0) / 100
+  EXPECT_DOUBLE_EQ(quotes[0].ask[0],    10.01);  // (1000+1) / 100
+  EXPECT_DOUBLE_EQ(quotes[0].bid[1],     9.99);  // (1000-1) / 100
+  EXPECT_DOUBLE_EQ(quotes[0].ask[1],    10.02);  // (1000+2) / 100
+  EXPECT_DOUBLE_EQ(quotes[0].amount, 500000.0);  // amount 不缩放（NetQuotes）
   EXPECT_EQ(quotes[0].code, "600000");
 }
 

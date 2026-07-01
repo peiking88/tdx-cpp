@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iterator>
 
+#include "tdx/data/scaling.hpp"
 #include "tdx/util/byte_order.hpp"
 #include "tdx/util/time_util.hpp"
 
@@ -68,13 +69,13 @@ std::vector<KLine> VipdocReader::ReadDay(Market market, std::string_view code) c
 
     KLine bar;
     bar.datetime = util::date_to_epoch(year, month, day);
-    // A股 coefficient=[0.01, 0.01]：价格/量 ×0.01（amount 不缩放）
-    bar.open = open_i * 0.01;
-    bar.high = high_i * 0.01;
-    bar.low = low_i * 0.01;
-    bar.close = close_i * 0.01;
-    bar.amount = amount;
-    bar.volume = volume_i * 0.01;
+    auto s = tdx::data::GetScaling(tdx::data::ClassifySecurity(code), tdx::data::DataSource::Vipdoc1d);
+    bar.open = open_i * s.ohlc;
+    bar.high = high_i * s.ohlc;
+    bar.low = low_i * s.ohlc;
+    bar.close = close_i * s.ohlc;
+    bar.amount = amount * s.amount;
+    bar.volume = volume_i * s.volume;
     bars.push_back(bar);
   }
   return bars;

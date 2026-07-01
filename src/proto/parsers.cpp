@@ -5,6 +5,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "tdx/data/scaling.hpp"
 #include "tdx/proto/codec.hpp"        // get_price / to_datetime
 #include "tdx/util/byte_order.hpp"
 #include "tdx/util/gbk.hpp"
@@ -92,12 +93,13 @@ std::vector<KLine> deserialize_kline(const uint8_t* data, std::size_t len, Perio
 
     KLine bar;
     bar.datetime = datetime;
-    bar.open = static_cast<double>(open.value);
-    bar.close = static_cast<double>(close.value);
-    bar.high = static_cast<double>(high.value);
-    bar.low = static_cast<double>(low.value);
-    bar.volume = vol;
-    bar.amount = amount;
+    auto s = tdx::data::GetScaling(tdx::data::DataSource::NetKlineStd);
+    bar.open = static_cast<double>(open.value) * s.ohlc;
+    bar.close = static_cast<double>(close.value) * s.ohlc;
+    bar.high = static_cast<double>(high.value) * s.ohlc;
+    bar.low = static_cast<double>(low.value) * s.ohlc;
+    bar.volume = static_cast<double>(vol);
+    bar.amount = static_cast<double>(amount);
     bar.up_count = up_count;
     bar.down_count = down_count;
     bars.push_back(std::move(bar));
@@ -131,9 +133,10 @@ std::vector<Tick> deserialize_tick(const uint8_t* data, std::size_t len) {
     auto avg = get_price(data, len, pos); pos = avg.new_pos;
     auto vol = get_price(data, len, pos); pos = vol.new_pos;
     Tick t;
-    t.price = static_cast<double>(start_price + price.value);
-    t.avg = static_cast<double>(start_avg + avg.value);
-    t.volume = static_cast<double>(vol.value);
+    auto s = tdx::data::GetScaling(tdx::data::DataSource::NetTick);
+    t.price = static_cast<double>(start_price + price.value) * s.price;
+    t.avg   = static_cast<double>(start_avg + avg.value) * s.avg;
+    t.volume = static_cast<double>(vol.value) * s.volume;
     result.push_back(t);
     if (start_price == 0) start_price = price.value;
     if (start_avg == 0) start_avg = avg.value;
@@ -178,7 +181,7 @@ std::vector<Transaction> deserialize_transaction(const uint8_t* data, std::size_
     // opentdx 用 time(h, m) 无日期；这里锚定到 epoch 的当日（UTC 基准的整数小时分钟）
     Transaction txn;
     txn.datetime = static_cast<int64_t>(hour) * 3600 + minute * 60;  // 当日秒偏移（下游可叠加日期）
-    txn.price = static_cast<double>(last_price);
+    txn.price = static_cast<double>(last_price) * tdx::data::GetScaling(tdx::data::DataSource::NetTransaction).price;
     txn.volume = vol.value;
     txn.trans_id = trans.value;
     switch (buy_sell.value) {

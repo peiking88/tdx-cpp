@@ -716,10 +716,15 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
       adjust_codes.push_back(p.first);
     }
 
-    int n_fibers = std::min(n_threads, static_cast<int>(adjust_codes.size()));
+    // 网络迭代列表 = adjust_codes ∪ missing_set，确保既不需复权又无本地文件的代码也被网络拉取
+    std::set<std::string> net_set(missing_set.begin(), missing_set.end());
+    for (const auto& code : adjust_codes) net_set.insert(code);
+    std::vector<std::string> net_codes(net_set.begin(), net_set.end());
+
+    int n_fibers = std::min(n_threads, static_cast<int>(net_codes.size()));
     if (n_fibers < 1) n_fibers = 1;
 
-    std::cerr << "=== 第三步：网络拉取（" << adjust_codes.size()
+    std::cerr << "=== 第三步：网络拉取（" << net_codes.size()
               << " 只 / " << n_fibers << " fiber";
     if (!missing_codes.empty())
       std::cerr << ", K线缺 " << missing_codes.size() << " 只";
@@ -727,7 +732,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
       std::cerr << ", 无复权 " << adjust_skip << " 只";
     std::cerr << "）===" << std::endl;
 
-    auto nr = BatchNetImport(worker_cfg, missing_set, adjust_codes, n_fibers, cfg.no_adjust);
+    auto nr = BatchNetImport(worker_cfg, missing_set, net_codes, n_fibers, cfg.no_adjust);
     result.codes_ok += nr.kline_ok;
     result.kline_rows += nr.kline_rows;
     result.adjust_events += nr.adj_events;

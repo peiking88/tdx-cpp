@@ -2,6 +2,7 @@
 // 逐字移植 opentdx/parser/quotation/quotes_detail.py:22-97。
 #include "tdx/proto/parsers.hpp"
 
+#include "tdx/data/scaling.hpp"
 #include "tdx/proto/codec.hpp"
 #include "tdx/util/byte_order.hpp"
 #include "tdx/util/gbk.hpp"
@@ -61,13 +62,14 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
     Quote q;
     q.datetime = to_datetime(server_time.value, true);  // realtime quote: with_time
     int64_t base = price.value;
-    q.price = static_cast<double>(base);
-    q.pre_close = static_cast<double>(base + pre_close.value);
-    q.open = static_cast<double>(base + open.value);
-    q.high = static_cast<double>(base + high.value);
-    q.low = static_cast<double>(base + low.value);
-    q.volume = static_cast<double>(vol.value);
-    q.amount = static_cast<double>(amount);
+    auto s = tdx::data::GetScaling(tdx::data::DataSource::NetQuotes);
+    q.price     = static_cast<double>(base) * s.price;
+    q.pre_close = static_cast<double>(base + pre_close.value) * s.pre_close;
+    q.open      = static_cast<double>(base + open.value) * s.ohlc;
+    q.high      = static_cast<double>(base + high.value) * s.ohlc;
+    q.low       = static_cast<double>(base + low.value) * s.ohlc;
+    q.volume    = static_cast<double>(vol.value);
+    q.amount    = static_cast<double>(amount) * s.amount;
 
     // 五档 ×5：每档 bid/ask 相对 price 增量（quotes_detail.py:57-58）
     for (int j = 0; j < 5; ++j) {
@@ -75,8 +77,8 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
       auto ask = get_price(data, len, pos); pos = ask.new_pos;
       auto bid_vol = get_price(data, len, pos); pos = bid_vol.new_pos;
       auto ask_vol = get_price(data, len, pos); pos = ask_vol.new_pos;
-      q.bid[j] = static_cast<double>(base + bid.value);
-      q.ask[j] = static_cast<double>(base + ask.value);
+      q.bid[j]     = static_cast<double>(base + bid.value) * s.bid_ask;
+      q.ask[j]     = static_cast<double>(base + ask.value) * s.bid_ask;
       q.bid_vol[j] = static_cast<double>(bid_vol.value);
       q.ask_vol[j] = static_cast<double>(ask_vol.value);
     }

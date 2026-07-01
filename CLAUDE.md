@@ -58,7 +58,7 @@ C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser
 ### 本地 vipdoc 文件格式
 读取通达信本地目录（环境变量 `TDX_HOME` 或默认安装路径）：
 - `.day` 日线：`<IffffIIf`（扩展行情多一列 hk_stock_amount）。参考 `opentdx/reader/daily_bar_reader.py:35`。
-- `.lc1` 1分钟线：`<HHfffffII`；`.lc5` 5分钟线：`<HHIIIIfII`。参考 `opentdx/reader/min_bar_reader.py`、`lc_min_bar_reader.py`。
+- `.lc1` 1分钟线 / `.lc5` 5分钟线：均为 `<HHfffffII`（32 字节/条，OHLC=float 直读）。`opentdx/reader/min_bar_reader.py` 的 `<HHIIIIfII` 注释已过时（实测 hex 为 float）。参考 `opentdx/reader/lc_min_bar_reader.py`。
 - 路径模式：`{tdxdir}/vipdoc/{sh|sz|bj|ds}/{lday|fzline|minline}/{symbol}.{day|lc5|lc1|5|1}`。`88****` 板块指数放 `sh` 目录；`#` 开头为扩展市场 `ds`。
 - 板块文件 `block.dat` 等固定 2800 字节/块。参考 `opentdx/utils/block_reader.py:40-70`。
 
