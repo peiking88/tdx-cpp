@@ -2,6 +2,7 @@
 // 逐字移植 opentdx/parser/quotation/* + utils/help.py。quotes_detail 见 parsers_quotes.cpp。
 #include "tdx/proto/parsers.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <ctime>
 
@@ -666,7 +667,7 @@ static void UnpackByType(int utype, const uint8_t* d, std::string& desc, std::st
     std::snprintf(b, sizeof(b), "%.2f%%", v2 * 100); val = b; break;
   case 0x1d: desc = "急速拉升"; std::snprintf(b, sizeof(b), "%.2f%%", v2 * 100); val = b; break;
   case 0x1e: desc = "急速下跌"; std::snprintf(b, sizeof(b), "%.2f%%", v2 * 100); val = b; break;
-  default: desc = std::to_string(utype); break;
+  default: desc.clear(); break;  // 对齐 Python unpack_by_type return "", ""——未知类型过滤
   }
 }
 
@@ -679,16 +680,22 @@ std::vector<UnusualItem> deserialize_unusual(const uint8_t* data, std::size_t le
     std::size_t pos = 2 + static_cast<std::size_t>(i) * REC;
     if (pos + REC > len) break;
     UnusualItem u;
-    u.market = util::rd_u16(data + pos);
     std::string c(reinterpret_cast<const char*>(data + pos + 2), 6);
     u.code = util::trim_null(c);
+    if (u.code.empty()) continue;  // 无效代码 → 跳过
+    u.market = util::rd_u16(data + pos);
     // <H6sBBBHH>: market@0 code@2 unknown@8 unusual_type@9 unknown@10 index@11 z@13 → 15B
     u.unusual_type = data[pos + 9];
     u.index = util::rd_u16(data + pos + 11);
     // bytes[17:29] = 13B unpack_by_type area (Python data[32i+17:32i+30])
     UnpackByType(u.unusual_type, data + pos + 15, u.desc, u.value_str);
-    // simplifed value for sorting/display
-    u.value = u.desc.empty() ? 0.0 : static_cast<double>(util::rd_f32(data + pos + 16)); // v2 as value
+    if (u.desc.empty()) continue;  // 未知异动类型（对齐 Python 静默丢弃）
+    // type 0x14 有效数值在 d[2]（对齐 Python struct.unpack('<Bff', data[1:10])），
+    // 其他类型统一取 d[1] 的 v2。NaN 位模式 → 跳过，避免 INSERT nan 语法错误。
+    float v2 = (u.unusual_type == 0x14) ? util::rd_f32(data + pos + 17)
+                                        : util::rd_f32(data + pos + 16);
+    if (std::isnan(v2)) continue;
+    u.value = static_cast<double>(v2);
     u.hour = data[pos + 29];
     uint16_t ms = util::rd_u16(data + pos + 30);
     u.minute = ms / 100;

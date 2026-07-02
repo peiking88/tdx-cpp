@@ -23,7 +23,7 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 | `tdx sync-names` | 同步股票代码→名称对照表 |
 | `tdx check-names` | 检查名称表覆盖完整性 |
 | `tdx cleanup` | 清理对照表中已失效的冗余条目 |
-| `tdx fetch-quotes [--loop] [--codes ...] [--with_tx] [--with_tick] [--with_index] [--with_unusual] [--with_finance] [--with_f10] [--with_vol] [--with_hist]` | 实时行情采集入库（多类型，支持循环） |
+| `tdx fetch-quotes [--loop] [--quote_interval 0] [--quote_jobs N] [--codes ...] [--with_tx] [--with_tick] [--with_index] [--with_unusual] [--with_finance] [--with_f10] [--with_vol] [--with_hist]` | 实时行情采集入库（自动过滤仅指数/个股/ETF，`--quote_interval 0`=连续采集） |
 | `tdx truncate-quotes` | 清空实时行情表 |
 | `tdx finance <code>` | 财务数据（流通股本/总股本/每股收益等） |
 | `tdx f10 <code>` | F10 基本资料分类目录 |
@@ -54,4 +54,4 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.11.0`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.12.1`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。

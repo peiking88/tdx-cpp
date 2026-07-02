@@ -8,6 +8,7 @@
 //
 // 架构：N fiber worker 分片 → 独立 Connection → 各类型 network call → TaosConnection → INSERT
 // 对齐 batch_fetch.cpp 并发模式。
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -75,6 +76,21 @@ std::vector<std::string> SplitCodes(const std::string& s) {
   return out;
 }
 
+// 盘中实时行情筛选：只保留指数、个股、ETF基金，排除 LOF/债券/B股/港股通
+bool IsQuoteTarget(std::string_view code) {
+  if (code.size() < 2) return false;
+  char c0 = code[0], c1 = code[1];
+  if (c0 == '0' || c0 == '3') return true;             // A 股深市 + 399xxx 指数
+  if (c0 == '6') return true;                           // A 股沪市
+  if (c0 == '4') return true;                           // 北交所
+  if (c0 == '8') return c1 == '8';                      // 88xxxx 板块指数（去掉 8xxxxx 北交所）
+  if (c0 == '9' && c1 == '9') return true;              // 99xxxx 沪市指数
+  if (c0 == '5') return true;                           // 5xxxxx 沪市 ETF
+  if (c0 == '1') return c1 == '5' && code.size() > 2
+                       && code[2] == '9';                 // 159xxx 深市 ETF（排除 16xxxx LOF）
+  return false;
+}
+
 std::vector<std::string> FetchAllCodes() {
   std::vector<std::string> all;
   quotes::StdQuotes sq;
@@ -83,7 +99,7 @@ std::vector<std::string> FetchAllCodes() {
     uint16_t total = sq.StockCount(market);
     for (uint16_t start = 0; start < total; start += 1600) {
       auto stocks = sq.Stocks(market, start, std::min<uint16_t>(1600, total - start));
-      for (auto& s : stocks) if (tdx::taos::IsAStock(s.code)) all.push_back(s.code);
+      for (auto& s : stocks) if (IsQuoteTarget(s.code)) all.push_back(s.code);
     }
   }
   sq.Close();
@@ -179,7 +195,14 @@ void EnsureTables(TAOS* conn, bool do_tx, bool do_tick, bool do_idx, bool do_unu
 int64_t ExecSql(TAOS* conn, const std::string& sql) {
   TAOS_RES* res = ::taos_query(conn, sql.c_str());
   int code = ::taos_errno(res);
-  if (code != 0) { std::cerr << "DB err[" << code << "]\n"; ::taos_free_result(res); return -1; }
+  if (code != 0) {
+    // 打印错误码 + SQL 前缀（方便定位问题股票和时间戳）
+    std::cerr << "DB err[" << code << "] " << (res ? ::taos_errstr(res) : "NULL-res") << "\n";
+    if (sql.size() <= 500) std::cerr << "  SQL: " << sql << "\n";
+    else std::cerr << "  SQL[0:500]: " << sql.substr(0, 500) << "...\n";
+    ::taos_free_result(res);
+    return -1;
+  }
   int64_t n = ::taos_affected_rows(res);
   ::taos_free_result(res);
   return n;
@@ -205,7 +228,25 @@ int64_t InsertQuote(TAOS* conn, const std::vector<Quote>& quotes, int64_t now_ms
       for (int k = 0; k < 5; ++k) sql << "," << V(q.ask_vol[k]);
       sql << ")";
     }
-    int64_t n = ExecSql(conn, sql.str()); if (n < 0) break; written += static_cast<int64_t>(end - i);
+    int64_t n = ExecSql(conn, sql.str());
+    if (n >= 0) { written += static_cast<int64_t>(end - i); continue; }
+    // 批量 INSERT 失败 → 逐条重试，定位问题股票且不影响其余数据入库
+    for (size_t j = i; j < end; ++j) {
+      std::ostringstream one;
+      const auto& q = quotes[j];
+      int64_t ts = q.datetime > 0 ? q.datetime * 1000LL : now_ms;
+      one << "INSERT INTO q_" << q.code << " USING quote TAGS('" << Esc(q.code) << "') VALUES("
+          << ts << "," << q.price << "," << q.pre_close << "," << q.open
+          << "," << q.high << "," << q.low << "," << q.volume << "," << q.amount;
+      for (int k = 0; k < 5; ++k) one << "," << V(q.bid[k]);
+      for (int k = 0; k < 5; ++k) one << "," << V(q.ask[k]);
+      for (int k = 0; k < 5; ++k) one << "," << V(q.bid_vol[k]);
+      for (int k = 0; k < 5; ++k) one << "," << V(q.ask_vol[k]);
+      one << ")";
+      int64_t r = ExecSql(conn, one.str());
+      if (r >= 0) ++written;
+      // 失败时 ExecSql 已打印 SQL（含时间戳和代码），继续下一条
+    }
   }
   return written;
 }
@@ -343,7 +384,7 @@ std::string FetchF10FullText(proto::Connection& conn, Market mkt, const std::str
   return tdx::util::gbk_to_utf8(gbk_raw);
 }
 
-// F10 全文按 3900 字符切片入库 f10_text，子表 ft_<code>_<j>（j 对齐 f10_cat 的目录序号）。
+// F10 全文按 1000 字节切片入库 f10_text，子表 ft_<code>_<j>（j 对齐 f10_cat 的目录序号）。
 // ts = day_ts + seq：同日 --loop 重复采集时相同 (子表,ts) 覆盖、不膨胀。content_len 记完整字符数。
 int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
                       const F10Category& cat, const std::string& full, int64_t day_ts) {
@@ -353,13 +394,12 @@ int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
   tb << "ft_" << code << "_" << j;
   const std::string esc_code = Esc(code), esc_cat = Esc(cat.name), esc_fn = Esc(cat.filename);
   int64_t written = 0;
-  for (size_t pos = 0, seq = 0; pos < full.size(); pos += kSlice, ++seq) {
+  for (size_t pos = 0, seq = 0; pos < full.size(); ++seq) {
     size_t end = std::min(pos + kSlice, full.size());
-    // 切片边界对齐 UTF-8 字符（非尾片时）：full.size() 为字节数，
-    // substr(pos,kSlice) 可能切断多字节字符 → 无效 UTF-8 → TDengine 拒。
+    // 切片边界对齐 UTF-8 字符（非尾片时），回退到非续字节。
     if (end < full.size()) {
       while (end > pos && (static_cast<unsigned char>(full[end]) & 0xC0) == 0x80)
-        --end;  // 退到非续字节（0xxxxxxx 或 11xxxxxx）
+        --end;
     }
     std::ostringstream sql;
     sql << "INSERT INTO " << tb.str() << " USING f10_text TAGS('" << esc_code << "','"
@@ -368,6 +408,7 @@ int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
         << EscText(full.substr(pos, end - pos)) << "'," << full.size() << ")";
     if (ExecSql(conn, sql.str()) < 0) continue;  // 单片失败不中断分类
     ++written;
+    pos = end;  // ponytail: pos = end 非 pos += kSlice——否则跳过回退字节产生断裂 UTF-8
   }
   return written;
 }
@@ -416,38 +457,48 @@ int64_t InsertHistTx2(TAOS* conn, const std::vector<HistoryTransaction>& txns,
   return written;
 }
 
-// 统计计数器
-struct Counters {
-  int64_t quote = 0, tx = 0, tick = 0, index = 0, unusual = 0;
-  int64_t finance = 0, f10 = 0, vol = 0, hist = 0;
+// 两阶段架构（对齐 taos_import.cpp:256-257）：
+//   阶段 A（fiber）：只做网络 I/O + 解析，数据存入 FetchChunk
+//   阶段 B（主线程）：TaosConnection 写入 TDengine
+// 严禁在 fiber 内调用 taos_* —— TDengine 内部阻塞 + 可能与 helio Proactor 冲突致堆损坏。
+
+// fiber 阶段收集的单批数据
+struct FetchChunk {
+  std::vector<Quote> quotes;
+  struct TxData { std::string code; std::vector<Transaction> txns; };
+  struct TickData { std::string code; std::vector<Tick> ticks; };
+  struct F10Data { std::string code; std::vector<F10Category> cats;
+                   std::vector<std::pair<size_t, std::string>> texts; };  // (cat_idx, full_utf8)
+  std::vector<TxData> txns;
+  std::vector<TickData> ticks;
+  std::vector<IndexInfo> indices;
+  std::vector<UnusualItem> unusuals;
+  std::vector<Finance> finances;
+  std::vector<VolProfile> vols;
+  struct HistOrdData { std::string code; std::vector<HistoryOrder> orders; };
+  struct HistTxData { std::string code; std::vector<HistoryTransaction> txns; };
+  std::vector<HistOrdData> hist_ords;
+  std::vector<HistTxData> hist_txs;
+  std::vector<F10Data> f10s;
   int errors = 0;
 };
 
-// worker 分片拉取
 void WorkerRun(::util::fb2::ProactorBase* pb,
                ::util::FiberSocketBase::endpoint_type ep,
                const std::vector<std::string>& codes, int n, int batch_size,
                bool do_tx, bool do_tick, bool do_idx, bool do_unu,
                bool do_fin, bool do_f10, bool do_vol, bool do_hist,
-               int wi, Counters& cnt, ::util::fb2::Mutex& mu) {
+               int wi, std::vector<FetchChunk>& chunks, ::util::fb2::Mutex& mu) {
   proto::Connection conn(pb);
-  if (conn.Connect(ep)) { std::lock_guard<::util::fb2::Mutex> lk(mu); cnt.errors++; return; }
+  if (conn.Connect(ep)) { std::lock_guard<::util::fb2::Mutex> lk(mu); chunks.back().errors++; return; }
   try {
     auto login = proto::serialize_login();
     auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgLogin,
                                    login.data(), login.size());
     conn.Call(req);
-  } catch (...) { std::lock_guard<::util::fb2::Mutex> lk(mu); cnt.errors++; return; }
+  } catch (...) { std::lock_guard<::util::fb2::Mutex> lk(mu); chunks.back().errors++; return; }
 
-  tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
-  tdx::taos::TaosConnection tconn(tcfg);
-  if (!tconn) { std::lock_guard<::util::fb2::Mutex> lk(mu); cnt.errors++; return; }
-  EnsureTables(tconn.native(), do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
-
-  Counters local;
-  int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch()).count();
-  int64_t day_ts = DayStartMs();
+  FetchChunk local;
 
   for (size_t bi = static_cast<size_t>(wi); bi < codes.size(); ) {
     if (g_stop) break;
@@ -463,20 +514,18 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
     bi += batch.size() * static_cast<size_t>(n);
     if (batch.empty()) continue;
 
-    // 拉取 quote
-    std::vector<Quote> quotes;
     try {
       auto body = proto::serialize_quotes_detail(batch);
       auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgQuotesDetail,
                               body.data(), body.size()));
-      quotes = proto::deserialize_quotes_detail(resp.body.data(), resp.body.size());
+      auto qs = proto::deserialize_quotes_detail(resp.body.data(), resp.body.size());
+      if (!qs.empty()) {
+        local.quotes.insert(local.quotes.end(),
+                            std::make_move_iterator(qs.begin()),
+                            std::make_move_iterator(qs.end()));
+      }
     } catch (...) { local.errors++; }
-    if (!quotes.empty()) {
-      int64_t nrows = InsertQuote(tconn.native(), quotes, now_ms);
-      if (nrows > 0) local.quote += nrows;
-    }
 
-    // ---- 每只股票单独拉取 transaction/tick/index/unusual ----
     for (const auto& req : batch) {
       if (g_stop) break;
       auto mkt = req.market;
@@ -488,7 +537,7 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgTransaction,
                                   body.data(), body.size()));
           auto txns = proto::deserialize_transaction(resp.body.data(), resp.body.size());
-          if (!txns.empty()) local.tx += InsertTx(tconn.native(), txns, code, day_ts);
+          if (!txns.empty()) local.txns.push_back({std::string(code), std::move(txns)});
         } catch (...) {}
       }
       if (do_tick) {
@@ -497,7 +546,7 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgTick,
                                   body.data(), body.size()));
           auto ticks = proto::deserialize_tick(resp.body.data(), resp.body.size());
-          if (!ticks.empty()) local.tick += InsertTick(tconn.native(), ticks, code, day_ts);
+          if (!ticks.empty()) local.ticks.push_back({std::string(code), std::move(ticks)});
         } catch (...) {}
       }
       if (do_idx && IsIndexCode(code)) {
@@ -506,29 +555,21 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgIndexInfo,
                                   body.data(), body.size()));
           auto ii = proto::deserialize_index_info(resp.body.data(), resp.body.size());
-          if (!ii.code.empty()) local.index += InsertIdx(tconn.native(), ii, now_ms);
-        } catch (...) {}
-      }
-
-      // ---- 每只股票：finance/F10/vol/hist（非批量，逐只拉取） ----
-      if (do_fin) {
-        try {
-          auto f = proto::deserialize_finance(nullptr, 0); // placeholder
-          // ponytail: finance uses direct std_quotes call, done in RunOneRound separately
+          if (!ii.code.empty()) local.indices.push_back(std::move(ii));
         } catch (...) {}
       }
       if (do_vol) {
         try {
-          auto body = proto::serialize_volume_profile(req.market, req.code);
+          auto body = proto::serialize_volume_profile(mkt, code);
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgVolumeProfile,
                                   body.data(), body.size()));
           auto vp = proto::deserialize_volume_profile(resp.body.data(), resp.body.size());
-          if (!vp.code.empty()) { InsertVol(tconn.native(), vp, now_ms); local.vol++; }
+          if (!vp.code.empty()) local.vols.push_back(std::move(vp));
         } catch (...) {}
       }
     }
 
-    // ---- 每只股票：finance(只拉一次的首仓拉) / F10 / hist ----
+    // 单 worker (wi==0) 负责市场级数据：finance / F10 / hist / unusual
     if (do_fin && wi == 0) {
       for (const auto& req : batch) {
         try {
@@ -536,7 +577,7 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgFinance,
                                   body.data(), body.size()));
           auto f = proto::deserialize_finance(resp.body.data(), resp.body.size());
-          if (!f.code.empty()) { InsertFinance(tconn.native(), f, now_ms); local.finance++; }
+          if (!f.code.empty()) local.finances.push_back(std::move(f));
         } catch (...) {}
       }
     }
@@ -548,14 +589,14 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
                                   body.data(), body.size()));
           auto cats = proto::deserialize_f10_category(resp.body.data(), resp.body.size());
           if (!cats.empty()) {
-            InsertF10Cat(tconn.native(), cats, req.code, now_ms);
-            local.f10++;
-            // 分页拉取每个分类全文并切片入库 f10_text
-            for (size_t j = 0; j < cats.size(); ++j) {
-              auto full = FetchF10FullText(conn, req.market, req.code, cats[j]);
-              if (!full.empty())
-                local.f10 += InsertF10Text(tconn.native(), req.code, j, cats[j], full, day_ts);
+            FetchChunk::F10Data fd;
+            fd.code = req.code;
+            fd.cats = std::move(cats);
+            for (size_t j = 0; j < fd.cats.size(); ++j) {
+              auto full = FetchF10FullText(conn, req.market, req.code, fd.cats[j]);
+              if (!full.empty()) fd.texts.push_back({j, std::move(full)});
             }
+            local.f10s.push_back(std::move(fd));
           }
         } catch (...) {}
       }
@@ -568,77 +609,149 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgHistoryOrders,
                                   body.data(), body.size()));
           auto ord = proto::deserialize_history_orders(resp.body.data(), resp.body.size());
-          if (!ord.empty()) local.hist += InsertHistOrd(tconn.native(), ord, req.code, day_ts);
+          if (!ord.empty()) local.hist_ords.push_back({std::string(req.code), std::move(ord)});
         } catch (...) {}
         try {
           auto body = proto::serialize_history_transaction(req.market, req.code, today, 0, 2000);
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgHistoryTransaction,
                                   body.data(), body.size()));
           auto txns = proto::deserialize_history_transaction(resp.body.data(), resp.body.size());
-          if (!txns.empty()) local.hist += InsertHistTx2(tconn.native(), txns, req.code, day_ts);
+          if (!txns.empty()) local.hist_txs.push_back({std::string(req.code), std::move(txns)});
         } catch (...) {}
       }
     }
-
-    // unusual 是市场级（非单只股票），只拉一次
     if (do_unu && wi == 0) {
       try {
         auto body = proto::serialize_unusual(Market::SH, 0, 600);
         auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgUnusual,
                                 body.data(), body.size()));
         auto items = proto::deserialize_unusual(resp.body.data(), resp.body.size());
-        if (!items.empty()) local.unusual += InsertUnu(tconn.native(), items, now_ms);
+        if (!items.empty()) {
+          local.unusuals.insert(local.unusuals.end(),
+                                std::make_move_iterator(items.begin()),
+                                std::make_move_iterator(items.end()));
+        }
       } catch (...) {}
     }
   }
 
   conn.Close();
   std::lock_guard<::util::fb2::Mutex> lk(mu);
-  cnt.quote += local.quote; cnt.tx += local.tx; cnt.tick += local.tick;
-  cnt.index += local.index; cnt.unusual += local.unusual; cnt.errors += local.errors;
-  cnt.finance += local.finance; cnt.f10 += local.f10; cnt.vol += local.vol; cnt.hist += local.hist;
+  chunks.push_back(std::move(local));
 }
 
-// 单轮采集：拉取全量行情 + 可选逐笔/分时/指数/异动 → 写 TDengine
+struct Counters {
+  int64_t quote = 0, tx = 0, tick = 0, index = 0, unusual = 0;
+  int64_t finance = 0, f10 = 0, vol = 0, hist = 0;
+  int errors = 0;
+};
+
+// 单轮采集：两阶段——fiber 拉取 → 主线程写 TDengine（对齐 taos_import.cpp:256-257）
 Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_size,
                      bool do_tx, bool do_tick, bool do_idx, bool do_unu,
                      bool do_fin, bool do_f10, bool do_vol, bool do_hist) {
   Counters cnt;
   if (codes.empty()) return cnt;
 
-  std::unique_ptr<::util::ProactorPool> pool(::util::fb2::Pool::IOUring(64));
-  pool->Run();
-  auto* pb = pool->GetNextProactor();
+  // === 阶段 A：fiber 网络拉取（只用 proto::Connection，不触 TDengine） ===
+  std::vector<FetchChunk> chunks;
+  chunks.reserve(static_cast<size_t>(jobs));
+  // placeholder chunk for error counting in WorkerRun
+  chunks.emplace_back();
 
-  proto::ServerPool sp(pool.get());
-  auto best = sp.SelectBest(quotes::StdQuotes::DefaultHosts());
-  if (!best) { std::cerr << "没有可用服务器\n"; pool->Stop(); cnt.errors++; return cnt; }
-  std::cerr << "选服: " << best->name << " " << best->ip << ":" << best->port << "\n";
+  {
+    std::unique_ptr<::util::ProactorPool> pool(::util::fb2::Pool::IOUring(64));
+    pool->Run();
+    auto* pb = pool->GetNextProactor();
 
-  auto addr = boost::asio::ip::make_address(best->ip);
-  ::util::FiberSocketBase::endpoint_type ep(addr, best->port);
+    proto::ServerPool sp(pool.get());
+    auto best = sp.SelectBest(quotes::StdQuotes::DefaultHosts());
+    if (!best) { std::cerr << "没有可用服务器\n"; pool->Stop(); cnt.errors++; return cnt; }
+    std::cerr << "选服: " << best->name << " " << best->ip << ":" << best->port << "\n";
 
-  int n = std::min(jobs, static_cast<int>(codes.size()));
-  if (n < 1) n = 1;
+    auto addr = boost::asio::ip::make_address(best->ip);
+    ::util::FiberSocketBase::endpoint_type ep(addr, best->port);
 
-  ::util::fb2::Mutex mu;
-  pb->Await([&] {
-    std::vector<::util::fb2::Fiber> workers;
-    workers.reserve(n);
-    for (int wi = 0; wi < n; ++wi) {
-      // 注意：stack_size 须走 Fiber::Opts（struct），不能用 Launch（enum class，
-      // 仅 dispatch=0/post=1）。早期误写 Launch{.stack_size=...} 被 GCC 当成
-      // Launch(131072) 无效枚举值，致 Fiber::Start 调度异常、worker fiber 永不运行、
-      // Join 死锁。
-      workers.push_back(::util::fb2::Fiber(
-          ::util::fb2::Fiber::Opts{.stack_size = 128 * 1024},
-          [&, wi] { WorkerRun(pb, ep, codes, n, batch_size,
-                              do_tx, do_tick, do_idx, do_unu,
-                              do_fin, do_f10, do_vol, do_hist, wi, cnt, mu); }));
+    int n = std::min(jobs, static_cast<int>(codes.size()));
+    if (n < 1) n = 1;
+
+    ::util::fb2::Mutex mu;
+    pb->Await([&] {
+      std::vector<::util::fb2::Fiber> workers;
+      workers.reserve(n);
+      for (int wi = 0; wi < n; ++wi) {
+        workers.push_back(::util::fb2::Fiber(
+            ::util::fb2::Fiber::Opts{.stack_size = 128 * 1024},
+            [&, wi] { WorkerRun(pb, ep, codes, n, batch_size,
+                                do_tx, do_tick, do_idx, do_unu,
+                                do_fin, do_f10, do_vol, do_hist, wi, chunks, mu); }));
+      }
+      for (auto& w : workers) w.Join();
+    });
+    pool->Stop();
+  }  // ProactorPool 析构，确保 helio 线程完全退出后再写 TDengine
+
+  // === 阶段 B：主线程写 TDengine（阻塞操作，不在 fiber 内） ===
+  // chunks[0] 是 placeholder（WorkerRun 失败时累 error），正常数据从 chunks[1] 起。
+  // 直接遍历所有 chunk 写库——placeholder 为空则 Insert* 都是无操作。
+  tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
+  tdx::taos::TaosConnection tconn(tcfg);
+  if (!tconn) { cnt.errors++; return cnt; }
+  EnsureTables(tconn.native(), do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
+
+  int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  int64_t day_ts = DayStartMs();
+
+  for (auto& ch : chunks) {
+    // Quote
+    if (!ch.quotes.empty()) {
+      cnt.quote += InsertQuote(tconn.native(), ch.quotes, now_ms);
     }
-    for (auto& w : workers) w.Join();
-  });
-  pool->Stop();
+    // Transaction
+    for (auto& td : ch.txns) {
+      cnt.tx += InsertTx(tconn.native(), td.txns, td.code, day_ts);
+    }
+    // Tick
+    for (auto& td : ch.ticks) {
+      cnt.tick += InsertTick(tconn.native(), td.ticks, td.code, day_ts);
+    }
+    // Index
+    for (auto& ii : ch.indices) {
+      cnt.index += InsertIdx(tconn.native(), ii, now_ms);
+    }
+    // Unusual
+    if (!ch.unusuals.empty()) {
+      cnt.unusual += InsertUnu(tconn.native(), ch.unusuals, now_ms);
+    }
+    // Finance
+    for (auto& f : ch.finances) {
+      if (InsertFinance(tconn.native(), f, now_ms) > 0) cnt.finance++;
+    }
+    // Volume profile
+    for (auto& vp : ch.vols) {
+      if (InsertVol(tconn.native(), vp, now_ms) > 0) cnt.vol++;
+    }
+    // Hist orders
+    for (auto& ho : ch.hist_ords) {
+      cnt.hist += InsertHistOrd(tconn.native(), ho.orders, ho.code, day_ts);
+    }
+    // Hist transactions
+    for (auto& ht : ch.hist_txs) {
+      cnt.hist += InsertHistTx2(tconn.native(), ht.txns, ht.code, day_ts);
+    }
+    // F10 (categories + full text slices)
+    for (auto& fd : ch.f10s) {
+      if (!fd.cats.empty()) {
+        InsertF10Cat(tconn.native(), fd.cats, fd.code, now_ms);
+        cnt.f10++;
+      }
+      for (auto& [j, text] : fd.texts) {
+        cnt.f10 += InsertF10Text(tconn.native(), fd.code, j, fd.cats[j], text, day_ts);
+      }
+    }
+    cnt.errors += ch.errors;
+  }
   return cnt;
 }
 
@@ -663,11 +776,14 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   if (jobs < 1) jobs = 8;
   if (batch_size < 1) batch_size = 80;
   if (batch_size > 200) { std::cerr << "batch-size 上限 200\n"; batch_size = 200; }
-  if (interval < 1) interval = 30;
+  if (interval < 0) interval = 30;  // <0 兜底，0=连续无等待
 
   std::vector<std::string> codes;
   if (!codes_str.empty()) {
     codes = SplitCodes(codes_str);
+    // 过滤非指数/个股/ETF 的代码
+    codes.erase(std::remove_if(codes.begin(), codes.end(),
+        [](const std::string& c) { return !IsQuoteTarget(c); }), codes.end());
     std::cerr << "指定代码: " << codes.size() << " 只\n";
   } else {
     std::cerr << "拉取全市场股票列表...\n";

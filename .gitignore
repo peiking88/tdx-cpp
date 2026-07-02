@@ -30,3 +30,6 @@ core.*
 # 临时
 summary.md
 external/
+
+# Claude Code 本地会话产物（skills 由会话生成，PRPs/worktrees 另行追踪）
+.claude/skills/

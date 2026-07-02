@@ -10,7 +10,6 @@ namespace tdx::util {
 std::string gbk_to_utf8(const char* buf, std::size_t len) {
   if (len == 0) return {};
 
-  // 先尝试 GBK，失败回退 GB18030（GBK 的超集，iconv 多数发行版支持）。
   iconv_t cd = iconv_open("UTF-8", "GBK");
   if (cd == reinterpret_cast<iconv_t>(-1)) {
     cd = iconv_open("UTF-8", "GB18030");
@@ -20,16 +19,30 @@ std::string gbk_to_utf8(const char* buf, std::size_t len) {
   }
 
   std::string out;
-  out.resize(len * 4);  // UTF8 单字符最多 4 字节
+  out.reserve(len * 4);
   char* inbuf = const_cast<char*>(buf);
   std::size_t inbytes = len;
-  char* outbuf = out.data();
-  std::size_t outbytes = out.size();
 
-  iconv(cd, &inbuf, &inbytes, &outbuf, &outbytes);
+  // 循环转码：遇非法序列时跳过 1 字节续转，避免截断（iconv 默认遇错即停）。
+  while (inbytes > 0) {
+    char tmp[256];
+    char* outptr = tmp;
+    std::size_t outbytes = sizeof(tmp);
+
+    std::size_t ret = iconv(cd, &inbuf, &inbytes, &outptr, &outbytes);
+    out.append(tmp, sizeof(tmp) - outbytes);
+
+    if (ret != static_cast<std::size_t>(-1)) break;           // 全部成功
+    if (errno == EILSEQ || errno == EINVAL) {
+      // 跳过 1 个非法字节，重置 iconv 状态继续
+      if (inbytes > 0) { ++inbuf; --inbytes; }
+      iconv(cd, nullptr, nullptr, nullptr, nullptr);          // 复位 shift state
+    } else {
+      break;  // E2BIG 等——不应在 256B 缓冲发生，视为致命错
+    }
+  }
+
   iconv_close(cd);
-
-  out.resize(out.size() - outbytes);
   return out;
 }
 
