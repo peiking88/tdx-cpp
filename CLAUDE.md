@@ -15,6 +15,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.9.2**：导入过滤修复——补全北交所/ETF/LOF/板块指数遗漏
 - **v0.10.x**：网络 K 线 OHLC /1000 缩放修复 + vipdoc 基金/指数量价系数 + MarketFromCode 市场映射修复 + 统一字段缩放配置（`scaling.hpp`）+ 盘中实时数据落库
 - **v0.11.0**：补全 8 个盘中接口（财务/F10/历史委托/历史逐笔/成交量分布/指数信息/主力异动/资金流向）+ thread-affinity 修复（Close/Call 跨线程清理须经 `proactor_->Await`）+ SP/MAC 真网测试独立二进制 + SelectBest 单调度器并行
+- **v0.12.0**：盘中行情实时落库 + F10 文本资料入库 + SQL 注入防护（`IsValidCode`）+ iconv thread_local 缓存 + 硬编码日期改动态
+- **v0.12.2**：代码审查修复 16 项——性能（GetScaling 提升/snprintf 替代 ostringstream/move 语义/reserve）、健壮性（ReadVarChar 提取/e2e 连接守护/stoi→sscanf/熔断器模板化/CircuitBreaker 计数上限）、优化（Esc→string_view/gbk_raw 预分配/with_board 告警/IsIndexCode 零分配）
 
 ## 项目目标
 

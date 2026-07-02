@@ -30,6 +30,7 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
   if (len < 4) return result;
   uint16_t count = util::rd_u16(data + 2);  // 头部 <HH>，用第二个 H（quotes_detail.py:23）
   std::size_t pos = 4;
+  auto quote_scaling = tdx::data::GetScaling(tdx::data::DataSource::NetQuotes);
 
   for (uint16_t i = 0; i < count; ++i) {
     if (pos + 9 > len) break;

@@ -37,6 +37,7 @@
 #include "tdx/taos/taos_connection.hpp"
 #include "tdx/types.hpp"
 #include "tdx/util/time_util.hpp"
+#include "tdx/util/code_validate.hpp"
 
 namespace fs = std::filesystem;
 using namespace tdx;
@@ -57,7 +58,7 @@ using tdx::taos::IsAStock;
 using tdx::taos::NeedsAdjust;
 
 // 转义 SQL 单引号（ponytail: 股票名含引号概率极低，但安全第一）
-std::string EscapeSql(const std::string& s) {
+std::string EscapeSql(std::string_view s) {
   std::string out;
   out.reserve(s.size() + 4);
   for (char ch : s) {
@@ -84,6 +85,13 @@ int64_t ExecAffected(TAOS* conn, const std::string& sql) {
 
 // 查询子表最新 ts（毫秒），表不存在或无数据返回 0
 int64_t LastTimestamp(TAOS* conn, const std::string& tbname) {
+  // 校验子表名格式（k_xxxxxx_1d / q_xxxxxx 等），防止 SQL 注入
+  // tbname 格式为前缀_6位数字[_后缀]，提取代码部分校验
+  auto code_start = tbname.find('_');
+  if (code_start == std::string::npos || code_start + 1 + 6 > tbname.size()) return 0;
+  std::string_view code(tbname.data() + code_start + 1, 6);
+  if (!tdx::util::IsValidCode(code)) return 0;
+
   std::string sql = "SELECT MAX(ts) FROM " + tbname;
   TAOS_RES* res = ::taos_query(conn, sql.c_str());
   if (!res || ::taos_errno(res) != 0) {
@@ -159,6 +167,7 @@ struct KlineWorker {
       Market market = tdx::MarketFromCode(code);
 
       if (!tdx::taos::IsAStock(code)) {
+        if (!tdx::util::IsValidCode(code)) continue;  // 非法代码格式，跳过
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + code + "_1d");
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + code + "_1m");
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + code + "_5m");
@@ -222,6 +231,7 @@ struct KlineWorker {
 // 从 DB 读取调整因子回退（网络失败时使用）
 static std::vector<tdx::Xdxr> ReadAdjustFromDB(TAOS* conn, const std::string& code) {
   std::vector<tdx::Xdxr> xdxr;
+  if (!tdx::util::IsValidCode(code)) return xdxr;
   std::string sql = "SELECT ts, fenhong, peigujia, songzhuangu, peigu, category, name FROM a_" + code;
   TAOS_RES* res = ::taos_query(conn, sql.c_str());
   if (res && ::taos_errno(res) == 0) {
@@ -241,9 +251,7 @@ static std::vector<tdx::Xdxr> ReadAdjustFromDB(TAOS* conn, const std::string& co
       if (row[4]) x.peigu = *static_cast<const double*>(row[4]);
       if (row[5]) x.category = *static_cast<const int*>(row[5]);
       if (row[6]) {
-        const auto* p = static_cast<const unsigned char*>(row[6]);
-        uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
-        x.name = std::string(reinterpret_cast<const char*>(p), len);
+        x.name = tdx::taos::ReadVarChar(row[6]);
       }
       xdxr.push_back(std::move(x));
     }
@@ -334,7 +342,10 @@ static NetImportResult BatchNetImport(
                                            body.data(), body.size()));
                     auto bars = proto::deserialize_kline(resp.body.data(), resp.body.size(), period);
                     if (bars.empty()) break;
-                    dst->insert(dst->end(), bars.begin(), bars.end());
+                    dst->reserve(dst->size() + bars.size());
+                    dst->insert(dst->end(),
+                                 std::make_move_iterator(bars.begin()),
+                                 std::make_move_iterator(bars.end()));
                     if (bars.size() < 800) break;
                   } catch (const std::exception&) { break; }
                 }
@@ -402,14 +413,15 @@ static NetImportResult BatchNetImport(
     if (kline_ok) ++r.kline_ok;
 
     // 写复权因子
-    if (!item.xdxr.empty()) {
+    if (!item.xdxr.empty() && tdx::util::IsValidCode(code)) {
       std::string tb = "a_" + code;
       int64_t last_ts = LastTimestamp(tconn.native(), tb);
       int n = 0;
       for (const auto& x : item.xdxr) {
-        int64_t ts = tdx::util::date_to_epoch(
-            std::stoi(x.date.substr(0, 4)), std::stoi(x.date.substr(5, 2)),
-            std::stoi(x.date.substr(8, 2))) * 1000LL;
+        int y = 0, m = 0, d = 0;
+        std::sscanf(x.date.c_str(), "%d-%d-%d", &y, &m, &d);
+        int64_t ts = tdx::util::date_to_epoch(y, m, d) * 1000LL;
+        if (ts <= 0) continue;
         if (last_ts > 0 && ts <= last_ts) continue;
         char sql[1024];
         std::snprintf(sql, sizeof(sql),
@@ -429,9 +441,10 @@ static NetImportResult BatchNetImport(
         std::string tb = "a_" + code;
         int64_t last_ts = LastTimestamp(tconn.native(), tb);
         for (const auto& x : fallback) {
-          int64_t ts = tdx::util::date_to_epoch(
-              std::stoi(x.date.substr(0, 4)), std::stoi(x.date.substr(5, 2)),
-              std::stoi(x.date.substr(8, 2))) * 1000LL;
+          int y = 0, m = 0, d = 0;
+          std::sscanf(x.date.c_str(), "%d-%d-%d", &y, &m, &d);
+          int64_t ts = tdx::util::date_to_epoch(y, m, d) * 1000LL;
+          if (ts <= 0) continue;
           if (last_ts > 0 && ts <= last_ts) continue;
           char sql[1024];
           std::snprintf(sql, sizeof(sql),
@@ -465,9 +478,7 @@ int CleanupStaleCodes(TAOS* conn) {
     TAOS_ROW row;
     while ((row = ::taos_fetch_row(res))) {
       if (row[0]) {
-        const auto* p = static_cast<const unsigned char*>(row[0]);
-        uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
-        valid.insert(std::string(reinterpret_cast<const char*>(p), len));
+        valid.insert(tdx::taos::ReadVarChar(row[0]));
       }
     }
   }
@@ -482,9 +493,7 @@ int CleanupStaleCodes(TAOS* conn) {
     TAOS_ROW row;
     while ((row = ::taos_fetch_row(res))) {
       if (!row[0]) continue;
-      const auto* p = static_cast<const unsigned char*>(row[0]);
-      uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
-      std::string code(reinterpret_cast<const char*>(p), len);
+      std::string code = tdx::taos::ReadVarChar(row[0]);
       // 仅清理不通过 IsAStock 的标的（债券/B股/港股通），保留服务器未返回的合法 A 股（如 589xxx ETF）
       if (!valid.count(code) && !IsAStock(code)) stale.insert(code);
     }
@@ -495,6 +504,7 @@ int CleanupStaleCodes(TAOS* conn) {
 
   int dropped = 0;
   for (const auto& code : stale) {
+    if (!tdx::util::IsValidCode(code)) continue;  // 非法代码格式，跳过
     for (auto* period : periods) {
       std::string tb = "k_" + code + "_" + period;
       if (ExecAffected(conn, "DROP TABLE IF EXISTS " + tb) >= 0) ++dropped;
@@ -535,6 +545,7 @@ int SyncStockNames(TAOS* conn) {
       size_t batch_cnt = 0;
       for (size_t i = 0; i < stocks.size(); ++i) {
         if (!IsAStock(stocks[i].code)) continue;
+        if (!tdx::util::IsValidCode(stocks[i].code)) continue;
         if (batch_cnt > 0) sql << ' ';
         sql << "(" << ts_seq++ << ", '" << EscapeSql(stocks[i].code) << "', '"
             << EscapeSql(stocks[i].name) << "')";
@@ -630,14 +641,10 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
       while ((row = ::taos_fetch_row(res))) {
         std::string code, name;
         if (row[0]) {
-          const auto* p = static_cast<const unsigned char*>(row[0]);
-          uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
-          code = std::string(reinterpret_cast<const char*>(p), len);
+          code = tdx::taos::ReadVarChar(row[0]);
         }
         if (row[1]) {
-          const auto* p = static_cast<const unsigned char*>(row[1]);
-          uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
-          name = std::string(reinterpret_cast<const char*>(p), len);
+          name = tdx::taos::ReadVarChar(row[1]);
         }
         if (!code.empty()) all_codes.emplace_back(std::move(code), std::move(name));
       }

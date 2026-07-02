@@ -42,10 +42,12 @@ std::vector<KLine> deserialize_kline(const uint8_t* data, std::size_t len, Perio
   std::vector<KLine> bars;
   if (len < 2) return bars;
   uint16_t count = util::rd_u16(data);
+  bars.reserve(count);
   std::size_t pos = 2;
   uint16_t pv = static_cast<uint16_t>(period);
   bool minute_category = pv < 4 || pv == 7 || pv == 8;
   const std::size_t MIN_BAR = 13;
+  auto scaling = tdx::data::GetScaling(tdx::data::DataSource::NetKlineStd);
 
   for (uint16_t i = 0; i < count; ++i) {
     if (pos + MIN_BAR > len) break;
@@ -94,11 +96,10 @@ std::vector<KLine> deserialize_kline(const uint8_t* data, std::size_t len, Perio
 
     KLine bar;
     bar.datetime = datetime;
-    auto s = tdx::data::GetScaling(tdx::data::DataSource::NetKlineStd);
-    bar.open = static_cast<double>(open.value) * s.ohlc;
-    bar.close = static_cast<double>(close.value) * s.ohlc;
-    bar.high = static_cast<double>(high.value) * s.ohlc;
-    bar.low = static_cast<double>(low.value) * s.ohlc;
+    bar.open = static_cast<double>(open.value) * scaling.ohlc;
+    bar.close = static_cast<double>(close.value) * scaling.ohlc;
+    bar.high = static_cast<double>(high.value) * scaling.ohlc;
+    bar.low = static_cast<double>(low.value) * scaling.ohlc;
     bar.volume = static_cast<double>(vol);
     bar.amount = static_cast<double>(amount);
     bar.up_count = up_count;
@@ -127,17 +128,18 @@ std::vector<Tick> deserialize_tick(const uint8_t* data, std::size_t len) {
   std::vector<Tick> result;
   if (len < 4) return result;
   uint16_t num = util::rd_u16(data);  // 前 4 字节两个 H，只用第一个
+  result.reserve(num);
   std::size_t pos = 4;
   int64_t start_price = 0, start_avg = 0;
+  auto tick_scaling = tdx::data::GetScaling(tdx::data::DataSource::NetTick);
   for (uint16_t i = 0; i < num; ++i) {
     auto price = get_price(data, len, pos); pos = price.new_pos;
     auto avg = get_price(data, len, pos); pos = avg.new_pos;
     auto vol = get_price(data, len, pos); pos = vol.new_pos;
     Tick t;
-    auto s = tdx::data::GetScaling(tdx::data::DataSource::NetTick);
-    t.price = static_cast<double>(start_price + price.value) * s.price;
-    t.avg   = static_cast<double>(start_avg + avg.value) * s.avg;
-    t.volume = static_cast<double>(vol.value) * s.volume;
+    t.price = static_cast<double>(start_price + price.value) * tick_scaling.price;
+    t.avg   = static_cast<double>(start_avg + avg.value) * tick_scaling.avg;
+    t.volume = static_cast<double>(vol.value) * tick_scaling.volume;
     result.push_back(t);
     if (start_price == 0) start_price = price.value;
     if (start_avg == 0) start_avg = avg.value;
@@ -163,16 +165,22 @@ std::vector<Transaction> deserialize_transaction(const uint8_t* data, std::size_
   std::vector<Transaction> result;
   if (len < 2) return result;
   uint16_t count = util::rd_u16(data);
+  result.reserve(count);
   std::size_t pos = 2;
   int64_t last_price = 0;
+  double tx_price_scale = tdx::data::GetScaling(tdx::data::DataSource::NetTransaction).price;
   for (uint16_t i = 0; i < count; ++i) {
     if (pos + 2 > len) break;
     uint16_t minutes = util::rd_u16(data + pos);
     pos += 2;
     auto price = get_price(data, len, pos); pos = price.new_pos;
+    if (pos > len) break;
     auto vol = get_price(data, len, pos); pos = vol.new_pos;
+    if (pos > len) break;
     auto trans = get_price(data, len, pos); pos = trans.new_pos;
+    if (pos > len) break;
     auto buy_sell = get_price(data, len, pos); pos = buy_sell.new_pos;
+    if (pos > len) break;
     auto unknown = get_price(data, len, pos); pos = unknown.new_pos;
     (void)unknown;
     last_price += price.value;
@@ -182,7 +190,7 @@ std::vector<Transaction> deserialize_transaction(const uint8_t* data, std::size_
     // opentdx 用 time(h, m) 无日期；这里锚定到 epoch 的当日（UTC 基准的整数小时分钟）
     Transaction txn;
     txn.datetime = static_cast<int64_t>(hour) * 3600 + minute * 60;  // 当日秒偏移（下游可叠加日期）
-    txn.price = static_cast<double>(last_price) * tdx::data::GetScaling(tdx::data::DataSource::NetTransaction).price;
+    txn.price = static_cast<double>(last_price) * tx_price_scale;
     txn.volume = vol.value;
     txn.trans_id = trans.value;
     switch (buy_sell.value) {
@@ -408,18 +416,20 @@ std::vector<HistoryOrder> deserialize_history_orders(const uint8_t* data, std::s
   std::vector<HistoryOrder> result;
   if (len < 6) return result;
   uint16_t count = util::rd_u16(data);
+  result.reserve(count);
   std::size_t pos = 6;
   int64_t last_price = 0;
+  double ord_price_scale = tdx::data::GetScaling(tdx::data::DataSource::NetTransaction).price;
   for (uint16_t i = 0; i < count; ++i) {
     if (pos >= len) break;                                    // 对齐 deserialize_history_transaction 的 guard
     auto price = get_price(data, len, pos); pos = price.new_pos;
-    if (pos >= len) break;
+    if (pos > len) break;
     auto unknown = get_price(data, len, pos); pos = unknown.new_pos;
-    if (pos >= len) break;
+    if (pos > len) break;
     auto vol = get_price(data, len, pos); pos = vol.new_pos;
     last_price += price.value;
     HistoryOrder o;
-    o.price = static_cast<double>(last_price) * tdx::data::GetScaling(tdx::data::DataSource::NetTransaction).price;
+    o.price = static_cast<double>(last_price) * ord_price_scale;
     o.unknown = unknown.value;
     o.vol = vol.value;
     result.push_back(o);
@@ -446,20 +456,25 @@ std::vector<HistoryTransaction> deserialize_history_transaction(const uint8_t* d
   std::vector<HistoryTransaction> result;
   if (len < 6) return result;
   uint16_t count = util::rd_u16(data);
+  result.reserve(count);
   std::size_t pos = 6;
   int64_t last_price = 0;
+  double htx_price_scale = tdx::data::GetScaling(tdx::data::DataSource::NetTransaction).price;
   for (uint16_t i = 0; i < count; ++i) {
     if (pos + 2 > len) break;
     uint16_t minutes = util::rd_u16(data + pos); pos += 2;
     auto price = get_price(data, len, pos); pos = price.new_pos;
+    if (pos > len) break;
     auto vol = get_price(data, len, pos); pos = vol.new_pos;
+    if (pos > len) break;
     auto buy_sell = get_price(data, len, pos); pos = buy_sell.new_pos;
+    if (pos > len) break;
     auto unknown = get_price(data, len, pos); pos = unknown.new_pos;
     (void)unknown;
     last_price += price.value;
     HistoryTransaction t;
     t.minutes = minutes;
-    t.price = static_cast<double>(last_price) * tdx::data::GetScaling(tdx::data::DataSource::NetTransaction).price;
+    t.price = static_cast<double>(last_price) * htx_price_scale;
     t.vol = vol.value;
     t.buy_sell = static_cast<int>(buy_sell.value);
     result.push_back(t);

@@ -22,6 +22,14 @@ struct TaosConfig {
 // exec SQL (DDL), return true on success; print error on failure.
 bool ExecSQL(TAOS* conn, const char* sql);
 
+// TDengine VARCHAR 字段读取：row[col] 指向数据，2字节 LE 长度前缀在 p[-2]/p[-1]。
+inline std::string ReadVarChar(void* col) {
+  if (!col) return {};
+  const auto* p = static_cast<const unsigned char*>(col);
+  uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
+  return std::string(reinterpret_cast<const char*>(p), len);
+}
+
 class TaosConnection {
  public:
   explicit TaosConnection(const TaosConfig& cfg);

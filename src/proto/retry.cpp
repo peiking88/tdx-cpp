@@ -10,19 +10,6 @@ RetryPolicy::RetryPolicy() : RetryPolicy({100, 500, 1000, 2000}) {}  // opentdx 
 
 RetryPolicy::RetryPolicy(std::vector<int> backoff_ms) : backoff_ms_(std::move(backoff_ms)) {}
 
-std::error_code RetryPolicy::Execute(std::function<std::error_code()> fn) const {
-  std::error_code last_ec;
-  // 共执行 1 + backoff_ms_.size() 次（首次 + 每次退避后重试）
-  for (std::size_t i = 0; i <= backoff_ms_.size(); ++i) {
-    last_ec = fn();
-    if (!last_ec) return {};  // 成功
-    if (i < backoff_ms_.size()) {
-      util::ThisFiber::SleepFor(std::chrono::milliseconds(backoff_ms_[i]));
-    }
-  }
-  return last_ec;  // 耗尽
-}
-
 // ---- CircuitBreaker ----
 
 CircuitBreaker::CircuitBreaker() : CircuitBreaker(5, std::chrono::seconds(60)) {}
@@ -51,7 +38,7 @@ void CircuitBreaker::RecordSuccess() {
 
 void CircuitBreaker::RecordFailure() {
   std::lock_guard<util::fb2::Mutex> lk(mu_);
-  ++failure_count_;
+  if (failure_count_ < failure_threshold_ * 10) ++failure_count_;  // 防止 kOpen 下无限增长
   if (state_ == State::kHalfOpen) {
     Transition(State::kOpen);  // 试探失败，重新熔断
   } else if (state_ == State::kClosed && failure_count_ >= failure_threshold_) {

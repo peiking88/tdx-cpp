@@ -7,15 +7,28 @@
 
 namespace tdx::util {
 
+namespace {
+
+// thread_local 缓存 iconv 描述符，避免高频调用重复 open/close。
+// iconv 不保证线程安全，每个线程独立持有。
+thread_local iconv_t g_iconv_cd = reinterpret_cast<iconv_t>(-1);
+
+iconv_t GetIconv() {
+  if (g_iconv_cd != reinterpret_cast<iconv_t>(-1)) return g_iconv_cd;
+  g_iconv_cd = iconv_open("UTF-8", "GBK");
+  if (g_iconv_cd == reinterpret_cast<iconv_t>(-1))
+    g_iconv_cd = iconv_open("UTF-8", "GB18030");
+  return g_iconv_cd;
+}
+
+}  // namespace
+
 std::string gbk_to_utf8(const char* buf, std::size_t len) {
   if (len == 0) return {};
 
-  iconv_t cd = iconv_open("UTF-8", "GBK");
+  iconv_t cd = GetIconv();
   if (cd == reinterpret_cast<iconv_t>(-1)) {
-    cd = iconv_open("UTF-8", "GB18030");
-    if (cd == reinterpret_cast<iconv_t>(-1)) {
-      return std::string(buf, len);  // 无可用转码器，原样返回
-    }
+    return std::string(buf, len);  // 无可用转码器，原样返回
   }
 
   std::string out;
@@ -42,7 +55,6 @@ std::string gbk_to_utf8(const char* buf, std::size_t len) {
     }
   }
 
-  iconv_close(cd);
   return out;
 }
 

@@ -33,6 +33,7 @@ ABSL_FLAG(uint32_t, jobs, 16, "import 并行线程数 (0=CPU 核数)");
 #include <taos.h>
 
 using namespace tdx;
+using tdx::taos::ReadVarChar;
 
 namespace {
 
@@ -149,6 +150,7 @@ int DoBatchFetch(int argc, char** argv) {
     for (char c : last) if (!std::isdigit(static_cast<unsigned char>(c))) all_digit = false;
     if (all_digit) { concurrency = std::atoi(last.c_str()); codes.pop_back(); }
   }
+  if (concurrency < 1) concurrency = 4;  // 防御 atoi 失败或用户传 0
   if (codes.empty()) { std::cerr << "用法: tdx batch-fetch <code> [code...] [concurrency]\n"; return 1; }
   auto results = tdx::batch::BatchFetchKline(codes, concurrency, tdx::Period::DAILY, 0, 10);
   int ok = 0;
@@ -158,14 +160,6 @@ int DoBatchFetch(int argc, char** argv) {
   }
   std::cout << "完成: " << ok << "/" << results.size() << " 成功（并发=" << concurrency << "）\n";
   return 0;
-}
-
-// TDengine VARCHAR 字段：row[0] 指向数据，2字节LE长度前缀在 row[0]-2
-static std::string ReadVarChar(void* col) {
-  if (!col) return {};
-  const auto* p = static_cast<const unsigned char*>(col);
-  uint16_t len = p[-2] | (static_cast<uint16_t>(p[-1]) << 8);
-  return std::string(reinterpret_cast<const char*>(p), len);
 }
 
 // 检查库中股票代码是否都有名称：tdx check-names

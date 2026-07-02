@@ -34,6 +34,7 @@
 #include "tdx/proto/frame.hpp"
 #include "tdx/proto/parsers.hpp"
 #include "tdx/util/gbk.hpp"
+#include "tdx/util/code_validate.hpp"
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/taos/taos_connection.hpp"
@@ -106,7 +107,7 @@ std::vector<std::string> FetchAllCodes() {
   return all;
 }
 
-std::string Esc(const std::string& s) {
+std::string Esc(std::string_view s) {
   std::string out; out.reserve(s.size() + 4);
   for (char ch : s) { if (ch == '\'') out += "''"; else out += ch; }
   return out;
@@ -210,12 +211,18 @@ int64_t ExecSql(TAOS* conn, const std::string& sql) {
 
 int64_t InsertQuote(TAOS* conn, const std::vector<Quote>& quotes, int64_t now_ms) {
   if (quotes.empty()) return 0;
-  auto V = [](double v) { return std::isnan(v) ? "NULL" : (std::ostringstream() << v).str(); };
+  auto V = [](double v) -> std::string {
+    if (std::isnan(v)) return "NULL";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.10g", v);
+    return buf;
+  };
   int64_t written = 0;
   for (size_t i = 0; i < quotes.size(); i += 200) {
     size_t end = std::min(i + 200, quotes.size());
     std::ostringstream sql; sql << "INSERT INTO ";
     for (size_t j = i; j < end; ++j) {
+      if (!tdx::util::IsValidCode(quotes[j].code)) continue;
       if (j > i) sql << ' ';
       sql << "q_" << quotes[j].code << " USING quote TAGS('" << Esc(quotes[j].code) << "')";
       const auto& q = quotes[j];
@@ -232,6 +239,7 @@ int64_t InsertQuote(TAOS* conn, const std::vector<Quote>& quotes, int64_t now_ms
     if (n >= 0) { written += static_cast<int64_t>(end - i); continue; }
     // 批量 INSERT 失败 → 逐条重试，定位问题股票且不影响其余数据入库
     for (size_t j = i; j < end; ++j) {
+      if (!tdx::util::IsValidCode(quotes[j].code)) continue;
       std::ostringstream one;
       const auto& q = quotes[j];
       int64_t ts = q.datetime > 0 ? q.datetime * 1000LL : now_ms;
@@ -253,7 +261,7 @@ int64_t InsertQuote(TAOS* conn, const std::vector<Quote>& quotes, int64_t now_ms
 
 int64_t InsertTx(TAOS* conn, const std::vector<Transaction>& txns,
                   std::string_view code, int64_t day_ts) {
-  if (txns.empty()) return 0;
+  if (txns.empty() || !tdx::util::IsValidCode(code)) return 0;
   std::string esc = Esc(std::string(code)); int64_t written = 0;
   for (size_t i = 0; i < txns.size(); i += 500) {
     size_t end = std::min(i + 500, txns.size());
@@ -272,7 +280,7 @@ int64_t InsertTx(TAOS* conn, const std::vector<Transaction>& txns,
 
 int64_t InsertTick(TAOS* conn, const std::vector<Tick>& ticks,
                     std::string_view code, int64_t day_ts) {
-  if (ticks.empty()) return 0;
+  if (ticks.empty() || !tdx::util::IsValidCode(code)) return 0;
   std::string esc = Esc(std::string(code)); int64_t written = 0;
   for (size_t i = 0; i < ticks.size(); i += 500) {
     size_t end = std::min(i + 500, ticks.size());
@@ -289,6 +297,7 @@ int64_t InsertTick(TAOS* conn, const std::vector<Tick>& ticks,
 }
 
 int64_t InsertIdx(TAOS* conn, const IndexInfo& ii, int64_t now_ms) {
+  if (!tdx::util::IsValidCode(ii.code)) return 0;
   std::ostringstream sql;
   sql << "INSERT INTO ix_" << ii.code << " USING idx_info TAGS('" << Esc(ii.code) << "') VALUES("
       << now_ms << "," << ii.close << "," << ii.pre_close << "," << ii.diff
@@ -317,8 +326,9 @@ int64_t InsertUnu(TAOS* conn, const std::vector<UnusualItem>& items, int64_t now
 // 判断是否为指数代码（仅指数收集 index_info 和 unusual）
 bool IsIndexCode(std::string_view code) {
   if (code.size() < 2) return false;
-  std::string h2(code.substr(0, 2));
-  return h2 == "88" || h2 == "99" || h2 == "39" || (code.size() > 2 && code.substr(0, 3) == "399");
+  char c0 = code[0], c1 = code[1];
+  return (c0 == '8' && c1 == '8') || (c0 == '9' && c1 == '9') || (c0 == '3' && c1 == '9')
+         || (code.size() > 2 && c0 == '3' && c1 == '9' && code[2] == '9');
 }
 
 // 获取当日 0 点 epoch ms（用于把逐笔的分钟偏移转换为绝对时间）
@@ -334,6 +344,7 @@ int64_t DayStartMs() {
 // ==================== 采集核心 ====================
 // ---- finance/F10/vol/hist INSERT helpers ----
 int64_t InsertFinance(TAOS* conn, const Finance& f, int64_t now_ms) {
+  if (!tdx::util::IsValidCode(f.code)) return 0;
   std::ostringstream sql;
   sql << "INSERT INTO fn_" << f.code << " USING finance TAGS('" << Esc(f.code) << "') VALUES("
       << now_ms << "," << f.liutongguben << "," << f.zongguben << ","
@@ -345,13 +356,14 @@ int64_t InsertFinance(TAOS* conn, const Finance& f, int64_t now_ms) {
 
 int64_t InsertF10Cat(TAOS* conn, const std::vector<F10Category>& cats,
                       std::string_view code, int64_t now_ms) {
-  if (cats.empty()) return 0; int64_t written = 0;
+  if (cats.empty() || !tdx::util::IsValidCode(code)) return 0; int64_t written = 0;
+  std::string esc_code = Esc(code);
   for (size_t i = 0; i < cats.size(); i += 50) {
     size_t end = std::min(i + 50, cats.size());
     std::ostringstream sql; sql << "INSERT INTO ";
     for (size_t j = i; j < end; ++j) {
       if (j > i) sql << ' ';
-      sql << "fc_" << code << "_" << j << " USING f10_cat TAGS('" << Esc(std::string(code)) << "') VALUES("
+      sql << "fc_" << code << "_" << j << " USING f10_cat TAGS('" << esc_code << "') VALUES("
           << now_ms << ",'" << Esc(cats[j].name) << "','" << Esc(cats[j].filename) << "',"
           << cats[j].start << "," << cats[j].length                    << ")";
     }
@@ -366,6 +378,7 @@ int64_t InsertF10Cat(TAOS* conn, const std::vector<F10Category>& cats,
 std::string FetchF10FullText(proto::Connection& conn, Market mkt, const std::string& code,
                              const F10Category& cat) {
   std::string gbk_raw;
+  gbk_raw.reserve(cat.length);
   constexpr uint32_t kChunk = 32000;
   for (uint32_t offset = 0; offset < cat.length; ) {
     uint32_t want = std::min<uint32_t>(kChunk, cat.length - offset);
@@ -388,11 +401,12 @@ std::string FetchF10FullText(proto::Connection& conn, Market mkt, const std::str
 // ts = day_ts + seq：同日 --loop 重复采集时相同 (子表,ts) 覆盖、不膨胀。content_len 记完整字符数。
 int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
                       const F10Category& cat, const std::string& full, int64_t day_ts) {
-  if (full.empty()) return 0;
+  if (full.empty() || !tdx::util::IsValidCode(code)) return 0;
   constexpr size_t kSlice = 1000;
   std::ostringstream tb;
   tb << "ft_" << code << "_" << j;
   const std::string esc_code = Esc(code), esc_cat = Esc(cat.name), esc_fn = Esc(cat.filename);
+  const std::string tb_name = tb.str();
   int64_t written = 0;
   for (size_t pos = 0, seq = 0; pos < full.size(); ++seq) {
     size_t end = std::min(pos + kSlice, full.size());
@@ -402,7 +416,7 @@ int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
         --end;
     }
     std::ostringstream sql;
-    sql << "INSERT INTO " << tb.str() << " USING f10_text TAGS('" << esc_code << "','"
+    sql << "INSERT INTO " << tb_name << " USING f10_text TAGS('" << esc_code << "','"
         << esc_cat << "','" << esc_fn << "') VALUES("
         << (day_ts + static_cast<int64_t>(seq)) << "," << seq << ",'"
         << EscText(full.substr(pos, end - pos)) << "'," << full.size() << ")";
@@ -414,6 +428,7 @@ int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
 }
 
 int64_t InsertVol(TAOS* conn, const VolProfile& vp, int64_t now_ms) {
+  if (!tdx::util::IsValidCode(vp.code)) return 0;
   std::ostringstream sql;
   sql << "INSERT INTO vl_" << vp.code << " USING vol TAGS('" << Esc(vp.code) << "') VALUES("
       << now_ms << "," << vp.price << "," << vp.pre_close << "," << vp.open
@@ -423,7 +438,7 @@ int64_t InsertVol(TAOS* conn, const VolProfile& vp, int64_t now_ms) {
 
 int64_t InsertHistOrd(TAOS* conn, const std::vector<HistoryOrder>& orders,
                        std::string_view code, int64_t base_ts) {
-  if (orders.empty()) return 0;
+  if (orders.empty() || !tdx::util::IsValidCode(code)) return 0;
   std::string esc = Esc(std::string(code)); int64_t written = 0;
   for (size_t i = 0; i < orders.size(); i += 500) {
     size_t end = std::min(i + 500, orders.size());
@@ -440,7 +455,7 @@ int64_t InsertHistOrd(TAOS* conn, const std::vector<HistoryOrder>& orders,
 
 int64_t InsertHistTx2(TAOS* conn, const std::vector<HistoryTransaction>& txns,
                        std::string_view code, int64_t base_ts) {
-  if (txns.empty()) return 0;
+  if (txns.empty() || !tdx::util::IsValidCode(code)) return 0;
   std::string esc = Esc(std::string(code)); int64_t written = 0;
   for (size_t i = 0; i < txns.size(); i += 500) {
     size_t end = std::min(i + 500, txns.size());
@@ -602,7 +617,11 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
       }
     }
     if (do_hist) {
-      uint32_t today = 20260630; // ponytail: use current date
+      time_t now_t = std::time(nullptr);
+      struct tm now_tm{};
+      localtime_r(&now_t, &now_tm);
+      uint32_t today = static_cast<uint32_t>((now_tm.tm_year + 1900) * 10000 +
+                      (now_tm.tm_mon + 1) * 100 + now_tm.tm_mday);
       for (const auto& req : batch) {
         try {
           auto body = proto::serialize_history_orders(req.market, req.code, today);
@@ -773,6 +792,9 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   bool do_hist = absl::GetFlag(FLAGS_with_hist);
   bool do_brd  = absl::GetFlag(FLAGS_with_board);
 
+  if (do_brd) {
+    std::cerr << "警告: --with_board 尚未实现，忽略。\n";
+  }
   if (jobs < 1) jobs = 8;
   if (batch_size < 1) batch_size = 80;
   if (batch_size > 200) { std::cerr << "batch-size 上限 200\n"; batch_size = 200; }

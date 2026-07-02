@@ -7,7 +7,6 @@
 #pragma once
 
 #include <chrono>
-#include <functional>
 #include <system_error>
 #include <vector>
 
@@ -24,7 +23,19 @@ class RetryPolicy {
 
   // 执行 fn，失败按退避重试，成功即止。返回空 error_code=成功，否则最后一次错误。
   // 退避用 ThisFiber::SleepFor（须在 fiber 内调用）。
-  std::error_code Execute(std::function<std::error_code()> fn) const;
+  template <typename Fn>
+  std::error_code Execute(Fn&& fn) const {
+    std::error_code last_ec;
+    // 共执行 1 + backoff_ms_.size() 次（首次 + 每次退避后重试）
+    for (std::size_t i = 0; i <= backoff_ms_.size(); ++i) {
+      last_ec = fn();
+      if (!last_ec) return {};  // 成功
+      if (i < backoff_ms_.size()) {
+        ::util::ThisFiber::SleepFor(std::chrono::milliseconds(backoff_ms_[i]));
+      }
+    }
+    return last_ec;  // 耗尽
+  }
 
   const std::vector<int>& backoff_ms() const { return backoff_ms_; }
 

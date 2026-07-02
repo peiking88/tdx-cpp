@@ -45,6 +45,11 @@ class E2ETest : public ::testing::Test {
     g_sq.reset();
   }
 
+  // 每个 TEST_F 执行前检查连接，避免网络抖动导致后续测试 SIGSEGV
+  void SetUp() override {
+    if (!g_sq || !g_sq->IsConnected()) GTEST_SKIP() << "跳过：E2E 连接不可用";
+  }
+
   static std::unique_ptr<quotes::StdQuotes> g_sq;
   static std::error_code g_ec;
 };
