@@ -55,7 +55,7 @@ class CircuitBreaker {
  private:
   void Transition(State s);
 
-  mutable util::fb2::Mutex mu_;
+  mutable ::util::fb2::Mutex mu_;
   State state_ = State::kClosed;
   int failure_count_ = 0;
   int failure_threshold_;

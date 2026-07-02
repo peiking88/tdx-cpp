@@ -32,6 +32,7 @@
 #include "tdx/proto/connection.hpp"
 #include "tdx/proto/frame.hpp"
 #include "tdx/proto/parsers.hpp"
+#include "tdx/util/gbk.hpp"
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/taos/taos_connection.hpp"
@@ -95,6 +96,30 @@ std::string Esc(const std::string& s) {
   return out;
 }
 
+// F10 正文专用转义：TDengine SQL 字面量支持 \\ \' \n \r \t 转义序列。
+// 必须转义换行/制表（否则字面量跨行触发 SQL 语法错误 0x0216）、反斜杠、单引号；
+// 其他控制字符（\b \f \v 等 F10 文本残留）TDengine 字面量无法表达，替换为空格。
+std::string EscText(const std::string& s) {
+  std::string out;
+  out.reserve(s.size() + 8);
+  for (unsigned char ch : s) {
+    switch (ch) {
+      case '\\': out += "\\\\"; break;
+      case '\'': out += "\\'"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (ch < 0x20 || ch == 0x7F) {
+          out += ' ';  // 其他控制字符：替换空格
+        } else {
+          out += static_cast<char>(ch);
+        }
+    }
+  }
+  return out;
+}
+
 // ---- 建表 & INSERT 辅助 ----
 
 void EnsureTables(TAOS* conn, bool do_tx, bool do_tick, bool do_idx, bool do_unu,
@@ -126,9 +151,17 @@ void EnsureTables(TAOS* conn, bool do_tx, bool do_tick, bool do_idx, bool do_unu
     "zongguben DOUBLE, meigushouyi DOUBLE, meigujinzichan DOUBLE, "
     "yinyezongshouru DOUBLE, guimujinlirun DOUBLE, ipo_date INT, industry INT) "
     "TAGS (code VARCHAR(10))");
-  if (do_f10) tdx::taos::ExecSQL(conn,
-    "CREATE STABLE IF NOT EXISTS f10_cat (ts TIMESTAMP, cat_name VARCHAR(64), "
-    "filename VARCHAR(80), start_pos INT, len_val INT) TAGS (code VARCHAR(10))");
+  if (do_f10) {
+    tdx::taos::ExecSQL(conn,
+      "CREATE STABLE IF NOT EXISTS f10_cat (ts TIMESTAMP, cat_name VARCHAR(64), "
+      "filename VARCHAR(80), start_pos INT, len_val INT) TAGS (code VARCHAR(10))");
+    // F10 全文（单分类可达 76KB，超 TDengine 单行上限 → 按 3900 字符切片，seq 为片序）。
+    // content 列独占 row，cat_name/filename 放 TAG 不占 row size。
+    tdx::taos::ExecSQL(conn,
+      "CREATE STABLE IF NOT EXISTS f10_text (ts TIMESTAMP, seq SMALLINT, "
+      "content NCHAR(1000), content_len INT) "
+      "TAGS (code VARCHAR(10), cat_name VARCHAR(64), filename VARCHAR(80))");
+  }
   if (do_vol) tdx::taos::ExecSQL(conn,
     "CREATE STABLE IF NOT EXISTS vol (ts TIMESTAMP, price DOUBLE, pre_close DOUBLE, "
     "open DOUBLE, high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE) "
@@ -282,6 +315,59 @@ int64_t InsertF10Cat(TAOS* conn, const std::vector<F10Category>& cats,
           << cats[j].start << "," << cats[j].length                    << ")";
     }
     int64_t n = ExecSql(conn, sql.str()); if (n < 0) break; written += static_cast<int64_t>(end - i);
+  }
+  return written;
+}
+
+// 分页拉取 F10 单分类全文。cat.start 为该分类在全文件中的累计偏移，cat.length 为 GBK 字节总长。
+// 响应 12B 头中 length(u16) 为本次返回字节数（≤65535），而单分类可达 76KB → 必须分页循环。
+// 累积原始 GBK 字节、末尾统一 gbk_to_utf8 解码，避免双字节字符在分页边界被切断。
+std::string FetchF10FullText(proto::Connection& conn, Market mkt, const std::string& code,
+                             const F10Category& cat) {
+  std::string gbk_raw;
+  constexpr uint32_t kChunk = 32000;
+  for (uint32_t offset = 0; offset < cat.length; ) {
+    uint32_t want = std::min<uint32_t>(kChunk, cat.length - offset);
+    auto body = proto::serialize_f10_content(mkt, code, cat.filename, cat.start + offset, want);
+    auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgF10Content,
+                            body.data(), body.size()));
+    if (resp.body.size() < 12) break;
+    uint16_t got = static_cast<uint16_t>(resp.body[10]) |
+                   static_cast<uint16_t>(static_cast<uint16_t>(resp.body[11]) << 8);
+    if (got == 0) break;
+    if (static_cast<std::size_t>(12) + got > resp.body.size()) break;  // 响应不完整
+    gbk_raw.append(reinterpret_cast<const char*>(resp.body.data() + 12), got);
+    offset += got;
+    // 不因 got<want 提前终止——服务端可能分片返回，须持续拉至 offset>=length 或 got==0。
+  }
+  return tdx::util::gbk_to_utf8(gbk_raw);
+}
+
+// F10 全文按 3900 字符切片入库 f10_text，子表 ft_<code>_<j>（j 对齐 f10_cat 的目录序号）。
+// ts = day_ts + seq：同日 --loop 重复采集时相同 (子表,ts) 覆盖、不膨胀。content_len 记完整字符数。
+int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
+                      const F10Category& cat, const std::string& full, int64_t day_ts) {
+  if (full.empty()) return 0;
+  constexpr size_t kSlice = 1000;
+  std::ostringstream tb;
+  tb << "ft_" << code << "_" << j;
+  const std::string esc_code = Esc(code), esc_cat = Esc(cat.name), esc_fn = Esc(cat.filename);
+  int64_t written = 0;
+  for (size_t pos = 0, seq = 0; pos < full.size(); pos += kSlice, ++seq) {
+    size_t end = std::min(pos + kSlice, full.size());
+    // 切片边界对齐 UTF-8 字符（非尾片时）：full.size() 为字节数，
+    // substr(pos,kSlice) 可能切断多字节字符 → 无效 UTF-8 → TDengine 拒。
+    if (end < full.size()) {
+      while (end > pos && (static_cast<unsigned char>(full[end]) & 0xC0) == 0x80)
+        --end;  // 退到非续字节（0xxxxxxx 或 11xxxxxx）
+    }
+    std::ostringstream sql;
+    sql << "INSERT INTO " << tb.str() << " USING f10_text TAGS('" << esc_code << "','"
+        << esc_cat << "','" << esc_fn << "') VALUES("
+        << (day_ts + static_cast<int64_t>(seq)) << "," << seq << ",'"
+        << EscText(full.substr(pos, end - pos)) << "'," << full.size() << ")";
+    if (ExecSql(conn, sql.str()) < 0) continue;  // 单片失败不中断分类
+    ++written;
   }
   return written;
 }
@@ -461,7 +547,16 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgF10Category,
                                   body.data(), body.size()));
           auto cats = proto::deserialize_f10_category(resp.body.data(), resp.body.size());
-          if (!cats.empty()) { InsertF10Cat(tconn.native(), cats, req.code, now_ms); local.f10++; }
+          if (!cats.empty()) {
+            InsertF10Cat(tconn.native(), cats, req.code, now_ms);
+            local.f10++;
+            // 分页拉取每个分类全文并切片入库 f10_text
+            for (size_t j = 0; j < cats.size(); ++j) {
+              auto full = FetchF10FullText(conn, req.market, req.code, cats[j]);
+              if (!full.empty())
+                local.f10 += InsertF10Text(tconn.native(), req.code, j, cats[j], full, day_ts);
+            }
+          }
         } catch (...) {}
       }
     }
@@ -531,8 +626,12 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
     std::vector<::util::fb2::Fiber> workers;
     workers.reserve(n);
     for (int wi = 0; wi < n; ++wi) {
-      workers.push_back(::util::MakeFiber(
-          ::util::fb2::Launch{.stack_size = 128 * 1024},
+      // 注意：stack_size 须走 Fiber::Opts（struct），不能用 Launch（enum class，
+      // 仅 dispatch=0/post=1）。早期误写 Launch{.stack_size=...} 被 GCC 当成
+      // Launch(131072) 无效枚举值，致 Fiber::Start 调度异常、worker fiber 永不运行、
+      // Join 死锁。
+      workers.push_back(::util::fb2::Fiber(
+          ::util::fb2::Fiber::Opts{.stack_size = 128 * 1024},
           [&, wi] { WorkerRun(pb, ep, codes, n, batch_size,
                               do_tx, do_tick, do_idx, do_unu,
                               do_fin, do_f10, do_vol, do_hist, wi, cnt, mu); }));

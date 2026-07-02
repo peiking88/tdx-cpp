@@ -154,15 +154,16 @@ TEST_F(E2ETest, Kline000001Index) {
 }
 
 // ==================== F10 内容 0x2d0（链式：先查目录→取第一项内容） ====================
-// ponytail: F10Content 请求需 GBK 编码文件名，但 GetF10Category 返回的是 UTF8 解码后文件名。
-// GBK 往返编码可能导致请求失败（内容空），此处仅验证目录→内容链可调用且不崩溃。
+// filename 实测为 ASCII（如 600000.txt），UTF8 直送与上游 opentdx 一致且正确；
+// 此前「GBK 编码往返致内容空」的顾虑经真网验证不成立。cats[0]="最新提示" len≈20KB < u16
+// 上限，单次 GetF10Content 即可拿全（fetch_quotes 的大分类分页拉取见 FetchF10FullText）。
 TEST_F(E2ETest, F10Content600000) {
   auto cats = g_sq->GetF10Category(Market::SH, "600000");
   ASSERT_GE(cats.size(), 1u) << "F10 目录非空";
   auto content = g_sq->GetF10Content(Market::SH, "600000",
                                      cats[0].filename, cats[0].start, cats[0].length);
   EXPECT_FALSE(content.code.empty());
-  // 内容可能因 GBK 编码往返失败而空（已知局限），不强制非空
+  EXPECT_FALSE(content.content.empty()) << "F10 正文非空";
 }
 
 // ==================== 请求上限保护（K 线 800 条） ====================
