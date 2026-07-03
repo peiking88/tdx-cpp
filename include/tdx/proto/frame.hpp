@@ -49,6 +49,6 @@ struct ResponseHeader {
 ResponseHeader parse_response_header(const uint8_t* buf16);
 
 // body 是否需要 zlib 解压（zipsize != unzip_size）
-inline bool need_unzip(const ResponseHeader& h) { return h.zip_size != h.unzip_size; }
+inline constexpr bool need_unzip(const ResponseHeader& h) { return h.zip_size != h.unzip_size; }
 
 }  // namespace tdx::proto

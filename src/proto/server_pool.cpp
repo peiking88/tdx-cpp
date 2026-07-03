@@ -22,6 +22,7 @@ std::optional<double> ServerPool::Probe(const ServerInfo& host,
 
   ::util::FiberSocketBase::endpoint_type ep(addr, host.port);
   std::unique_ptr<::util::FiberSocketBase> sock(pb->CreateSocket());
+  if (!sock) return std::nullopt;  // 资源耗尽
   sock->set_timeout(2000);  // 2s 超时（对齐 mootdx socket.settimeout，避免不可达 host 挂起）
 
   auto start = std::chrono::steady_clock::now();

@@ -1,5 +1,6 @@
 #include "tdx/proto/codec.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,7 +19,9 @@ PriceResult get_price(const uint8_t* data, std::size_t data_len, std::size_t pos
   bool sign = (bdata & 0x40) != 0;
 
   if (bdata & 0x80) {
-    while (true) {
+    // 最多 9 个续字节（pos_byte ≤ 62），防止 << 64 位 UB。实际价格 ≤6 字节。
+    constexpr int kMaxContBytes = 9;
+    for (int nb = 0; nb < kMaxContBytes; ++nb) {
       ++pos;
       if (pos >= data_len) break;
       bdata = data[pos];
@@ -29,7 +32,11 @@ PriceResult get_price(const uint8_t* data, std::size_t data_len, std::size_t pos
   }
   ++pos;
 
-  if (sign) int_data = -int_data;
+  // -INT64_MIN 溢出 UB；非法值回退 0 而不是取负
+  if (sign) {
+    if (int_data == INT64_MIN) int_data = 0;
+    else int_data = -int_data;
+  }
   return {int_data, pos};
 }
 

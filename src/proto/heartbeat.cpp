@@ -22,6 +22,10 @@ void Heartbeat::Start() {
   // AddPeriodic 必须从该 Proactor 自己的线程调用；ms=15000。
   timer_id_ = proactor_->AddPeriodic(
       static_cast<uint32_t>(kHeartbeatIntervalSec * 1000), [this] { OnTimer(); });
+  if (!timer_id_) {
+    running_ = false;
+    return;
+  }
 }
 
 void Heartbeat::Stop() {

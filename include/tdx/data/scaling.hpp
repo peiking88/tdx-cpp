@@ -38,7 +38,7 @@ inline SecurityClass ClassifySecurity(std::string_view code) {
   if (code.size() < 2) return SecurityClass::AStock;
   std::string h2(code.substr(0, 2));
   if (h2 == "88" || h2 == "99") return SecurityClass::Index;
-  if (h2 == "39")              return SecurityClass::Index;
+  if (h2 == "39" && code.size() > 2 && code[2] == '9') return SecurityClass::Index;  // 仅 399xxx 为指数，390xxx 非指数
   if (h2 == "50" || h2 == "51" || h2 == "58") return SecurityClass::SHFund;
   if (h2 == "15" || h2 == "16" || h2 == "18") return SecurityClass::SZFund;
   return SecurityClass::AStock;

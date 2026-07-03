@@ -56,7 +56,8 @@ bool SnapshotTable::Get(std::string_view code, QuotePOD& out) const {
       QuotePOD qcopy;
       std::memcpy(&qcopy, &s.q, sizeof(qcopy));
       (void)s.flags;
-      uint64_t s2 = s.seq.load(std::memory_order_acquire);
+      std::atomic_thread_fence(std::memory_order_acquire);  // 阻止数据读后移到 s2 load 之后（ARM64/LTO 下否则撕裂）
+      uint64_t s2 = s.seq.load(std::memory_order_relaxed);
       if (s1 != s2) break;  // 写者穿插撕裂 → 本轮重试
 
       if (c[0] == '\0') return false;  // 空槽：键不存在（线性探测终止）

@@ -28,8 +28,8 @@ bool ExecSQL(TAOS* conn, const char* sql) {
   TAOS_RES* res = ::taos_query(conn, sql);
   int code = ::taos_errno(res);
   if (code != 0) {
-    std::fprintf(stderr, "TDengine SQL error [%d]: %s\n  SQL: %s\n",
-                 code, ::taos_errstr(res), sql);
+    std::fprintf(stderr, "TDengine SQL error [%d]: %s\n  SQL(len=%zu)\n",
+                 code, ::taos_errstr(res), std::strlen(sql));
     ::taos_free_result(res);
     return false;
   }
@@ -46,8 +46,8 @@ TaosConnection::TaosConnection(const TaosConfig& cfg) {
   conn_ = ::taos_connect(cfg.host.c_str(), cfg.user.c_str(),
                          cfg.pass.c_str(), cfg.db.c_str(), cfg.port);
   if (!conn_) {
-    std::fprintf(stderr, "TDengine 连接失败: %s:%d (user=%s)\n",
-                 cfg.host.c_str(), cfg.port, cfg.user.c_str());
+    std::fprintf(stderr, "TDengine 连接失败: %s:%d\n",
+                 cfg.host.c_str(), cfg.port);
   }
 }
 
@@ -71,7 +71,7 @@ bool TaosStmt::Prepare(const char* sql) {
   if (!stmt_) return false;
   int rc = ::taos_stmt_prepare(stmt_, sql, static_cast<unsigned long>(std::strlen(sql)));
   if (rc != 0) {
-    std::fprintf(stderr, "TDengine stmt prepare error: %s\n  SQL: %s\n", errstr(), sql);
+    std::fprintf(stderr, "TDengine stmt prepare error: %s\n  SQL(len=%zu)\n", errstr(), std::strlen(sql));
     return false;
   }
   return true;

@@ -695,7 +695,7 @@ void IngestChunk(TAOS* conn, FetchChunk& ch, int64_t now_ms, int64_t day_ts,
     for (auto& q : ch.quotes) {
       if (!IsQuoteValid(q.datetime, now_epoch)) {
         cnt.skipped++;
-        static std::set<std::string> seen;
+        std::set<std::string> seen;  // 每轮独立，避免 --loop 无限增长
         if (seen.insert(q.code).second)
           std::cerr << "[skip] " << q.code << " ts=" << q.datetime << "\n";
         continue;
@@ -781,7 +781,7 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
       for (auto& q : ch.quotes) {
         if (!IsQuoteValid(q.datetime, now_ms / 1000)) {
           cnt.skipped++;
-          static std::set<std::string> seen;  // ponytail: per-round dedup, small set
+          std::set<std::string> seen;  // 每轮独立，避免 --loop 无限增长
           if (seen.insert(q.code).second)
             std::cerr << "[skip] " << q.code << " ts=" << q.datetime << "\n";
           continue;

@@ -24,6 +24,7 @@ int WeekdayFromEpoch(int64_t epoch) {
 
 int64_t BarEndTimeAShare(int64_t dt_epoch, int period_minutes) {
   // 对齐 base.py:56-76
+  if (period_minutes <= 0) return dt_epoch;  // 防御非法周期
   auto c = tdx::util::epoch_to_cst(dt_epoch);
   int t = c.hour * 60 + c.minute;
   int elapsed, session_start;
@@ -131,8 +132,8 @@ std::vector<KLine> ResampleKline(const std::vector<KLine>& kline, Freq target) {
     case Freq::Daily: return kline;
     case Freq::Weekly:
     case Freq::Monthly: return ResampleDaily(kline, target);
+    default: return kline;  // 未知频率，原样返回
   }
-  return kline;
 }
 
 }  // namespace tdx::data

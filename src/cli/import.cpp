@@ -16,7 +16,7 @@
 namespace {
 
 struct ImportConfig {
-  std::string vipdoc_path = "/home/li/.local/share/tdxcfv/drive_c/tc/vipdoc";
+  std::string vipdoc_path = "";  // ponytail: 默认空，由 TDX_HOME 环境变量设定
   std::string engine = "taos";  // 默认 taos
   bool no_adjust = false;
   std::vector<std::string> codes;

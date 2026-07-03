@@ -71,11 +71,14 @@ std::error_code ExtQuotes::ConnectInFiber() {
 }
 
 void ExtQuotes::Close() {
-  if (conn_) {
-    conn_->Close();
-    conn_.reset();
+  // heartbeat/conn 的 socket 操作须在 proactor 线程执行（对齐 StdQuotes/SPQuotes）。
+  if (proactor_) {
+    proactor_->Await([&] {
+      if (conn_) { conn_->Close(); conn_.reset(); }
+    });
   }
   connected_ = false;
+  server_pool_.reset();  // 须在 pool_ 销毁前释放（持有 pool_ 裸指针）
   if (pool_) {
     pool_->Stop();
     pool_.reset();

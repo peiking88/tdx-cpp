@@ -78,7 +78,7 @@ inline constexpr double kAmountScale = 100.0;  // 金额 *100
 // 注意：前缀映射有歧义（如 00/13/20 同时存在于 SH 和 SZ），全量扫描优先。
 // ponytail: 仅凭代码前缀无法 100% 区分市场（000016 上证50 在 sh/，000001 平安银行在 sz/），
 // 已知错分案例由调用方通过实查文件补偿。此处仅提供「大概率正确」的默认推断。
-inline Market MarketFromCode(std::string_view code) {
+inline constexpr Market MarketFromCode(std::string_view code) {
   if (code.empty() || code.size() < 2) return Market::SH;
   char c0 = code[0], c1 = code[1];
   if (c0 == '6' || c0 == '5' || c0 == '7') return Market::SH;

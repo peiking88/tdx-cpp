@@ -17,6 +17,7 @@ bool IsWeekend(int year, int month, int day) {
   t.tm_mday = day;
   t.tm_isdst = -1;
   std::time_t tt = std::mktime(&t);
+  if (tt == -1) return false;  // 无效日期（如 2月30日），不当周末处理
   std::tm lt{};
   localtime_r(&tt, &lt);
   return lt.tm_wday == 0 || lt.tm_wday == 6;  // 周日/周六
@@ -82,13 +83,14 @@ std::vector<std::string> Calendar::GetTradingDays(const std::string& start,
 
   while (true) {
     std::time_t tt = std::mktime(&t);
+    if (tt == -1) break;  // 无效日期，终止遍历
     if (tt > end_tt) break;
     if (IsTradingDay(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday)) {
       days.push_back(DateStr(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday));
     }
     t.tm_mday++;
     t.tm_isdst = -1;
-    std::mktime(&t);  // 规范化（自动进位月/年）
+    if (std::mktime(&t) == -1) break;  // 规范化失败（日期溢出），终止
   }
   return days;
 }
