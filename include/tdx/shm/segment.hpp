@@ -32,7 +32,8 @@ struct SegmentHeader {
   uint64_t txn_off, txn_capacity, txn_slot_size;
   uint64_t ord_off, ord_capacity, ord_slot_size;
   uint64_t kmin_off, kmin_capacity, kmin_slot_size;
-  char reserved[16];
+  std::atomic<uint64_t> last_ingested_epoch;       // IngestWorker 每次 drain 后更新（读者判落库进度）
+  char reserved[8];
 };
 
 // 布局参数（MVP：仅快照表，16384 槽——设计 §10 Q1 / P2-3）

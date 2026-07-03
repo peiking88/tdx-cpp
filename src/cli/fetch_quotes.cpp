@@ -18,6 +18,7 @@
 #include <thread>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -234,6 +235,7 @@ int64_t InsertQuote(TAOS* conn, const std::vector<Quote>& quotes, int64_t now_ms
       sql << "q_" << quotes[j].code << " USING quote TAGS('" << Esc(quotes[j].code) << "')";
       const auto& q = quotes[j];
       int64_t ts = q.datetime > 0 ? q.datetime * 1000LL : now_ms;
+      if (ts > 4102444800000LL) ts = now_ms;  // 防御 to_datetime 垃圾 year 溢出
       sql << " VALUES(" << ts << "," << q.price << "," << q.pre_close << "," << q.open
           << "," << q.high << "," << q.low << "," << q.volume << "," << q.amount;
       for (int k = 0; k < 5; ++k) sql << "," << V(q.bid[k]);
@@ -250,6 +252,7 @@ int64_t InsertQuote(TAOS* conn, const std::vector<Quote>& quotes, int64_t now_ms
       std::ostringstream one;
       const auto& q = quotes[j];
       int64_t ts = q.datetime > 0 ? q.datetime * 1000LL : now_ms;
+      if (ts > 4102444800000LL) ts = now_ms;  // 防御 to_datetime 垃圾 year 溢出
       one << "INSERT INTO q_" << q.code << " USING quote TAGS('" << Esc(q.code) << "') VALUES("
           << ts << "," << q.price << "," << q.pre_close << "," << q.open
           << "," << q.high << "," << q.low << "," << q.volume << "," << q.amount;
@@ -671,13 +674,36 @@ struct Counters {
   int64_t finance = 0, f10 = 0, vol = 0, hist = 0;
   int errors = 0;
   int64_t dropped = 0;  // 异步入库队列满丢弃的 chunk 数（设计 §D4 背压）
+  int64_t skipped = 0;  // 非当日数据被拦截数
 };
+
+// 过滤非法 Quote：datetime=0（服务器未返回时间，取当前时间）或 ±12h 内合法；
+// 超出范围视为解析残留/脏数据拦截并记录。
+bool IsQuoteValid(int64_t epoch_sec, int64_t now_epoch) {
+  if (epoch_sec <= 0) return true;  // 0=服务器未返回时间，取当前时间
+  int64_t delta = epoch_sec - now_epoch;
+  return delta > -43200 && delta < 43200;
+}
 
 // 单 chunk 落库（同步路径与 IngestWorker 共用）。抽取自原阶段B 入库循环。
 void IngestChunk(TAOS* conn, FetchChunk& ch, int64_t now_ms, int64_t day_ts,
                  bool do_tx, bool do_tick, bool do_idx, bool do_unu,
                  bool do_fin, bool do_f10, bool do_vol, bool do_hist, Counters& cnt) {
-  if (!ch.quotes.empty()) cnt.quote += InsertQuote(conn, ch.quotes, now_ms);
+  if (!ch.quotes.empty()) {
+    int64_t now_epoch = now_ms / 1000;
+    std::vector<Quote> valid; valid.reserve(ch.quotes.size());
+    for (auto& q : ch.quotes) {
+      if (!IsQuoteValid(q.datetime, now_epoch)) {
+        cnt.skipped++;
+        static std::set<std::string> seen;
+        if (seen.insert(q.code).second)
+          std::cerr << "[skip] " << q.code << " ts=" << q.datetime << "\n";
+        continue;
+      }
+      valid.push_back(std::move(q));
+    }
+    if (!valid.empty()) cnt.quote += InsertQuote(conn, valid, now_ms);
+  }
   for (auto& td : ch.txns) cnt.tx += InsertTx(conn, td.txns, td.code, day_ts);
   for (auto& td : ch.ticks) cnt.tick += InsertTick(conn, td.ticks, td.code, day_ts);
   for (auto& ii : ch.indices) cnt.index += InsertIdx(conn, ii, now_ms);
@@ -753,9 +779,16 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
     for (auto& ch : chunks) {
       cnt.errors += ch.errors;
       for (auto& q : ch.quotes) {
+        if (!IsQuoteValid(q.datetime, now_ms / 1000)) {
+          cnt.skipped++;
+          static std::set<std::string> seen;  // ponytail: per-round dedup, small set
+          if (seen.insert(q.code).second)
+            std::cerr << "[skip] " << q.code << " ts=" << q.datetime << "\n";
+          continue;
+        }
         shm->Snapshot().Put(q.code, tdx::shm::to_pod(q));
       }
-      cnt.quote += static_cast<int64_t>(ch.quotes.size());  // 快照写入计数
+      cnt.quote += static_cast<int64_t>(ch.quotes.size());  // quote 计数（被 skip 的已在 skipped 中单独计数）
       if (!ingest_q->write(std::move(ch))) {
         cnt.dropped++;  // 队列满：丢弃整轮 chunk（盘中数据最新优先）
       }
@@ -780,7 +813,8 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
 // 异步入库线程（独立 std::thread，脱离 helio Proactor——taos_* 阻塞合规）。
 // 设计文档 §D4 / §6.2。持独立 TaosConnection，drain SPSC 队列 → IngestChunk 落库。
 // g_stop 退出主循环后，再 drain 一次确保队列内剩余 chunk 不丢。
-void IngestWorker(folly::ProducerConsumerQueue<FetchChunk>& q,
+void IngestWorker(tdx::shm::SegmentHeader* shm_header,
+                  folly::ProducerConsumerQueue<FetchChunk>& q,
                   bool do_tx, bool do_tick, bool do_idx, bool do_unu,
                   bool do_fin, bool do_f10, bool do_vol, bool do_hist) {
   tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
@@ -802,6 +836,8 @@ void IngestWorker(folly::ProducerConsumerQueue<FetchChunk>& q,
       IngestChunk(conn->native(), ch, now_ms, DayStartMs(),
                   do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist, dummy);
     }
+    if (shm_header) shm_header->last_ingested_epoch.store(
+        static_cast<uint64_t>(std::time(nullptr)), std::memory_order_release);
   };
   while (!g_stop) {
     drain_all();
@@ -874,7 +910,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     if (!shm) { std::cerr << "创建共享内存段失败: " << mmap_path << "\n"; return 1; }
     ingest_q = std::make_unique<folly::ProducerConsumerQueue<FetchChunk>>(64);
     std::signal(SIGINT, OnSignal); std::signal(SIGTERM, OnSignal);  // 异步模式需 g_stop 控制 worker
-    ingest_worker = std::thread(IngestWorker, std::ref(*ingest_q),
+    ingest_worker = std::thread(IngestWorker, &shm->Header(), std::ref(*ingest_q),
                                 do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
     std::cerr << "异步入库已启用，共享内存: " << mmap_path << "\n";
   } else if (loop) {
@@ -891,7 +927,8 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     total.quote += cnt.quote; total.tx += cnt.tx; total.tick += cnt.tick;
     total.index += cnt.index; total.unusual += cnt.unusual;
     total.finance += cnt.finance; total.f10 += cnt.f10; total.vol += cnt.vol; total.hist += cnt.hist;
-    total.dropped += cnt.dropped;
+    total.dropped += cnt.dropped; total.skipped += cnt.skipped;
+    total.errors += cnt.errors;
 
     std::cerr << "第" << round << "轮:"
               << " quote=" << cnt.quote << " tx=" << cnt.tx
@@ -902,6 +939,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     if (cnt.hist) std::cerr << " hist=" << cnt.hist;
     if (cnt.errors) std::cerr << " err=" << cnt.errors;
     if (cnt.dropped) std::cerr << " dropped=" << cnt.dropped;
+    if (cnt.skipped) std::cerr << " skip=" << cnt.skipped;
     std::cerr << "\n";
 
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -931,6 +969,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   if (total.vol) std::cerr << " vol:" << total.vol;
   if (total.hist) std::cerr << " hist:" << total.hist;
   if (total.dropped) std::cerr << " dropped:" << total.dropped;
+  if (total.skipped) std::cerr << " skip:" << total.skipped;
   std::cerr << "\n";
   return 0;
 }

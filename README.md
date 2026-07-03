@@ -55,4 +55,23 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.13.0`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.13.1`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-03 10:43:12
+```
+ .claude/PRPs/prds/phase6-intraday-shm-design.md    | 563 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ .claude/PRPs/reviews/phase6-intraday-shm.review.md | 280 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ CLAUDE.md                                          |   1 +
+ CMakeLists.txt                                     |   2 +-
+ README.md                                          |   5 +-
+ include/tdx/shm/payload.hpp                        |  67 ++++++++++++
+ include/tdx/shm/segment.hpp                        |  69 +++++++++++++
+ include/tdx/shm/snapshot.hpp                       |  53 ++++++++++
+ include/tdx/types.hpp                              |   1 +
+ src/CMakeLists.txt                                 |   9 +-
+ src/cli/fetch_quotes.cpp                           | 167 +++++++++++++++++++-----------
+ src/cli/quotes_reader.cpp                          |  53 ++++++++++
+ src/shm/CMakeLists.txt                             |   9 ++
+ src/shm/segment.cpp                                | 118 +++++++++++++++++++++
+ src/shm/snapshot.cpp                               |  73 +++++++++++++
+```

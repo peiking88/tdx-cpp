@@ -61,7 +61,7 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
     (void)s_amount; (void)open_amount;
 
     Quote q;
-    q.datetime = to_datetime(server_time.value, true);  // realtime quote: with_time
+    q.datetime = format_time_to_epoch(server_time.value);  // realtime quote: HHMMSSmm → 当日 epoch
     int64_t base = price.value;
     auto s = tdx::data::GetScaling(tdx::data::DataSource::NetQuotes);
     q.price     = static_cast<double>(base) * s.price;

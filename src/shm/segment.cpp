@@ -64,6 +64,7 @@ std::unique_ptr<Segment> Segment::Create(const std::string& path, const Layout& 
   h.txn_off = h.txn_capacity = h.txn_slot_size = 0;
   h.ord_off = h.ord_capacity = h.ord_slot_size = 0;
   h.kmin_off = h.kmin_capacity = h.kmin_slot_size = 0;
+  h.last_ingested_epoch.store(0, std::memory_order_relaxed);
   std::memset(h.reserved, 0, sizeof(h.reserved));
 
   // 快照区清零（seq=0 偶=稳定空槽，code 全 0）

@@ -27,4 +27,9 @@ PriceResult get_price(const uint8_t* data, std::size_t data_len, std::size_t pos
 // 紧凑日期 → epoch seconds（CST）。对齐 help.py:171-207（含双向 fallback）。
 int64_t to_datetime(int64_t num, bool with_time);
 
+// 实时 quote 的 server_time（HHMMSSmm 整数，前导0丢失，如 14302500=14:30:15）→ 当日 CST epoch（秒）。
+// 复刻 opentdx help.py:209 format_time 字符串切片。无效（含 ts<=0）返回 0，由调用方用 now 兜底。
+// 注意：与 to_datetime(with_time=true) 完全不同——后者是分钟线的紧凑日期编码，不可用于 server_time。
+int64_t format_time_to_epoch(int64_t ts);
+
 }  // namespace tdx::proto
