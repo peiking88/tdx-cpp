@@ -40,6 +40,10 @@
 #include "tdx/taos/taos_connection.hpp"
 #include "tdx/taos/taos_import.hpp"
 #include "tdx/types.hpp"
+#include "tdx/shm/payload.hpp"
+#include "tdx/shm/segment.hpp"
+
+#include "base/ProducerConsumerQueue.h"  // folly::ProducerConsumerQueue（SPSC lock-free，任意线程可用）
 
 #include <taos.h>
 
@@ -57,6 +61,9 @@ ABSL_FLAG(bool, with_f10, false, "采集F10资料 0x2cf/0x2d0");
 ABSL_FLAG(bool, with_vol, false, "采集成交量分布 0x51a");
 ABSL_FLAG(bool, with_hist, false, "采集历史委托+逐笔 0xfb4/0xfb5");
 ABSL_FLAG(bool, with_board, false, "采集板块列表+资金流向 0x1231/0x1218");
+ABSL_FLAG(std::string, mmap_path, "",
+          "盘中实时行情共享内存文件路径（建议 /dev/shm/xxx）；"
+          "非空则启用「写 mmap 快照 + 异步入库」，空则退回同步入库（向后兼容）");
 
 using namespace tdx;
 
@@ -663,12 +670,37 @@ struct Counters {
   int64_t quote = 0, tx = 0, tick = 0, index = 0, unusual = 0;
   int64_t finance = 0, f10 = 0, vol = 0, hist = 0;
   int errors = 0;
+  int64_t dropped = 0;  // 异步入库队列满丢弃的 chunk 数（设计 §D4 背压）
 };
 
-// 单轮采集：两阶段——fiber 拉取 → 主线程写 TDengine（对齐 taos_import.cpp:256-257）
+// 单 chunk 落库（同步路径与 IngestWorker 共用）。抽取自原阶段B 入库循环。
+void IngestChunk(TAOS* conn, FetchChunk& ch, int64_t now_ms, int64_t day_ts,
+                 bool do_tx, bool do_tick, bool do_idx, bool do_unu,
+                 bool do_fin, bool do_f10, bool do_vol, bool do_hist, Counters& cnt) {
+  if (!ch.quotes.empty()) cnt.quote += InsertQuote(conn, ch.quotes, now_ms);
+  for (auto& td : ch.txns) cnt.tx += InsertTx(conn, td.txns, td.code, day_ts);
+  for (auto& td : ch.ticks) cnt.tick += InsertTick(conn, td.ticks, td.code, day_ts);
+  for (auto& ii : ch.indices) cnt.index += InsertIdx(conn, ii, now_ms);
+  if (!ch.unusuals.empty()) cnt.unusual += InsertUnu(conn, ch.unusuals, now_ms);
+  for (auto& f : ch.finances) if (InsertFinance(conn, f, now_ms) > 0) cnt.finance++;
+  for (auto& vp : ch.vols) if (InsertVol(conn, vp, now_ms) > 0) cnt.vol++;
+  for (auto& ho : ch.hist_ords) cnt.hist += InsertHistOrd(conn, ho.orders, ho.code, day_ts);
+  for (auto& ht : ch.hist_txs) cnt.hist += InsertHistTx2(conn, ht.txns, ht.code, day_ts);
+  for (auto& fd : ch.f10s) {
+    if (!fd.cats.empty()) { InsertF10Cat(conn, fd.cats, fd.code, now_ms); cnt.f10++; }
+    for (auto& [j, text] : fd.texts) {
+      cnt.f10 += InsertF10Text(conn, fd.code, j, fd.cats[j], text, day_ts);
+    }
+  }
+  cnt.errors += ch.errors;
+}
+
+// 单轮采集：两阶段——fiber 拉取 → 主线程写 mmap 快照 / 投递异步入库（或同步入库）
 Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_size,
                      bool do_tx, bool do_tick, bool do_idx, bool do_unu,
-                     bool do_fin, bool do_f10, bool do_vol, bool do_hist) {
+                     bool do_fin, bool do_f10, bool do_vol, bool do_hist,
+                     tdx::shm::Segment* shm,
+                     folly::ProducerConsumerQueue<FetchChunk>* ingest_q) {
   Counters cnt;
   if (codes.empty()) return cnt;
 
@@ -710,68 +742,65 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
     pool->Stop();
   }  // ProactorPool 析构，确保 helio 线程完全退出后再写 TDengine
 
-  // === 阶段 B：主线程写 TDengine（阻塞操作，不在 fiber 内） ===
-  // chunks[0] 是 placeholder（WorkerRun 失败时累 error），正常数据从 chunks[1] 起。
-  // 直接遍历所有 chunk 写库——placeholder 为空则 Insert* 都是无操作。
-  tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
-  tdx::taos::TaosConnection tconn(tcfg);
-  if (!tconn) { cnt.errors++; return cnt; }
-  EnsureTables(tconn.native(), do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
-
+  // === 阶段 B ===
   int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
   int64_t day_ts = DayStartMs();
 
+  if (shm && ingest_q) {
+    // 异步路径：写 mmap 快照（对分析进程可见）+ 投递整轮 chunk 到 SPSC。
+    // 主线程完全不碰 TDengine，立即进入下一轮 fetch（采集节拍与入库解耦，设计 §一/§D4）。
+    for (auto& ch : chunks) {
+      cnt.errors += ch.errors;
+      for (auto& q : ch.quotes) {
+        shm->Snapshot().Put(q.code, tdx::shm::to_pod(q));
+      }
+      if (!ingest_q->write(std::move(ch))) {
+        cnt.dropped++;  // 队列满：丢弃整轮 chunk（盘中数据最新优先）
+      }
+    }
+    shm->Header().writer_heartbeat_epoch.store(
+        static_cast<uint64_t>(now_ms / 1000), std::memory_order_release);
+    return cnt;
+  }
+
+  // 同步路径（mmap_path 空）：主线程建连 + 逐 chunk 入库（原行为，向后兼容）
+  tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
+  tdx::taos::TaosConnection tconn(tcfg);
+  if (!tconn) { cnt.errors++; return cnt; }
+  EnsureTables(tconn.native(), do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
   for (auto& ch : chunks) {
-    // Quote
-    if (!ch.quotes.empty()) {
-      cnt.quote += InsertQuote(tconn.native(), ch.quotes, now_ms);
-    }
-    // Transaction
-    for (auto& td : ch.txns) {
-      cnt.tx += InsertTx(tconn.native(), td.txns, td.code, day_ts);
-    }
-    // Tick
-    for (auto& td : ch.ticks) {
-      cnt.tick += InsertTick(tconn.native(), td.ticks, td.code, day_ts);
-    }
-    // Index
-    for (auto& ii : ch.indices) {
-      cnt.index += InsertIdx(tconn.native(), ii, now_ms);
-    }
-    // Unusual
-    if (!ch.unusuals.empty()) {
-      cnt.unusual += InsertUnu(tconn.native(), ch.unusuals, now_ms);
-    }
-    // Finance
-    for (auto& f : ch.finances) {
-      if (InsertFinance(tconn.native(), f, now_ms) > 0) cnt.finance++;
-    }
-    // Volume profile
-    for (auto& vp : ch.vols) {
-      if (InsertVol(tconn.native(), vp, now_ms) > 0) cnt.vol++;
-    }
-    // Hist orders
-    for (auto& ho : ch.hist_ords) {
-      cnt.hist += InsertHistOrd(tconn.native(), ho.orders, ho.code, day_ts);
-    }
-    // Hist transactions
-    for (auto& ht : ch.hist_txs) {
-      cnt.hist += InsertHistTx2(tconn.native(), ht.txns, ht.code, day_ts);
-    }
-    // F10 (categories + full text slices)
-    for (auto& fd : ch.f10s) {
-      if (!fd.cats.empty()) {
-        InsertF10Cat(tconn.native(), fd.cats, fd.code, now_ms);
-        cnt.f10++;
-      }
-      for (auto& [j, text] : fd.texts) {
-        cnt.f10 += InsertF10Text(tconn.native(), fd.code, j, fd.cats[j], text, day_ts);
-      }
-    }
-    cnt.errors += ch.errors;
+    IngestChunk(tconn.native(), ch, now_ms, day_ts,
+                do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist, cnt);
   }
   return cnt;
+}
+
+// 异步入库线程（独立 std::thread，脱离 helio Proactor——taos_* 阻塞合规）。
+// 设计文档 §D4 / §6.2。持独立 TaosConnection，drain SPSC 队列 → IngestChunk 落库。
+// g_stop 退出主循环后，再 drain 一次确保队列内剩余 chunk 不丢。
+void IngestWorker(folly::ProducerConsumerQueue<FetchChunk>& q,
+                  bool do_tx, bool do_tick, bool do_idx, bool do_unu,
+                  bool do_fin, bool do_f10, bool do_vol, bool do_hist) {
+  tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
+  tdx::taos::TaosConnection conn(tcfg);
+  if (!conn) { std::cerr << "IngestWorker: TDengine 连接失败，异步入库中止\n"; return; }
+  EnsureTables(conn.native(), do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
+  auto drain_all = [&] {
+    FetchChunk ch;
+    while (q.read(ch)) {
+      int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count();
+      Counters dummy;  // 入库计数由主线程的 fetch 计数覆盖，worker 内不汇总
+      IngestChunk(conn.native(), ch, now_ms, DayStartMs(),
+                  do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist, dummy);
+    }
+  };
+  while (!g_stop) {
+    drain_all();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));  // 裸线程轮询，合规
+  }
+  drain_all();  // 收尾：drain g_stop 后队列内剩余 chunk
 }
 
 }  // namespace
@@ -791,6 +820,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   bool do_vol  = absl::GetFlag(FLAGS_with_vol);
   bool do_hist = absl::GetFlag(FLAGS_with_hist);
   bool do_brd  = absl::GetFlag(FLAGS_with_board);
+  std::string mmap_path = absl::GetFlag(FLAGS_mmap_path);
 
   if (do_brd) {
     std::cerr << "警告: --with_board 尚未实现，忽略。\n";
@@ -828,7 +858,21 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   if (loop) std::cerr << "  间隔:" << interval << "s";
   std::cerr << "\n\n";
 
-  if (loop) { std::signal(SIGINT, OnSignal); std::signal(SIGTERM, OnSignal); }
+  // 异步入库：构造共享内存段 + SPSC 队列 + IngestWorker 线程（设计文档 §6.2）
+  std::unique_ptr<tdx::shm::Segment> shm;
+  std::unique_ptr<folly::ProducerConsumerQueue<FetchChunk>> ingest_q;
+  std::thread ingest_worker;
+  if (!mmap_path.empty()) {
+    shm = tdx::shm::Segment::Create(mmap_path, tdx::shm::Layout{});
+    if (!shm) { std::cerr << "创建共享内存段失败: " << mmap_path << "\n"; return 1; }
+    ingest_q = std::make_unique<folly::ProducerConsumerQueue<FetchChunk>>(64);
+    std::signal(SIGINT, OnSignal); std::signal(SIGTERM, OnSignal);  // 异步模式需 g_stop 控制 worker
+    ingest_worker = std::thread(IngestWorker, std::ref(*ingest_q),
+                                do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
+    std::cerr << "异步入库已启用，共享内存: " << mmap_path << "\n";
+  } else if (loop) {
+    std::signal(SIGINT, OnSignal); std::signal(SIGTERM, OnSignal);
+  }
 
   int round = 0;
   Counters total;
@@ -836,10 +880,11 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     ++round;
     auto t0 = std::chrono::steady_clock::now();
     auto cnt = RunOneRound(codes, jobs, batch_size, do_tx, do_tick, do_idx, do_unu,
-                           do_fin, do_f10, do_vol, do_hist);
+                           do_fin, do_f10, do_vol, do_hist, shm.get(), ingest_q.get());
     total.quote += cnt.quote; total.tx += cnt.tx; total.tick += cnt.tick;
     total.index += cnt.index; total.unusual += cnt.unusual;
     total.finance += cnt.finance; total.f10 += cnt.f10; total.vol += cnt.vol; total.hist += cnt.hist;
+    total.dropped += cnt.dropped;
 
     std::cerr << "第" << round << "轮:"
               << " quote=" << cnt.quote << " tx=" << cnt.tx
@@ -849,6 +894,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     if (cnt.vol) std::cerr << " vol=" << cnt.vol;
     if (cnt.hist) std::cerr << " hist=" << cnt.hist;
     if (cnt.errors) std::cerr << " err=" << cnt.errors;
+    if (cnt.dropped) std::cerr << " dropped=" << cnt.dropped;
     std::cerr << "\n";
 
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -863,6 +909,12 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     }
   } while (loop && !g_stop);
 
+  // 异步入库收尾：通知 worker 退出并 join（drain 完剩余 chunk 后再汇总打印）
+  if (ingest_worker.joinable()) {
+    g_stop = true;
+    ingest_worker.join();
+  }
+
   std::cerr << "\n=== 采集结束 === 轮次:" << round
             << " quote:" << total.quote << " tx:" << total.tx
             << " tick:" << total.tick << " idx:" << total.index
@@ -871,6 +923,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   if (total.f10) std::cerr << " f10:" << total.f10;
   if (total.vol) std::cerr << " vol:" << total.vol;
   if (total.hist) std::cerr << " hist:" << total.hist;
+  if (total.dropped) std::cerr << " dropped:" << total.dropped;
   std::cerr << "\n";
   return 0;
 }
