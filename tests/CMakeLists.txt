@@ -112,3 +112,9 @@ target_compile_definitions(test_golden PRIVATE
 # Phase 3 测试需 cfg 路径（holidays.json）
 target_compile_definitions(test_phase3 PRIVATE
     CFG_DIR="${CMAKE_SOURCE_DIR}/cfg")
+
+# Phase 6 共享内存测试（纯标准库 + 线程/fork，不需 helio）
+add_executable(test_shm test_shm.cpp)
+target_include_directories(test_shm PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_shm PRIVATE tdx_shm gtest gtest_main)
+add_test(NAME test_shm COMMAND test_shm)

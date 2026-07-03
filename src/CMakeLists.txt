@@ -71,6 +71,9 @@ add_subdirectory(batch)
 # ---- tdx_taos：TDengine 导入层（多线程 + STMT 批量绑定）----
 add_subdirectory(taos)
 
+# ---- tdx_shm：盘中实时行情共享内存（Phase 6，纯标准库 mmap + seqlock）----
+add_subdirectory(shm)
+
 # ---- Task 1 smoke：验证 helio 集成（输出到 build/demos）----
 add_executable(tdx_smoke smoke.cc)
 set_target_properties(tdx_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/demos)
@@ -78,4 +81,8 @@ target_link_libraries(tdx_smoke PRIVATE base fibers2)
 
 # ---- tdx_cli：命令行工具（server-test / bars / ex-bars / fetch-history / import）----
 add_executable(tdx cli/main.cpp cli/import.cpp cli/fetch_quotes.cpp)
-target_link_libraries(tdx PRIVATE tdx_data tdx_batch tdx_quotes tdx_taos base fibers2)
+target_link_libraries(tdx PRIVATE tdx_data tdx_batch tdx_quotes tdx_taos tdx_shm base fibers2)
+
+# ---- tdx_quotes_reader：盘中实时行情共享内存只读查看器（Phase 6）----
+add_executable(tdx_quotes_reader cli/quotes_reader.cpp)
+target_link_libraries(tdx_quotes_reader PRIVATE tdx_shm)
