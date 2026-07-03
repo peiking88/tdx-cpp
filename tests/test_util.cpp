@@ -3,6 +3,7 @@
 #include "tdx/util/time_util.hpp"
 #include "tdx/util/zlib_wrap.hpp"
 #include "tdx/consts.hpp"
+#include "tdx/data/scaling.hpp"
 
 #include <gtest/gtest.h>
 
@@ -68,6 +69,35 @@ TEST(MarketFromCode, Shenzhen) {
 TEST(MarketFromCode, Beijing) {
   EXPECT_EQ(MarketFromCode("830799"), Market::BJ);
   EXPECT_EQ(MarketFromCode("430047"), Market::BJ);
+}
+
+TEST(ClassifySecurity, Index399xxx) {
+  using tdx::data::ClassifySecurity;
+  using tdx::data::SecurityClass;
+  EXPECT_EQ(ClassifySecurity("399001"), SecurityClass::Index);
+  EXPECT_EQ(ClassifySecurity("399006"), SecurityClass::Index);
+}
+
+TEST(ClassifySecurity, NotIndex390xxx) {
+  // P1 修复：390xxx 非指数，应归 AStock（否则 vipdoc 量缩放差 100x）
+  using tdx::data::ClassifySecurity;
+  using tdx::data::SecurityClass;
+  EXPECT_EQ(ClassifySecurity("390001"), SecurityClass::AStock);
+  EXPECT_EQ(ClassifySecurity("390999"), SecurityClass::AStock);
+}
+
+TEST(ClassifySecurity, BoardIndex) {
+  using tdx::data::ClassifySecurity;
+  using tdx::data::SecurityClass;
+  EXPECT_EQ(ClassifySecurity("880001"), SecurityClass::Index);
+  EXPECT_EQ(ClassifySecurity("999999"), SecurityClass::Index);
+}
+
+TEST(ClassifySecurity, Funds) {
+  using tdx::data::ClassifySecurity;
+  using tdx::data::SecurityClass;
+  EXPECT_EQ(ClassifySecurity("510050"), SecurityClass::SHFund);
+  EXPECT_EQ(ClassifySecurity("159915"), SecurityClass::SZFund);
 }
 
 TEST(TimeUtil, CstToEpoch) {

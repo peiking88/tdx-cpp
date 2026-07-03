@@ -61,6 +61,51 @@ TEST(GetPrice, ContinueThenTruncate) {
   EXPECT_EQ(r.value, 0);  // 0x80 & 0x3f = 0
 }
 
+TEST(GetPrice, MaxContByteCap) {
+  // 12 个续字节链：cap=9 应在第 9 个续字节后停止，防止 << 64 UB（P1 修复）。
+  // 所有续字节 data=0，值仅来自首字节低 6 位。
+  uint8_t d[14];
+  d[0] = 0x80 | 0x01;  // continue=1, sign=0, data=1
+  for (int i = 1; i <= 12; ++i) d[i] = 0x80;  // 12 个 continue+data=0
+  d[13] = 0x00;
+  auto r = get_price(d, sizeof(d), 0);
+  EXPECT_EQ(r.value, 1);  // 首字节 data=1 + 续字节全 0
+}
+
+TEST(GetPrice, LargeNegativeNoOverflow) {
+  // sign + 5 个续字节 → 大负数，验证取负不 UB（P1 修复：INT64_MIN 保护）。
+  // 编码：0xFF=sign+continue+data(0x3F=63), 4×0xFF=continue+data(0x7F=127), 0x7F=no continue+data=127
+  // int_data = 63 + 127<<6 + 127<<13 + 127<<20 + 127<<27 + 127<<34 = 2199023255551
+  // sign → -2199023255551
+  uint8_t d[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F};
+  auto r = get_price(d, sizeof(d), 0);
+  EXPECT_EQ(r.value, -2199023255551LL);
+}
+
+// format_time_to_epoch — server_time HHMMSSmm 解析回归（v0.13.1 修复，v0.13.2 加固）
+TEST(FormatTimeToEpoch, NormalTime) {
+  // 9301500 = 09:30:15.00 → 当日 09:30 CST epoch（秒部分丢弃，仅到分钟）
+  int64_t e = format_time_to_epoch(9301500);
+  EXPECT_GT(e, 0) << "应返回有效 epoch";
+  auto c = tdx::util::epoch_to_cst(e);
+  EXPECT_EQ(c.hour, 9);
+  EXPECT_EQ(c.minute, 30);
+  // 秒分量不参与 epoch（对齐 Python format_time）
+}
+
+TEST(FormatTimeToEpoch, Zero) {
+  EXPECT_EQ(format_time_to_epoch(0), 0);
+}
+
+TEST(FormatTimeToEpoch, Hundred) {
+  EXPECT_EQ(format_time_to_epoch(100), 0);  // ts==100 哨兵 → 0
+}
+
+TEST(FormatTimeToEpoch, TooShort) {
+  EXPECT_EQ(format_time_to_epoch(1), 0);       // 1 位 < 7 → 0
+  EXPECT_EQ(format_time_to_epoch(12345), 0);   // 5 位 < 7 → 0
+}
+
 TEST(ToDatetime, DailyYYYYMMDD) {
   int64_t e = to_datetime(20240101, false);  // 2024-01-01 15:00 CST
   auto c = tdx::util::epoch_to_cst(e);

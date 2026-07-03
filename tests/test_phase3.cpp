@@ -181,6 +181,12 @@ TEST(Resampler, BarEndTimeAShareCloseBoundary) {
   EXPECT_EQ(c.minute, 0);
 }
 
+TEST(Resampler, BarEndTimeZeroMinutes) {
+  // P1 修复：period_minutes=0 防御除零，应原样返回 epoch
+  int64_t e930 = util::cst_to_epoch(2024, 6, 15, 9, 30);
+  EXPECT_EQ(BarEndTimeAShare(e930, 0), e930);
+}
+
 TEST(Resampler, BarEndTimeAShareAfternoon30m) {
   // 13:00 30m bar → 13:30
   int64_t e1300 = util::cst_to_epoch(2024, 6, 15, 13, 0);
