@@ -57,6 +57,11 @@ namespace {
 using tdx::taos::IsAStock;
 using tdx::taos::NeedsAdjust;
 
+// 子表名市场前缀（sh/sz/bj），复用 VipdocReader::MarketDir 避免重复映射。
+// 子表命名：k_{mkt}{code}_{cycle}（如 k_sh000001_5m）、a_{mkt}{code}（如 a_sz000001），
+// 避免沪市 000xxx 指数与深市 000xxx 个股同 code 互相覆盖。
+std::string MktPrefix(Market m) { return VipdocReader::MarketDir(m); }
+
 // 转义 SQL 单引号（ponytail: 股票名含引号概率极低，但安全第一）
 std::string EscapeSql(std::string_view s) {
   std::string out;
@@ -85,11 +90,14 @@ int64_t ExecAffected(TAOS* conn, const std::string& sql) {
 
 // 查询子表最新 ts（毫秒），表不存在或无数据返回 0
 int64_t LastTimestamp(TAOS* conn, const std::string& tbname) {
-  // 校验子表名格式（k_xxxxxx_1d / q_xxxxxx 等），防止 SQL 注入
-  // tbname 格式为前缀_6位数字[_后缀]，提取代码部分校验
+  // 校验子表名格式，防止 SQL 注入。
+  // 现行格式 k_{sh|sz|bj}xxxxxx_{cycle}（如 k_sh000001_5m）、a_{sh|sz|bj}xxxxxx：
+  // 前缀_ 后紧跟 2 位 market，再后才是 6 位 code（旧格式 k_xxxxxx_1d 已随清库废弃）。
   auto code_start = tbname.find('_');
-  if (code_start == std::string::npos || code_start + 1 + 6 > tbname.size()) return 0;
-  std::string_view code(tbname.data() + code_start + 1, 6);
+  if (code_start == std::string::npos) return 0;
+  size_t code_pos = code_start + 1 + 2;  // 跳过 2 位 market 前缀（sh/sz/bj）
+  if (code_pos + 6 > tbname.size()) return 0;
+  std::string_view code(tbname.data() + code_pos, 6);
   if (!tdx::util::IsValidCode(code)) return 0;
 
   std::string sql = "SELECT MAX(ts) FROM " + tbname;
@@ -108,14 +116,17 @@ int64_t LastTimestamp(TAOS* conn, const std::string& tbname) {
 // 批量 INSERT K 线数据（共享工具，消除重复）。
 // 返回写入行数；中途失败返回 -1（已写入数据保留在 DB 中，下次增量会跳过）。
 static int64_t InsertKlineBatch(TAOS* conn, const std::string& tb,
-                                 const std::string& code, const std::string& cycle,
+                                 Market market, const std::string& code,
+                                 const std::string& cycle,
                                  const std::vector<KLine>& bars) {
   std::string esc = EscapeSql(code);
+  std::string mkt = MktPrefix(market);
   int64_t written = 0;
   for (size_t i = 0; i < bars.size(); i += kBatchSize) {
     size_t end = std::min(i + kBatchSize, bars.size());
     std::ostringstream sql;
-    sql << "INSERT INTO " << tb << " USING kline TAGS('" << esc << "','" << cycle << "') VALUES";
+    sql << "INSERT INTO " << tb << " USING kline TAGS('" << esc << "','" << cycle
+        << "','" << mkt << "') VALUES";
     bool first = true;
     for (size_t j = i; j < end; ++j) {
       const auto& b = bars[j];
@@ -168,45 +179,43 @@ struct KlineWorker {
 
       if (!tdx::taos::IsAStock(code)) {
         if (!tdx::util::IsValidCode(code)) continue;  // 非法代码格式，跳过
-        ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + code + "_1d");
-        ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + code + "_1m");
-        ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + code + "_5m");
-        ExecAffected(conn.native(), "DROP TABLE IF EXISTS a_" + code);
+        std::string mp = MktPrefix(market);
+        ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_1d");
+        ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_1m");
+        ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_5m");
+        ExecAffected(conn.native(), "DROP TABLE IF EXISTS a_" + mp + code);
         ExecAffected(conn.native(),
-                     "DELETE FROM stock_name WHERE code='" + EscapeSql(code) + "'");
+                     "DELETE FROM stock_name WHERE code='" + EscapeSql(code)
+                         + "' AND market='" + mp + "'");
         filtered_out.push_back(code);
         continue;
       }
 
-      // 多市场目录回退查找 vipdoc 文件：MarketFromCode 只按前缀映射，
-      // 但 sh/lday/ 下存在以 0 开头的沪市指数（如 000300 沪深300、000001 上证指数），
-      // 其 MarketFromCode 返回 SZ 却无 sz/ 文件，数据会丢失。按 SH→SZ→BJ 回退。
-      Market vipdoc_market = market;
-      std::string vipdoc_fpath;
+      // 遍历所有市场，每个有本地 .day 文件的市场都导入：两市同 code（如 000001）
+      // 是两个不同标的（沪市=上证指数、深市=平安银行），须分别写入 k_sh*/k_sz* 子表。
+      // MarketFromCode 对 000xxx 一律返回 SZ，无法二选一；只导一个市场会丢另一市。
+      bool any_file = false;
+      bool ok_any = false;
       for (auto m : {Market::SH, Market::SZ, Market::BJ}) {
         std::string md = VipdocReader::MarketDir(m);
-        std::string candidate = cfg.vipdoc_path + "/vipdoc/" + md + "/lday/"
-                              + md + code + ".day";
-        if (fs::exists(candidate)) {
-          if (m == market) { vipdoc_market = m; vipdoc_fpath = candidate; break; }
-          if (!fs::exists(vipdoc_fpath)) { vipdoc_market = m; vipdoc_fpath = candidate; }
-        }
-      }
-
-      if (!vipdoc_fpath.empty()) {
+        std::string fpath = cfg.vipdoc_path + "/vipdoc/" + md + "/lday/"
+                          + md + code + ".day";
+        if (!fs::exists(fpath)) continue;
+        any_file = true;
         // 三个周期独立导入，任一周期的 DB 错误不影响其他周期
-        bool ok_any = false;
         auto imp = [&](const char* sd, const char* ext, const char* per) {
-          int64_t r = ImportKlineRaw(conn.native(), reader, vipdoc_market, code, sd, ext, per);
+          int64_t r = ImportKlineRaw(conn.native(), reader, m, code, sd, ext, per);
           if (r < 0) return;      // DB 写入错误（已写部分保留）
           if (r > 0) { kline_rows += r; ok_any = true; }
         };
         imp("lday", "day", "1d");
         imp("minline", "lc1", "1m");
         imp("fzline", "lc5", "5m");
+      }
+      if (any_file) {
         if (ok_any) ++codes_ok;
       } else {
-        missing.push_back(code);  // 标记，后续批量网络拉取
+        missing.push_back(code);  // 三市均无文件，标记后续批量网络拉取
       }
     }
   }
@@ -224,7 +233,7 @@ struct KlineWorker {
       bars = reader.ReadMin5(market, code);
     if (bars.empty()) return 0;
 
-    std::string tb = "k_" + code + "_" + period;
+    std::string tb = "k_" + MktPrefix(market) + code + "_" + period;
     int64_t last_ts = LastTimestamp(conn, tb);
     std::vector<KLine> new_bars;
     if (last_ts > 0) {
@@ -235,15 +244,17 @@ struct KlineWorker {
     }
     if (new_bars.empty()) return 0;
 
-    return InsertKlineBatch(conn, tb, code, period, new_bars);
+    return InsertKlineBatch(conn, tb, market, code, period, new_bars);
   }
 };
 
 // 从 DB 读取调整因子回退（网络失败时使用）
-static std::vector<tdx::Xdxr> ReadAdjustFromDB(TAOS* conn, const std::string& code) {
+static std::vector<tdx::Xdxr> ReadAdjustFromDB(TAOS* conn, Market market,
+                                                const std::string& code) {
   std::vector<tdx::Xdxr> xdxr;
   if (!tdx::util::IsValidCode(code)) return xdxr;
-  std::string sql = "SELECT ts, fenhong, peigujia, songzhuangu, peigu, category, name FROM a_" + code;
+  std::string sql = "SELECT ts, fenhong, peigujia, songzhuangu, peigu, category, name FROM a_"
+                    + MktPrefix(market) + code;
   TAOS_RES* res = ::taos_query(conn, sql.c_str());
   if (res && ::taos_errno(res) == 0) {
     TAOS_ROW row;
@@ -278,6 +289,7 @@ struct NetImportResult { int kline_ok = 0; int64_t kline_rows = 0; int adj_ok = 
 
 struct NetFetchItem {
   std::string code;
+  Market market = Market::SH;  // 阶段A 由 MarketFromCode 确定，供阶段B 子表命名/TAGS 使用
   std::vector<KLine> bars_1d, bars_1m, bars_5m;
   std::vector<tdx::Xdxr> xdxr;
 };
@@ -337,6 +349,7 @@ static NetImportResult BatchNetImport(
             auto market = tdx::MarketFromCode(code);
             NetFetchItem item;
             item.code = code;
+            item.market = market;
 
             // 拉取 K 线（仅 missing 代码）
             if (missing.count(code)) {
@@ -397,13 +410,15 @@ static NetImportResult BatchNetImport(
 
   for (auto& item : fetch_results) {
     const auto& code = item.code;
+    Market market = item.market;
+    std::string mp = MktPrefix(market);
     auto esc = EscapeSql(code);
     bool kline_ok = false;
 
     // 写 K 线（带增量过滤）
     auto WriteKline = [&](const std::vector<KLine>& bars, const char* tag) {
       if (bars.empty()) return;
-      std::string tb = "k_" + code + "_" + tag;
+      std::string tb = "k_" + mp + code + "_" + tag;
       int64_t last_ts = LastTimestamp(tconn.native(), tb);
       std::vector<KLine> new_bars;
       if (last_ts > 0) {
@@ -414,7 +429,7 @@ static NetImportResult BatchNetImport(
       }
       if (new_bars.empty()) return;
 
-      int64_t n = InsertKlineBatch(tconn.native(), tb, code, tag, new_bars);
+      int64_t n = InsertKlineBatch(tconn.native(), tb, market, code, tag, new_bars);
       if (n > 0) { r.kline_rows += n; kline_ok = true; }
     };
 
@@ -425,7 +440,7 @@ static NetImportResult BatchNetImport(
 
     // 写复权因子
     if (!item.xdxr.empty() && tdx::util::IsValidCode(code)) {
-      std::string tb = "a_" + code;
+      std::string tb = "a_" + mp + code;
       int64_t last_ts = LastTimestamp(tconn.native(), tb);
       int n = 0;
       for (const auto& x : item.xdxr) {
@@ -436,9 +451,9 @@ static NetImportResult BatchNetImport(
         if (last_ts > 0 && ts <= last_ts) continue;
         char sql[1024];
         std::snprintf(sql, sizeof(sql),
-          "INSERT INTO %s USING adjust TAGS('%s') "
+          "INSERT INTO %s USING adjust TAGS('%s','%s') "
           "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
-          tb.c_str(), code.c_str(), (long long)ts,
+          tb.c_str(), code.c_str(), mp.c_str(), (long long)ts,
           x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
           x.category, EscapeSql(x.name).c_str());
         if (ExecAffected(tconn.native(), sql) >= 0) ++n;
@@ -446,10 +461,10 @@ static NetImportResult BatchNetImport(
       if (n > 0) { r.adj_events += n; ++r.adj_ok; }
     } else if (!item.bars_1d.empty() || !item.bars_1m.empty() || !item.bars_5m.empty()) {
       // 网络无复权数据，回退到 DB
-      auto fallback = ReadAdjustFromDB(tconn.native(), code);
+      auto fallback = ReadAdjustFromDB(tconn.native(), market, code);
       if (!fallback.empty()) {
         int n = 0;
-        std::string tb = "a_" + code;
+        std::string tb = "a_" + mp + code;
         int64_t last_ts = LastTimestamp(tconn.native(), tb);
         for (const auto& x : fallback) {
           int y = 0, m = 0, d = 0;
@@ -482,45 +497,49 @@ namespace tdx::taos {
 int CleanupStaleCodes(TAOS* conn) {
   std::cerr << "清理:     扫描过期标的..." << std::flush;
 
-  // 收集 stock_name 中的有效代码
-  std::set<std::string> valid;
-  TAOS_RES* res = ::taos_query(conn, "SELECT code FROM stock_name");
-  if (res && ::taos_errno(res) == 0) {
-    TAOS_ROW row;
-    while ((row = ::taos_fetch_row(res))) {
-      if (row[0]) {
-        valid.insert(tdx::taos::ReadVarChar(row[0]));
-      }
-    }
-  }
-  ::taos_free_result(res);
-  if (valid.empty()) { std::cerr << " stock_name 为空，跳过" << std::endl; return 0; }
-
-  // 扫描 kline 子表
-  std::set<std::string> stale;
-  const char* periods[] = {"1d", "1m", "5m"};
-  res = ::taos_query(conn, "SELECT DISTINCT code FROM kline");
+  // 收集 stock_name 中的有效 (code, market)。两市同 code（如 000001 上证指数/平安银行）
+  // 已以 market 区分为两条记录，必须用复合 key 判定，否则会误删另一市的合法子表。
+  std::set<std::pair<std::string, std::string>> valid;  // {code, mktPrefix}
+  TAOS_RES* res = ::taos_query(conn, "SELECT code, market FROM stock_name");
   if (res && ::taos_errno(res) == 0) {
     TAOS_ROW row;
     while ((row = ::taos_fetch_row(res))) {
       if (!row[0]) continue;
       std::string code = tdx::taos::ReadVarChar(row[0]);
+      std::string mkt = row[1] ? tdx::taos::ReadVarChar(row[1]) : "";
+      valid.insert({code, mkt});
+    }
+  }
+  ::taos_free_result(res);
+  if (valid.empty()) { std::cerr << " stock_name 为空，跳过" << std::endl; return 0; }
+
+  // 扫描 kline 的 (code, market) tag 组合（TAGS 查询，零字符串解析歧义）
+  std::set<std::pair<std::string, std::string>> stale;
+  res = ::taos_query(conn, "SELECT DISTINCT code, market FROM kline");
+  if (res && ::taos_errno(res) == 0) {
+    TAOS_ROW row;
+    while ((row = ::taos_fetch_row(res))) {
+      if (!row[0]) continue;
+      std::string code = tdx::taos::ReadVarChar(row[0]);
+      std::string mkt = row[1] ? tdx::taos::ReadVarChar(row[1]) : "";
       // 仅清理不通过 IsAStock 的标的（债券/B股/港股通），保留服务器未返回的合法 A 股（如 589xxx ETF）
-      if (!valid.count(code) && !IsAStock(code)) stale.insert(code);
+      if (!valid.count({code, mkt}) && !IsAStock(code)) stale.insert({code, mkt});
     }
   }
   ::taos_free_result(res);
 
   if (stale.empty()) { std::cerr << " 无需清理" << std::endl; return 0; }
 
+  const char* periods[] = {"1d", "1m", "5m"};
   int dropped = 0;
-  for (const auto& code : stale) {
+  for (const auto& [code, mkt] : stale) {
     if (!tdx::util::IsValidCode(code)) continue;  // 非法代码格式，跳过
+    std::string mp = mkt.empty() ? MktPrefix(tdx::MarketFromCode(code)) : mkt;
     for (auto* period : periods) {
-      std::string tb = "k_" + code + "_" + period;
+      std::string tb = "k_" + mp + code + "_" + period;
       if (ExecAffected(conn, "DROP TABLE IF EXISTS " + tb) >= 0) ++dropped;
     }
-    if (ExecAffected(conn, "DROP TABLE IF EXISTS a_" + code) >= 0) ++dropped;
+    if (ExecAffected(conn, "DROP TABLE IF EXISTS a_" + mp + code) >= 0) ++dropped;
   }
   std::cerr << " " << stale.size() << " 只代码 / " << dropped << " 张子表" << std::endl;
   return static_cast<int>(stale.size());
@@ -534,7 +553,7 @@ int SyncStockNames(TAOS* conn) {
   ExecSQL(conn, "DROP TABLE IF EXISTS stock_name_tmp");
   ExecSQL(conn,
           "CREATE TABLE stock_name_tmp ("
-          "ts TIMESTAMP, code VARCHAR(10), name VARCHAR(64))");
+          "ts TIMESTAMP, code VARCHAR(10), market VARCHAR(2), name VARCHAR(64))");
 
   quotes::StdQuotes sq;
   if (auto ec = sq.Connect(); ec) {
@@ -559,6 +578,7 @@ int SyncStockNames(TAOS* conn) {
         if (!tdx::util::IsValidCode(stocks[i].code)) continue;
         if (batch_cnt > 0) sql << ' ';
         sql << "(" << ts_seq++ << ", '" << EscapeSql(stocks[i].code) << "', '"
+            << MktPrefix(static_cast<Market>(stocks[i].market)) << "', '"
             << EscapeSql(stocks[i].name) << "')";
         ++batch_cnt;
       }
@@ -571,7 +591,7 @@ int SyncStockNames(TAOS* conn) {
 
   // 原子替换：重建空表 → 拷贝 → 成功才删临时表
   ExecSQL(conn, "DROP TABLE IF EXISTS stock_name");
-  ExecSQL(conn, "CREATE TABLE stock_name (ts TIMESTAMP, code VARCHAR(10), name VARCHAR(64))");
+  ExecSQL(conn, "CREATE TABLE stock_name (ts TIMESTAMP, code VARCHAR(10), market VARCHAR(2), name VARCHAR(64))");
   if (ExecSQL(conn, "INSERT INTO stock_name SELECT * FROM stock_name_tmp")) {
     ExecSQL(conn, "DROP TABLE IF EXISTS stock_name_tmp");
   } else {
@@ -614,12 +634,12 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
           "CREATE STABLE IF NOT EXISTS kline ("
           "ts TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, "
           "close DOUBLE, volume DOUBLE, amount DOUBLE) "
-          "TAGS (code VARCHAR(10), cycle VARCHAR(8))");
+          "TAGS (code VARCHAR(10), cycle VARCHAR(8), market VARCHAR(2))");
   ExecSQL(conn.native(),
           "CREATE STABLE IF NOT EXISTS adjust ("
           "ts TIMESTAMP, fenhong DOUBLE, peigujia DOUBLE, songzhuangu DOUBLE, "
           "peigu DOUBLE, category INT, name VARCHAR(64)) "
-          "TAGS (code VARCHAR(10))");
+          "TAGS (code VARCHAR(10), market VARCHAR(2))");
 
   // === 第一步：网络拉取全量码表入库 ===
   std::cerr << "=== 第一步：同步全量码表 ===" << std::endl;
@@ -806,7 +826,7 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
 
     // 拉取单周期网络 K 线
     auto pull = [&](Period p, const char* tag) {
-      std::string tb = "k_" + code + "_" + tag;
+      std::string tb = "k_" + MktPrefix(market) + code + "_" + tag;
       int64_t last_ts = LastTimestamp(conn, tb);
       std::vector<KLine> new_bars;
       for (uint16_t off = 0; off < kKlineMaxCount; off += 800) {
@@ -819,7 +839,7 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
       }
       if (new_bars.empty()) return;
 
-      int64_t n = InsertKlineBatch(conn, tb, code, tag, new_bars);
+      int64_t n = InsertKlineBatch(conn, tb, market, code, tag, new_bars);
       if (n > 0) { result.kline_rows += n; ok_any = true; }
     };
 
@@ -867,11 +887,11 @@ bool IsAStock(const std::string& code) {
 
 // 实时 K 线增量落库：>= last_ts 过滤（当日 bar 盘中演变可覆盖）。
 // 单位统一为股（volume 不经缩放），与 vipdoc 导入 unit 一致（scaling Vipdoc1d volume=1.0）。
-int64_t UpsertBars(TAOS* conn, const std::string& code,
+int64_t UpsertBars(TAOS* conn, Market market, const std::string& code,
                    const std::string& cycle, const std::vector<KLine>& bars) {
   if (!tdx::util::IsValidCode(code)) return 0;
 
-  std::string tb = "k_" + code + "_" + cycle;
+  std::string tb = "k_" + MktPrefix(market) + code + "_" + cycle;
   int64_t last_ts = LastTimestamp(conn, tb);
 
   std::vector<KLine> new_bars;
@@ -882,7 +902,7 @@ int64_t UpsertBars(TAOS* conn, const std::string& code,
   }
   if (new_bars.empty()) return 0;
 
-  return InsertKlineBatch(conn, tb, code, cycle, new_bars);
+  return InsertKlineBatch(conn, tb, market, code, cycle, new_bars);
 }
 
 }  // namespace tdx::taos

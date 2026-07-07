@@ -21,6 +21,7 @@
 
 ABSL_FLAG(uint32_t, jobs, 16, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/proto/server_pool.hpp"
+#include "tdx/proto/vipdoc_reader.hpp"
 #include "tdx/proto/sp_parsers.hpp"
 #include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/quotes/sp_quotes.hpp"
@@ -356,10 +357,11 @@ int DoSyncKline(int argc, char** argv) {
       auto bars = sq.Bars(market, code, period, 0, static_cast<uint16_t>(count));
       if (bars.empty()) { std::cerr << code << " " << tag << ": 无数据\n"; continue; }
 
-      auto header = [](const std::string& c, const char* t) {
+      std::string mp = tdx::proto::VipdocReader::MarketDir(market);
+      auto header = [&mp](const std::string& c, const char* t) {
         std::ostringstream s;
-        s << "INSERT INTO k_" << c << "_" << t
-          << " USING kline TAGS('" << c << "','" << t << "') VALUES";
+        s << "INSERT INTO k_" << mp << c << "_" << t
+          << " USING kline TAGS('" << c << "','" << t << "','" << mp << "') VALUES";
         return s.str();
       };
       std::ostringstream sql;
