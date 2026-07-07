@@ -83,6 +83,3 @@ target_link_libraries(tdx_smoke PRIVATE base fibers2)
 add_executable(tdx cli/main.cpp cli/import.cpp cli/fetch_quotes.cpp)
 target_link_libraries(tdx PRIVATE tdx_data tdx_batch tdx_quotes tdx_taos tdx_shm base fibers2)
 
-# ---- tdx_quotes_reader：盘中实时行情共享内存只读查看器（Phase 6）----
-add_executable(tdx_quotes_reader cli/quotes_reader.cpp)
-target_link_libraries(tdx_quotes_reader PRIVATE tdx_shm)
