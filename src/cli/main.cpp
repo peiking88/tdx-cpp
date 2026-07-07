@@ -5,8 +5,10 @@
 // CLI 在 main 线程（不在 fiber 内），通过 ProactorPool 调度 fiber 执行 IO。
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -27,6 +29,8 @@ ABSL_FLAG(uint32_t, jobs, 16, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/batch/batch_fetch.hpp"
 #include "tdx/taos/taos_connection.hpp"
 #include "tdx/taos/taos_import.hpp"
+#include "tdx/data/scaling.hpp"
+#include "tdx/util/code_validate.hpp"
 #include "tdx/util/time_util.hpp"
 
 #include <set>
@@ -284,6 +288,110 @@ int DoCleanup() {
   return 0;
 }
 
+// 当日K线落库：拉最新 N 根 K 线（1d/5m/1m）写入 TDengine kline。
+// 成交量单位为股（Vipdoc1d/VipdocMin volume 统一为 1.0，网络源直写），
+// 与 vipdoc 导入（清库重导后）跨 cycle 一致，SUM(分钟)≈日线。
+// ponytail: 重复运行当日 bar 会积重复行——清库重导前仅作补抓当日数据用。
+int DoSyncKline(int argc, char** argv) {
+  // 位置参数：tdx sync-kline <code> [code...] [periods=1d,5m,1m] [count=240]
+  std::vector<std::string> codes;
+  std::string periods = "1d,5m,1m";
+  int count = 240;
+  for (int i = 2; i < argc; ++i)
+    codes.emplace_back(argv[i]);
+  // 末位若为纯数字且非 6 位（排除股票代码） = count
+  if (!codes.empty()) {
+    const auto& last = codes.back();
+    bool all_digit = !last.empty();
+    for (char c : last) if (!std::isdigit(static_cast<unsigned char>(c))) all_digit = false;
+    if (all_digit && last.size() != 6) { count = std::atoi(last.c_str()); codes.pop_back(); }
+  }
+  // 末位若为已知周期串 = periods override
+  if (!codes.empty()) {
+    const auto& last = codes.back();
+    auto is_period = [](const std::string& s) {
+      return s == "1d" || s == "5m" || s == "1m" || s.find(',') != std::string::npos;
+    };
+    if (is_period(last)) { periods = last; codes.pop_back(); }
+  }
+  if (codes.empty() || count <= 0) {
+    std::cerr << "用法: tdx sync-kline <code> [code...] [1d|5m|1m|1d,5m,1m] [count]\n"
+              << "  拉取最新 count 根 K 线写入 kline 表（默认三周期 240 根）\n";
+    return 1;
+  }
+
+  // 成交量单位统一为股：Vipdoc1d/VipdocMin volume 均=1.0，网络直写不缩放。
+  struct P { Period p; const char* tag; tdx::data::DataSource vsrc; };
+  std::vector<P> ps;
+  for (size_t s = 0; s < periods.size();) {
+    size_t comma = periods.find(',', s);
+    std::string tok = periods.substr(s, comma == std::string::npos ? std::string::npos : comma - s);
+    if (tok == "1d") ps.push_back({Period::DAILY, "1d", tdx::data::DataSource::Vipdoc1d});
+    else if (tok == "1m") ps.push_back({Period::MIN_1, "1m", tdx::data::DataSource::VipdocMin});
+    else if (tok == "5m") ps.push_back({Period::MIN_5, "5m", tdx::data::DataSource::VipdocMin});
+    if (comma == std::string::npos) break;
+    s = comma + 1;
+  }
+  if (ps.empty()) { std::cerr << "无有效周期（支持 1d/5m/1m）\n"; return 1; }
+
+  quotes::StdQuotes sq;
+  if (auto ec = sq.Connect()) {
+    std::cerr << "opentdx 连接失败: " << ec.message() << "\n";
+    return 1;
+  }
+  using tdx::taos::TaosConfig;
+  using tdx::taos::TaosConnection;
+  using tdx::taos::ExecSQL;
+  TaosConnection conn(TaosConfig::FromEnv());
+  if (!conn) { std::cerr << "TDengine 连接失败\n"; return 1; }
+  ExecSQL(conn.native(), "USE tdx");
+
+  int64_t total = 0;
+  for (const auto& code : codes) {
+    if (!tdx::util::IsValidCode(code)) { std::cerr << code << ": 非法代码，跳过\n"; continue; }
+    Market market = tdx::MarketFromCode(code);
+    for (const auto& [period, tag, vsrc] : ps) {
+      // opentdx 量按该周期历史源系数归一：日线 ×0.01（手），分钟 ×1.0（原样）。
+      double vol_f = tdx::data::GetScaling(tdx::data::ClassifySecurity(code), vsrc).volume;
+      auto bars = sq.Bars(market, code, period, 0, static_cast<uint16_t>(count));
+      if (bars.empty()) { std::cerr << code << " " << tag << ": 无数据\n"; continue; }
+
+      auto header = [](const std::string& c, const char* t) {
+        std::ostringstream s;
+        s << "INSERT INTO k_" << c << "_" << t
+          << " USING kline TAGS('" << c << "','" << t << "') VALUES";
+        return s.str();
+      };
+      std::ostringstream sql;
+      sql << header(code, tag);
+      int n = 0;
+      for (const auto& b : bars) {
+        if (b.datetime <= 0 || b.datetime > 4102444800LL) continue;  // 1970~2100
+        if (std::isnan(b.open) || std::isnan(b.close) || std::isnan(b.high) ||
+            std::isnan(b.low) || std::isnan(b.volume) || std::isnan(b.amount)) continue;
+        char row[256];
+        std::snprintf(row, sizeof(row), "(%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f)",
+                      static_cast<long long>(b.datetime * 1000LL),
+                      b.open, b.high, b.low, b.close, b.volume * vol_f, b.amount);
+        sql << row;
+        if (++n % 200 == 0) {  // ponytail: 分批避免单 SQL 过长
+          if (!ExecSQL(conn.native(), sql.str().c_str()))
+            std::cerr << code << " " << tag << " 批量写入失败\n";
+          sql.str("");
+          sql << header(code, tag);
+        }
+      }
+      if (n % 200 != 0)
+        if (!ExecSQL(conn.native(), sql.str().c_str()))
+          std::cerr << code << " " << tag << " 写入失败\n";
+      total += n;
+      std::cout << code << " " << tag << ": " << n << " 根\n";
+    }
+  }
+  std::cout << "=== sync-kline 完成，共 " << total << " 行 ===\n";
+  return 0;
+}
+
 // 从网络拉取日线写入 TDengine（本地 vipdoc 无 .day 文件的代码补导）。
 // 用法: tdx pull-kline <code> [code...]
 int DoPullKline(int argc, char** argv) {
@@ -479,6 +587,7 @@ static void PrintUsage() {
             << "  tdx cleanup                     清理非A股/退市标的子表\n"
             << "  tdx truncate-quotes             清空实时行情表（DROP+重建）\n"
             << "  tdx pull-kline <code> [code...] 网络拉取日线→TDengine（补导缺失代码）\n"
+            << "  tdx sync-kline <code> [code...] [periods] [count]  当日K线→TDengine（1d/5m/1m，盘中刷新）\n"
             << "  tdx finance <code>              财务数据\n"
             << "  tdx f10 <code>                  F10基本资料\n"
             << "  tdx history-orders <code> <date> 历史委托(YYYYMMDD)\n"
@@ -519,6 +628,7 @@ int main(int argc, char** argv) {
   if (cmd == "cleanup") return DoCleanup();
   if (cmd == "truncate-quotes") return DoTruncateQuotes();
   if (cmd == "pull-kline") return DoPullKline(argc, argv);
+  if (cmd == "sync-kline") return DoSyncKline(argc, argv);
   if (cmd == "finance") return DoFinance(argc, argv);
   if (cmd == "f10") return DoF10(argc, argv);
   if (cmd == "history-orders") return DoHistoryOrders(argc, argv);

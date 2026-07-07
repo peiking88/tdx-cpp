@@ -8,6 +8,7 @@
 
 #include "tdx/consts.hpp"
 #include "tdx/taos/taos_connection.hpp"
+#include "tdx/types.hpp"
 
 namespace tdx::taos {
 
@@ -47,5 +48,10 @@ struct NetworkImportResult {
 };
 NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
                                            const std::vector<std::string>& codes);
+
+// 实时 K 线增量落库：>= last_ts 过滤（支持当日 bar 盘中更新后覆盖写入）。
+// 返回实际写入行数；DB 错误返回 -1。调用前需 USE tdx + 确保 kline 超级表存在。
+int64_t UpsertBars(TAOS* conn, const std::string& code,
+                   const std::string& cycle, const std::vector<KLine>& bars);
 
 }  // namespace tdx::taos

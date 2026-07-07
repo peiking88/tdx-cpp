@@ -50,10 +50,12 @@ inline FieldScaling GetScaling(SecurityClass sc, DataSource src) {
   case DataSource::Vipdoc1d:
     s.amount = 1.0;
     switch (sc) {
-    case SecurityClass::AStock: s.ohlc = 0.01;  s.volume = 0.01;  break;
-    case SecurityClass::Index:  s.ohlc = 0.01;  s.volume = 1.0;   break;
+    // volume：统一为股（shares）。Index .day raw=手(lots), ×100→股,
+    // 新浪实证: tdx×100=sina(全市场成交股数,30天精确). 分钟线无法修正(源数据无真实量).
+    case SecurityClass::AStock: s.ohlc = 0.01;  s.volume = 1.0;   break;
+    case SecurityClass::Index:  s.ohlc = 0.01;  s.volume = 100.0; break;
     case SecurityClass::SHFund: s.ohlc = 0.001; s.volume = 1.0;   break;
-    case SecurityClass::SZFund: s.ohlc = 0.001; s.volume = 0.01;  break;
+    case SecurityClass::SZFund: s.ohlc = 0.001; s.volume = 1.0;   break;
     }
     break;
   case DataSource::VipdocMin:
@@ -69,7 +71,7 @@ inline FieldScaling GetScaling(SecurityClass sc, DataSource src) {
     s.price     = 0.01;
     s.pre_close = 0.01;
     s.bid_ask   = 0.01;
-    // ponytail: amount/open_amount 不缩放——Python 只对 open_amount *= 100，C++ 侧 open_amount 未保留
+    s.volume    = 100.0;  // 协议返回手，×100 → 股，与 kline 表统一
     break;
   case DataSource::NetTick:
     s.price = 0.01;       // quotationClient.py:150

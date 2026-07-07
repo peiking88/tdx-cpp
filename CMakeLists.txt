@@ -3,7 +3,7 @@
 # 异步 IO 采用 helio（io_uring + fiber），逐字移植 opentdx 协议层。
 cmake_minimum_required(VERSION 3.16)
 
-project(tdx-cpp VERSION 0.13.5 LANGUAGES C CXX)
+project(tdx-cpp VERSION 0.13.6 LANGUAGES C CXX)
 
 # ---- C++ 标准（helio 要求 C++17）----
 set(CMAKE_CXX_STANDARD 17)
@@ -202,9 +202,9 @@ FetchContent_MakeAvailable(zlib)
 add_subdirectory(src)
 
 # ---- tools 独立工具 ----
-add_executable(zxg_viewer tools/zxg_viewer.cpp)
-target_include_directories(zxg_viewer PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(zxg_viewer PRIVATE tdx_shm)
+add_executable(mmap_viewer tools/mmap_viewer.cpp)
+target_include_directories(mmap_viewer PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mmap_viewer PRIVATE tdx_shm)
 
 enable_testing()
 add_subdirectory(tests)

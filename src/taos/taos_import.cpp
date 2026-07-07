@@ -134,7 +134,7 @@ static int64_t InsertKlineBatch(TAOS* conn, const std::string& tb,
       char row[256];
       std::snprintf(row, sizeof(row),
         "(%lld,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f)",
-        ts_ms, b.open, b.high, b.low, b.close, b.volume, b.amount);
+        (long long)ts_ms, b.open, b.high, b.low, b.close, b.volume, b.amount);
       sql << row;
     }
     if (first) continue;  // 整批全被跳过
@@ -178,15 +178,26 @@ struct KlineWorker {
         continue;
       }
 
-      std::string mdir = VipdocReader::MarketDir(market);
-      std::string fpath = cfg.vipdoc_path + "/vipdoc/" + mdir + "/lday/"
-                        + mdir + code + ".day";
+      // 多市场目录回退查找 vipdoc 文件：MarketFromCode 只按前缀映射，
+      // 但 sh/lday/ 下存在以 0 开头的沪市指数（如 000300 沪深300、000001 上证指数），
+      // 其 MarketFromCode 返回 SZ 却无 sz/ 文件，数据会丢失。按 SH→SZ→BJ 回退。
+      Market vipdoc_market = market;
+      std::string vipdoc_fpath;
+      for (auto m : {Market::SH, Market::SZ, Market::BJ}) {
+        std::string md = VipdocReader::MarketDir(m);
+        std::string candidate = cfg.vipdoc_path + "/vipdoc/" + md + "/lday/"
+                              + md + code + ".day";
+        if (fs::exists(candidate)) {
+          if (m == market) { vipdoc_market = m; vipdoc_fpath = candidate; break; }
+          if (!fs::exists(vipdoc_fpath)) { vipdoc_market = m; vipdoc_fpath = candidate; }
+        }
+      }
 
-      if (fs::exists(fpath)) {
+      if (!vipdoc_fpath.empty()) {
         // 三个周期独立导入，任一周期的 DB 错误不影响其他周期
         bool ok_any = false;
         auto imp = [&](const char* sd, const char* ext, const char* per) {
-          int64_t r = ImportKlineRaw(conn.native(), reader, market, code, sd, ext, per);
+          int64_t r = ImportKlineRaw(conn.native(), reader, vipdoc_market, code, sd, ext, per);
           if (r < 0) return;      // DB 写入错误（已写部分保留）
           if (r > 0) { kline_rows += r; ok_any = true; }
         };
@@ -852,6 +863,26 @@ bool IsAStock(const std::string& code) {
   }
   if (c0 == '9' && c1 == '9') return true;   // 99xxxx 沪市指数（999999 上证指数等），排除 900xxx B股
   return false;
+}
+
+// 实时 K 线增量落库：>= last_ts 过滤（当日 bar 盘中演变可覆盖）。
+// 单位统一为股（volume 不经缩放），与 vipdoc 导入 unit 一致（scaling Vipdoc1d volume=1.0）。
+int64_t UpsertBars(TAOS* conn, const std::string& code,
+                   const std::string& cycle, const std::vector<KLine>& bars) {
+  if (!tdx::util::IsValidCode(code)) return 0;
+
+  std::string tb = "k_" + code + "_" + cycle;
+  int64_t last_ts = LastTimestamp(conn, tb);
+
+  std::vector<KLine> new_bars;
+  new_bars.reserve(bars.size());
+  for (const auto& b : bars) {
+    if (last_ts <= 0 || b.datetime * 1000LL >= last_ts)
+      new_bars.push_back(b);
+  }
+  if (new_bars.empty()) return 0;
+
+  return InsertKlineBatch(conn, tb, code, cycle, new_bars);
 }
 
 }  // namespace tdx::taos

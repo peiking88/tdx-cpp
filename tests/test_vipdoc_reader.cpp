@@ -45,7 +45,7 @@ TEST(VipdocReader, DayFileScaling) {
   pu32(rec, 99000);          // low = 990.00
   pu32(rec, 101000);         // close = 1010.00
   pf32(rec, 5000000.0f);     // amount（不缩放）
-  pu32(rec, 10000000);       // volume ×0.01 = 100000
+  pu32(rec, 10000000);       // volume ×1.0 = 10000000（股）
   pu32(rec, 0);              // reserved
 
   WriteFile(tmp + "/vipdoc/sh/lday/sh600000.day", rec);
@@ -57,7 +57,7 @@ TEST(VipdocReader, DayFileScaling) {
   EXPECT_NEAR(bars[0].high, 1020.00, 0.001);
   EXPECT_NEAR(bars[0].low, 990.00, 0.001);
   EXPECT_NEAR(bars[0].close, 1010.00, 0.001);
-  EXPECT_NEAR(bars[0].volume, 100000.0, 0.001);
+  EXPECT_NEAR(bars[0].volume, 10000000.0, 0.001);
   auto c = util::epoch_to_cst(bars[0].datetime);
   EXPECT_EQ(c.year, 2024);
   EXPECT_EQ(c.month, 1);

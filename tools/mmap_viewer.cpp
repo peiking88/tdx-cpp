@@ -1,4 +1,4 @@
-// 自选股实时行情终端查看器：从 zxg.blk 读自选列表 + mmap 共享内存读行情，3秒刷新。
+// mmap_viewer：自选股实时行情终端查看器，从 zxg.blk 读自选列表 + mmap 共享内存读行情，3秒刷新。
 // ponytail: 独立二进制，不跑 gtest（终端交互不适合 unit test）。
 #include <cstdio>
 #include <cstdlib>

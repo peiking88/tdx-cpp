@@ -67,7 +67,7 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
     q.open      = static_cast<double>(base + open.value) * s.ohlc;
     q.high      = static_cast<double>(base + high.value) * s.ohlc;
     q.low       = static_cast<double>(base + low.value) * s.ohlc;
-    q.volume    = static_cast<double>(vol.value);
+    q.volume    = static_cast<double>(vol.value) * s.volume;
     q.amount    = static_cast<double>(amount) * s.amount;
 
     // 五档 ×5：每档 bid/ask 相对 price 增量（quotes_detail.py:57-58）
@@ -78,8 +78,8 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
       auto ask_vol = get_price(data, len, pos); pos = ask_vol.new_pos;
       q.bid[j]     = static_cast<double>(base + bid.value) * s.bid_ask;
       q.ask[j]     = static_cast<double>(base + ask.value) * s.bid_ask;
-      q.bid_vol[j] = static_cast<double>(bid_vol.value);
-      q.ask_vol[j] = static_cast<double>(ask_vol.value);
+      q.bid_vol[j] = static_cast<double>(bid_vol.value) * s.volume;
+      q.ask_vol[j] = static_cast<double>(ask_vol.value) * s.volume;
     }
 
     if (pos + 10 > len) break;
