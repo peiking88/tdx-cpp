@@ -10,6 +10,7 @@
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
 
+#include "tdx/consts.hpp"
 #include "tdx/proto/connection.hpp"
 #include "tdx/proto/frame.hpp"
 #include "tdx/proto/parsers.hpp"
@@ -58,7 +59,9 @@ std::vector<BatchResult> BatchFetchKline(const std::vector<std::string>& codes,
           BatchResult r;
           r.code = codes[i];
           try {
-            auto body = proto::serialize_kline(MarketFromCode(codes[i]), codes[i],
+            auto [mk, c] = ParseMarketCode(codes[i]);
+            if (c.empty()) throw "缺市场前缀";
+            auto body = proto::serialize_kline(mk, c,
                                                period, 1, start, count, Adjust::NONE);
             auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0,
                                    proto::kMsgKline, body.data(), body.size()));

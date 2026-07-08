@@ -1,4 +1,4 @@
-// util 单元测试：iconv GBK 转码、zlib 解压、trim_null、MarketFromCode、时间工具。
+// util 单元测试：iconv GBK 转码、zlib 解压、trim_null、ParseMarketCode、时间工具。
 #include "tdx/util/gbk.hpp"
 #include "tdx/util/time_util.hpp"
 #include "tdx/util/zlib_wrap.hpp"
@@ -56,19 +56,16 @@ TEST(ZlibInflate, EmptyInput) {
   EXPECT_TRUE(out.empty());
 }
 
-TEST(MarketFromCode, Shanghai) {
-  EXPECT_EQ(MarketFromCode("600000"), Market::SH);
-  EXPECT_EQ(MarketFromCode("688981"), Market::SH);
+TEST(ParseMarketCode, WithPrefix) {
+  EXPECT_EQ(ParseMarketCode("sh600000").first, Market::SH);
+  EXPECT_EQ(ParseMarketCode("sh600000").second, "600000");
+  EXPECT_EQ(ParseMarketCode("sz000001").first, Market::SZ);
+  EXPECT_EQ(ParseMarketCode("bj430047").first, Market::BJ);
 }
 
-TEST(MarketFromCode, Shenzhen) {
-  EXPECT_EQ(MarketFromCode("000001"), Market::SZ);
-  EXPECT_EQ(MarketFromCode("300750"), Market::SZ);
-}
-
-TEST(MarketFromCode, Beijing) {
-  EXPECT_EQ(MarketFromCode("830799"), Market::BJ);
-  EXPECT_EQ(MarketFromCode("430047"), Market::BJ);
+TEST(ParseMarketCode, NoPrefix) {
+  auto [m, c] = ParseMarketCode("000001");
+  EXPECT_TRUE(c.empty());  // 无前缀，code 空表示无效
 }
 
 TEST(ClassifySecurity, Index399xxx) {

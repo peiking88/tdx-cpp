@@ -13,13 +13,16 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 
 ## CLI 命令
 
+> **所有 code 必须带市场前缀 `sh`/`sz`/`bj`**（如 `sh000001`=上证指数、`sz000001`=平安银行），消除歧义 code 的市场错判（v0.13.8 起强制，移除 MarketFromCode 前缀推断）。
+
 | 命令 | 说明 |
 |---|---|
 | `tdx bars <code> [period] [count]` | A 股 K 线（支持前/后复权） |
 | `tdx ex-bars <market> <code> [period] [count]` | 扩展行情 K 线（期货/港美股） |
 | `tdx batch-fetch --stock-list <file> --start <date> --end <date> -n <N>` | 并发批量拉取 + 断点续传 |
 | `tdx import --tdx-root <path>` | 本地 vipdoc 导入 TDengine（码表驱动 + 网络回退） |
-| `tdx pull-kline <code> [code...]` | 网络拉取 K 线(1d/1m/5m) 补导缺失代码 |
+| `tdx pull-kline <sh|sz|bj><code> [code...]` | 网络拉取 K 线(1d/1m/5m) 补导缺失代码 |
+| `tdx fetch-history <sh|sz|bj><code> [code...] [period]` | 统一 API 拉历史 K 线（TdxData 层，支持断点续传） |
 | `tdx sync-names` | 同步股票代码→名称对照表 |
 | `tdx check-names` | 检查名称表覆盖完整性 |
 | `tdx cleanup` | 清理对照表中已失效的冗余条目 |
@@ -55,7 +58,7 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.13.7`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.13.8`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
 
 ### 2026-07-03 10:43:12
 ```

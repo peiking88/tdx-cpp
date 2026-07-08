@@ -534,7 +534,9 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
     for (size_t k = 0; k < static_cast<size_t>(batch_size); ++k) {
       size_t ci = bi + k * static_cast<size_t>(n);
       if (ci >= codes.size()) break;
-      batch.push_back({MarketFromCode(codes[ci]), codes[ci]});
+      auto [mk, c] = ParseMarketCode(codes[ci]);
+      if (c.empty()) { std::cerr << codes[ci] << ": 缺市场前缀，跳过\n"; continue; }
+      batch.push_back({mk, c});
     }
     bi += batch.size() * static_cast<size_t>(n);
     if (batch.empty()) continue;

@@ -2,7 +2,9 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <utility>
 
 namespace tdx {
 
@@ -73,30 +75,18 @@ inline constexpr int kTickMaxCount  = 2000;  // 分笔单次上限
 inline constexpr double kPriceScale  = 100.0;  // 实时行情价格 /100
 inline constexpr double kAmountScale = 100.0;  // 金额 *100
 
-// 由股票代码前两位推断市场（6/5/7/90/99 开头 SH，0/2/3 开头 SZ，4/8/89/92 开头 BJ）。
-// 88xxxx 是板块指数存储在 sh/；89/92xxxx 是北交所在 bj/。
-// 注意：前缀映射有歧义（如 00/13/20 同时存在于 SH 和 SZ），全量扫描优先。
-// ponytail: 仅凭代码前缀无法 100% 区分市场（000016 上证50 在 sh/，000001 平安银行在 sz/），
-// 已知错分案例由调用方通过实查文件补偿。此处仅提供「大概率正确」的默认推断。
-inline constexpr Market MarketFromCode(std::string_view code) {
-  if (code.empty() || code.size() < 2) return Market::SH;
-  char c0 = code[0], c1 = code[1];
-  if (c0 == '6' || c0 == '5' || c0 == '7') return Market::SH;
-  if (c0 == '8' && c1 == '8') return Market::SH;  // 88xxxx 板块指数
-  if (c0 == '4' || c0 == '8') return Market::BJ;
-  if (c0 == '9') {
-    if (c1 == '2' || c1 == '8') return Market::BJ;  // 92/89xxxx 北交所
-    return Market::SH;  // 90/99xxxx SH bonds
+// 解析带市场前缀的代码：sh000001 → (SH,"000001")；sz000001 → (SZ,"000001")；
+// bj430047 → (BJ,"430047")。无前缀返回 code 空（项目规范要求 code 必须带市场前缀，
+// 不推断市场——歧义 code 如 000001 须显式前缀区分 SH 上证指数 / SZ 平安银行）。
+// 调用方须检查 code.empty() 报错。
+inline std::pair<Market, std::string> ParseMarketCode(std::string_view s) {
+  if (s.size() >= 8) {
+    auto pre = s.substr(0, 2);
+    if (pre == "sh") return {Market::SH, std::string(s.substr(2))};
+    if (pre == "sz") return {Market::SZ, std::string(s.substr(2))};
+    if (pre == "bj") return {Market::BJ, std::string(s.substr(2))};
   }
-  if (c0 == '1') {
-    // 159xxx 深市 ETF / 16xxxx 深市 LOF / 18xxxx 深市封闭基金 → SZ
-    // 其余 1x(债券) 默认 SH（不导入，无影响）
-    if (code.size() > 2 && c1 == '5' && code[2] == '9') return Market::SZ;
-    if (c1 == '6' || c1 == '8') return Market::SZ;
-    return Market::SH;
-  }
-  if (c0 == '0' || c0 == '2' || c0 == '3') return Market::SZ;
-  return Market::SH;  // 债券/ETF/可转债等默认 SH
+  return {Market::SH, ""};  // 无前缀：code 空表示无效
 }
 
 // ============ Phase 2：扩展行情 + SP/MAC 枚举 ============

@@ -220,6 +220,7 @@ ctest --test-dir build -R <test_name> -V
 - **字段缩放**：`include/tdx/data/scaling.hpp`（纯头文件）——`SecurityClass × DataSource → FieldScaling`。7 条数据路径 × 4 类标的 × 7 字段。新增 parser/数据源必走此表。
 - **SP 测试**：独立二进制 `test_sp_e2e`（同进程两个 ProactorPool 增加 fiber 调度复杂度）。
 - **精度**：遵循全局规范——价位/金额 `%.2f`、数量 `%d`、百分比 `%d%%`。
+- **市场前缀（v0.13.8）**：所有 code 必须带市场前缀 `sh`/`sz`/`bj`（如 `sh000001`、`sz000001`、`bj430047`），用 `tdx::ParseMarketCode` 解析；无前缀视为无效（不回退 `MarketFromCode` 推断）。歧义 code（`000001` SH=上证指数 / SZ=平安银行）须显式前缀区分。CLI 命令（bars/sync-kline/pull-kline/finance/f10/history-orders/history-tx/vol-profile/index-info/capital-flow）、batch-fetch stock list、fetch-quotes 均要求前缀；导入内部 `BatchNetImport` 用 `stock_name.market` 字段而非 `MarketFromCode`。
 - **复权**：tdxdata 的复权因子是**基于 xdxr 事件流自行计算**（`tdxdata/sources/adjust.py:49`，区分前复权 qfq 的 backward-asof 与后复权 hfq 的 forward-asof），不是直接取交易所因子。移植时须对照其单测。
 - **A 股时段感知重采样**：15m/30m/1h 由 5m 重采样，1w/1mon 由 1d 重采样，且 K 线结束时间须按 A 股交易时段（上午 9:30、下午 13:00 开盘）标注。参考 `tdxdata/sources/base.py:56-132`。
 - **K 线周期常量**：`0`=5min、`1`=15min、`2`=30min、`3`=1h、`4`=日、`5`=周、`6`=月、`7`=扩展1min、`8`=1min、`9`=日K、`10`=季、`11`=年。单次请求 K 线上限 800 条、分笔 2000 条。

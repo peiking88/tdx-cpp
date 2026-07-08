@@ -32,7 +32,9 @@ std::vector<KLine> TdxData::FetchHistory(const std::vector<std::string>& codes,
     if (!batch_id.empty() && sync_.IsCompletedInBatch(code, "history_kline", batch_id)) {
       continue;
     }
-    auto bars = sq_.Bars(tdx::MarketFromCode(code), code, p, 0, tdx::kKlineMaxCount);
+    auto [mk, c] = tdx::ParseMarketCode(code);
+    if (c.empty()) continue;  // 无市场前缀，跳过
+    auto bars = sq_.Bars(mk, c, p, 0, tdx::kKlineMaxCount);
     // T4 标记完成（batch 模式 MarkStockComplete，否则 UpdateSync）
     if (!batch_id.empty()) {
       sync_.MarkStockComplete(code, "history_kline", batch_id);

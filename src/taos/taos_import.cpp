@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <cstring>
 #include <filesystem>
@@ -160,9 +161,9 @@ static int64_t InsertKlineBatch(TAOS* conn, const std::string& tb,
 struct KlineWorker {
   int id;
   const ImportTaosConfig& cfg;
-  std::vector<std::pair<std::string, std::string>> subset;
-  std::vector<std::string> missing;       // 本地无 .day 文件的代码
-  std::vector<std::string> filtered_out;  // 被 IsAStock 过滤的代码
+  std::vector<std::pair<std::string, Market>> subset;  // (code, market) 来自 stock_name
+  std::vector<std::string> missing;       // 本地无 .day 文件的代码（带前缀 sh/sz/bj）
+  std::vector<std::string> filtered_out;  // 被 IsAStock 过滤的代码（带前缀）
 
   int codes_ok = 0;
   int64_t kline_rows = 0;
@@ -174,12 +175,12 @@ struct KlineWorker {
 
     VipdocReader reader(cfg.vipdoc_path);
 
-    for (const auto& [code, name] : subset) {
-      Market market = tdx::MarketFromCode(code);
+    for (const auto& [code, market] : subset) {
+      std::string mp = MktPrefix(market);
 
       if (!tdx::taos::IsAStock(code)) {
         if (!tdx::util::IsValidCode(code)) continue;  // 非法代码格式，跳过
-        std::string mp = MktPrefix(market);
+        // 删该 (code, market) 子表 + stock_name 记录
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_1d");
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_1m");
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_5m");
@@ -187,36 +188,29 @@ struct KlineWorker {
         ExecAffected(conn.native(),
                      "DELETE FROM stock_name WHERE code='" + EscapeSql(code)
                          + "' AND market='" + mp + "'");
-        filtered_out.push_back(code);
+        filtered_out.push_back(mp + code);
         continue;
       }
 
-      // 遍历所有市场，每个有本地 .day 文件的市场都导入：两市同 code（如 000001）
-      // 是两个不同标的（沪市=上证指数、深市=平安银行），须分别写入 k_sh*/k_sz* 子表。
-      // MarketFromCode 对 000xxx 一律返回 SZ，无法二选一；只导一个市场会丢另一市。
-      bool any_file = false;
+      // 按 stock_name 的 market 读本地文件（不遍历三市——两市同 code 已由 stock_name
+      // 的 (code, market) 双记录区分，如 000001 sh=上证指数 / sz=平安银行）
+      std::string md = VipdocReader::MarketDir(market);
+      std::string fpath = cfg.vipdoc_path + "/vipdoc/" + md + "/lday/"
+                        + md + code + ".day";
+      if (!fs::exists(fpath)) {
+        missing.push_back(mp + code);  // 该 (code, market) 本地无文件，标记网络补缺
+        continue;
+      }
       bool ok_any = false;
-      for (auto m : {Market::SH, Market::SZ, Market::BJ}) {
-        std::string md = VipdocReader::MarketDir(m);
-        std::string fpath = cfg.vipdoc_path + "/vipdoc/" + md + "/lday/"
-                          + md + code + ".day";
-        if (!fs::exists(fpath)) continue;
-        any_file = true;
-        // 三个周期独立导入，任一周期的 DB 错误不影响其他周期
-        auto imp = [&](const char* sd, const char* ext, const char* per) {
-          int64_t r = ImportKlineRaw(conn.native(), reader, m, code, sd, ext, per);
-          if (r < 0) return;      // DB 写入错误（已写部分保留）
-          if (r > 0) { kline_rows += r; ok_any = true; }
-        };
-        imp("lday", "day", "1d");
-        imp("minline", "lc1", "1m");
-        imp("fzline", "lc5", "5m");
-      }
-      if (any_file) {
-        if (ok_any) ++codes_ok;
-      } else {
-        missing.push_back(code);  // 三市均无文件，标记后续批量网络拉取
-      }
+      auto imp = [&](const char* sd, const char* ext, const char* per) {
+        int64_t r = ImportKlineRaw(conn.native(), reader, market, code, sd, ext, per);
+        if (r < 0) return;      // DB 写入错误（已写部分保留）
+        if (r > 0) { kline_rows += r; ok_any = true; }
+      };
+      imp("lday", "day", "1d");
+      imp("minline", "lc1", "1m");
+      imp("fzline", "lc5", "5m");
+      if (ok_any) ++codes_ok;
     }
   }
 
@@ -289,15 +283,15 @@ struct NetImportResult { int kline_ok = 0; int64_t kline_rows = 0; int adj_ok = 
 
 struct NetFetchItem {
   std::string code;
-  Market market = Market::SH;  // 阶段A 由 MarketFromCode 确定，供阶段B 子表命名/TAGS 使用
+  Market market = Market::SH;  // 阶段A 由 ParseMarketCode 确定，供阶段B 子表命名/TAGS 使用
   std::vector<KLine> bars_1d, bars_1m, bars_5m;
   std::vector<tdx::Xdxr> xdxr;
 };
 
 static NetImportResult BatchNetImport(
     const ImportTaosConfig& cfg,
-    const std::set<std::string>& missing,          // 需拉 K 线的代码
-    const std::vector<std::string>& all_codes,     // 所有代码（至少需拉复权）
+    const std::set<std::string>& missing,          // 需拉 K 线的代码（带前缀 sh/sz/bj）
+    const std::vector<std::string>& all_codes,     // 所有代码（带前缀，至少需拉复权）
     int n_fibers,
     bool no_adjust) {
   NetImportResult r;
@@ -345,14 +339,14 @@ static NetImportResult BatchNetImport(
 
           for (size_t i = static_cast<size_t>(wi); i < all_codes.size();
                i += static_cast<size_t>(n_fibers)) {
-            const auto& code = all_codes[i];
-            auto market = tdx::MarketFromCode(code);
+            auto [market, code] = ParseMarketCode(all_codes[i]);
+            if (code.empty()) continue;  // 无前缀，跳过
             NetFetchItem item;
             item.code = code;
             item.market = market;
 
-            // 拉取 K 线（仅 missing 代码）
-            if (missing.count(code)) {
+            // 拉取 K 线（仅 missing 代码——missing 存带前缀 sh/sz/bj+code）
+            if (missing.count(MktPrefix(market) + code)) {
               for (auto [period, tag] : {std::pair{Period::DAILY, "1d"},
                                          {Period::MIN_1, "1m"},
                                          {Period::MIN_5, "5m"}}) {
@@ -534,7 +528,8 @@ int CleanupStaleCodes(TAOS* conn) {
   int dropped = 0;
   for (const auto& [code, mkt] : stale) {
     if (!tdx::util::IsValidCode(code)) continue;  // 非法代码格式，跳过
-    std::string mp = mkt.empty() ? MktPrefix(tdx::MarketFromCode(code)) : mkt;
+    if (mkt.empty()) continue;  // 无 market tag（旧库 v0.13.7 前），跳过避免误删
+    std::string mp = mkt;
     for (auto* period : periods) {
       std::string tb = "k_" + mp + code + "_" + period;
       if (ExecAffected(conn, "DROP TABLE IF EXISTS " + tb) >= 0) ++dropped;
@@ -664,20 +659,21 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
   // SyncStockNames 内部 sq.Close() → pool_->Stop() 已通过 pthread_join 同步等待
 
   // === 第二步：读取码表 + 多线程本地导入 + 标记缺失 ===
-  std::vector<std::pair<std::string, std::string>> all_codes;
+  std::vector<std::pair<std::string, Market>> all_codes;
   {
-    TAOS_RES* res = ::taos_query(conn.native(), "SELECT code, name FROM stock_name");
+    TAOS_RES* res = ::taos_query(conn.native(), "SELECT code, market, name FROM stock_name");
     if (res && ::taos_errno(res) == 0) {
       TAOS_ROW row;
       while ((row = ::taos_fetch_row(res))) {
-        std::string code, name;
-        if (row[0]) {
-          code = tdx::taos::ReadVarChar(row[0]);
+        std::string code, mkt;
+        if (row[0]) code = tdx::taos::ReadVarChar(row[0]);
+        if (row[1]) mkt  = tdx::taos::ReadVarChar(row[1]);
+        if (!code.empty()) {
+          Market m = Market::SH;
+          if (mkt == "sz") m = Market::SZ;
+          else if (mkt == "bj") m = Market::BJ;
+          all_codes.emplace_back(std::move(code), m);
         }
-        if (row[1]) {
-          name = tdx::taos::ReadVarChar(row[1]);
-        }
-        if (!code.empty()) all_codes.emplace_back(std::move(code), std::move(name));
       }
     }
     ::taos_free_result(res);
@@ -687,7 +683,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
 
   if (!cfg.codes.empty()) {
     std::set<std::string> want(cfg.codes.begin(), cfg.codes.end());
-    std::vector<std::pair<std::string, std::string>> t;
+    std::vector<std::pair<std::string, Market>> t;
     for (auto& p : all_codes) if (want.count(p.first)) t.push_back(std::move(p));
     if (t.empty()) { std::cerr << "指定代码均不在码表中。\n"; return result; }
     all_codes = std::move(t);
@@ -750,7 +746,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     // 移除被过滤代码
     if (!filtered_set.empty()) {
       all_codes.erase(std::remove_if(all_codes.begin(), all_codes.end(),
-          [&](auto& p) { return filtered_set.count(p.first); }), all_codes.end());
+          [&](auto& p) { return filtered_set.count(MktPrefix(p.second) + p.first); }), all_codes.end());
     }
   }
 
@@ -761,7 +757,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     size_t adjust_skip = 0;
     for (const auto& p : all_codes) {
       if (!NeedsAdjust(p.first)) { ++adjust_skip; continue; }
-      adjust_codes.push_back(p.first);
+      adjust_codes.push_back(MktPrefix(p.second) + p.first);
     }
 
     // 网络迭代列表 = adjust_codes ∪ missing_set，确保既不需复权又无本地文件的代码也被网络拉取
@@ -820,8 +816,8 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
     return result;
   }
 
-  for (const auto& code : codes) {
-    auto market = MarketFromCode(code);
+  for (const auto& raw : codes) {
+    auto [market, code] = ParseMarketCode(raw);
     bool ok_any = false;
 
     // 拉取单周期网络 K 线
