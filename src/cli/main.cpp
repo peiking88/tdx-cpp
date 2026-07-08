@@ -363,7 +363,7 @@ int DoSyncKline(int argc, char** argv) {
     if (!tdx::util::IsValidCode(code)) { std::cerr << raw << ": 非法代码，跳过\n"; continue; }
     for (const auto& [period, tag, vsrc] : ps) {
       // opentdx 量按该周期历史源系数归一：日线 ×0.01（手），分钟 ×1.0（原样）。
-      double vol_f = tdx::data::GetScaling(tdx::data::ClassifySecurity(code), vsrc).volume;
+      double vol_f = tdx::data::GetScaling(tdx::data::ClassifySecurity(code, market), vsrc).volume;
       auto bars = sq.Bars(market, code, period, 0, static_cast<uint16_t>(count));
       if (bars.empty()) { std::cerr << code << " " << tag << ": 无数据\n"; continue; }
 

@@ -5,6 +5,8 @@
 
 #include <string_view>
 
+#include "tdx/consts.hpp"
+
 namespace tdx::data {
 
 enum class SecurityClass { AStock, Index, SHFund, SZFund };
@@ -31,14 +33,14 @@ struct FieldScaling {
   double avg       = 1.0;  // 均价（分时）
 };
 
-// 仅凭前 2 位代码分类，不带 Market 参数。
-// 前提：50/51/58 仅存在于沪市 vipdoc（SH_FUND），15/16/18 仅存在于深市 vipdoc（SZ_FUND），
-// 无跨市场歧义。若未来导入 SH 债券（15/16/18?xxxx）需加 Market 参数区分 SZFund vs SHBond。
-inline SecurityClass ClassifySecurity(std::string_view code) {
+// 按代码前 2 位 + 市场分类。v0.14.4 新增 Market 参数：解决 00xxxx 在沪市为指数（上证50/180/380
+// 等）、在深市为个股（000001 平安银行）的歧义——指数 volume 缩放 ×100（手→股），个股 ×1。
+inline SecurityClass ClassifySecurity(std::string_view code, Market market = Market::SH) {
   if (code.size() < 2) return SecurityClass::AStock;
   std::string h2(code.substr(0, 2));
   if (h2 == "88" || h2 == "99") return SecurityClass::Index;
   if (h2 == "39" && code.size() > 2 && code[2] == '9') return SecurityClass::Index;  // 仅 399xxx 为指数，390xxx 非指数
+  if (h2 == "00" && market == Market::SH) return SecurityClass::Index;               // 000xxx 沪市=指数
   if (h2 == "50" || h2 == "51" || h2 == "58") return SecurityClass::SHFund;
   if (h2 == "15" || h2 == "16" || h2 == "18") return SecurityClass::SZFund;
   return SecurityClass::AStock;

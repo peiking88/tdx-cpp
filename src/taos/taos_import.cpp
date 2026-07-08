@@ -50,7 +50,7 @@ inline constexpr int kBatchSize = 1000;
 // 前置声明（IsAStock/NeedsAdjust 定义在文件末尾）
 namespace tdx::taos {
 bool IsAStock(const std::string& code);
-bool NeedsAdjust(const std::string& code);
+bool NeedsAdjust(const std::string& code, Market market);
 }
 
 namespace {
@@ -371,7 +371,7 @@ static NetImportResult BatchNetImport(
             }
 
             // 拉取复权因子（仅个股，指数/ETF/LOF 跳过）
-            if (!no_adjust && NeedsAdjust(code)) {
+            if (!no_adjust && NeedsAdjust(code, market)) {
               try {
                 auto body = proto::serialize_xdxr(market, code);
                 auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgXdxr,
@@ -756,7 +756,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     std::vector<std::string> adjust_codes;
     size_t adjust_skip = 0;
     for (const auto& p : all_codes) {
-      if (!NeedsAdjust(p.first)) { ++adjust_skip; continue; }
+      if (!NeedsAdjust(p.first, p.second)) { ++adjust_skip; continue; }
       adjust_codes.push_back(MktPrefix(p.second) + p.first);
     }
 
@@ -857,7 +857,7 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
     pull(Period::MIN_5, "5m");
 
     // 拉取复权因子（xdxr 0x0f；对齐 BatchNetImport:374-379，ImportKlineFromNetwork 原本遗漏此项）
-    if (NeedsAdjust(code)) {
+    if (NeedsAdjust(code, market)) {
       try {
         auto xdxr = sq.GetXdxr(market, code);
         if (!xdxr.empty()) {
@@ -889,13 +889,15 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
 }
 
 // 股票是否需要复权因子（仅个股，指数/ETF/LOF 无分红送转）。
-// ponytail: 指数(99/88/399xxx) + ETF(5x/159xxx) + LOF(16xxxx) 无除权除息事件。
-bool NeedsAdjust(const std::string& code) {
+// ponytail: 指数(99/88/399/000xxx) + ETF(5x/159xxx) + LOF(16xxxx) 无除权除息事件。
+// market 参数区分 00xxxx 沪市=指数 vs 深市=个股（v0.14.4）。
+bool NeedsAdjust(const std::string& code, Market market) {
   if (code.size() < 6) return false;
   char c0 = code[0], c1 = code[1];
   if (c0 == '9' && c1 == '9') return false;   // 99xxxx 沪市指数
   if (c0 == '8' && c1 == '8') return false;   // 88xxxx 板块指数
   if (c0 == '3' && c1 == '9' && code[2] == '9') return false;  // 399xxx 深证指数
+  if (c0 == '0' && c1 == '0' && market == Market::SH) return false;  // 000xxx 上证指数
   if (c0 == '5') return false;                // 5xxxxx ETF
   if (c0 == '1' && c1 == '5' && code[2] == '9') return false;  // 159xxx 深市 ETF
   if (c0 == '1' && c1 == '6') return false;   // 16xxxx 深市 LOF

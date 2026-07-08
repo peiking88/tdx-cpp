@@ -110,6 +110,16 @@ TEST(ClassifySecurity, Funds) {
   EXPECT_EQ(ClassifySecurity("159915"), SecurityClass::SZFund);
 }
 
+TEST(ClassifySecurity, ShIndex000xxx) {
+  // v0.14.4: 000xxx 沪市=指数，深市=个股（上证50/180/380 vs 平安银行）
+  using tdx::data::ClassifySecurity;
+  using tdx::data::SecurityClass;
+  EXPECT_EQ(ClassifySecurity("000016", Market::SH), SecurityClass::Index);
+  EXPECT_EQ(ClassifySecurity("000001", Market::SH), SecurityClass::Index);
+  EXPECT_EQ(ClassifySecurity("000001", Market::SZ), SecurityClass::AStock);  // 平安银行
+  EXPECT_EQ(ClassifySecurity("000688", Market::SH), SecurityClass::Index);   // 科创50
+}
+
 TEST(TimeUtil, CstToEpoch) {
   // 2024-01-01 15:00 CST = 2024-01-01 07:00 UTC = 1704092400
   EXPECT_EQ(util::cst_to_epoch(2024, 1, 1, 15, 0), 1704092400LL);

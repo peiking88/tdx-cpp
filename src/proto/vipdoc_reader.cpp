@@ -52,7 +52,7 @@ std::vector<KLine> VipdocReader::ReadDay(Market market, std::string_view code) c
   if (data.empty()) return bars;
 
   constexpr std::size_t REC = 32;
-  auto s = tdx::data::GetScaling(tdx::data::ClassifySecurity(code), tdx::data::DataSource::Vipdoc1d);
+  auto s = tdx::data::GetScaling(tdx::data::ClassifySecurity(code, market), tdx::data::DataSource::Vipdoc1d);
   for (std::size_t off = 0; off + REC <= data.size(); off += REC) {
     const uint8_t* p = data.data() + off;
     uint32_t date = util::rd_u32(p);

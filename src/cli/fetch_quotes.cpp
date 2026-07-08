@@ -362,10 +362,12 @@ int64_t InsertUnu(TAOS* conn, const std::vector<UnusualItem>& items, int64_t now
   return written;
 }
 
-// 判断是否为指数代码（仅指数收集 index_info 和 unusual）
-bool IsIndexCode(std::string_view code) {
+// 判断是否为指数代码（仅指数收集 index_info 和 unusual）。
+// market 参数区分 00xxxx 沪市=指数 vs 深市=个股（v0.14.4）。
+bool IsIndexCode(std::string_view code, Market market) {
   if (code.size() < 2) return false;
   char c0 = code[0], c1 = code[1];
+  if (c0 == '0' && c1 == '0' && market == Market::SH) return true;  // 000xxx 上证指数
   return (c0 == '8' && c1 == '8') || (c0 == '9' && c1 == '9') || (c0 == '3' && c1 == '9')
          || (code.size() > 2 && c0 == '3' && c1 == '9' && code[2] == '9');
 }
@@ -605,7 +607,7 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
           if (!ticks.empty()) local.ticks.push_back({std::string(code), std::move(ticks)});
         } catch (...) {}
       }
-      if (do_idx && IsIndexCode(code)) {
+      if (do_idx && IsIndexCode(code, mkt)) {
         try {
           auto body = proto::serialize_index_info(mkt, code);
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgIndexInfo,
