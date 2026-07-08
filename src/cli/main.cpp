@@ -427,7 +427,8 @@ int DoPullKline(int argc, char** argv) {
   auto result = tdx::taos::ImportKlineFromNetwork(conn.native(), codes);
   std::cout << "\n=== 网络补导完成 ===\n"
             << "股票: " << result.codes_ok << "/" << codes.size() << "\n"
-            << "K线:  " << result.kline_rows << " 行\n";
+            << "K线:  " << result.kline_rows << " 行\n"
+            << "复权:  " << result.adj_events << " 条\n";
   return (result.kline_rows >= 0) ? 0 : 1;
 }
 

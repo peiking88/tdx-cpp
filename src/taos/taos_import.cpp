@@ -810,6 +810,19 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
   NetworkImportResult result;
   if (codes.empty()) return result;
 
+  // 建表（IF NOT EXISTS 安全幂等；ImportKlineFromNetwork 独立于 DoImportTaos，原本遗漏）
+  ExecSQL(conn, "USE tdx");
+  ExecSQL(conn,
+    "CREATE STABLE IF NOT EXISTS kline ("
+    "ts TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, "
+    "close DOUBLE, volume DOUBLE, amount DOUBLE) "
+    "TAGS (code VARCHAR(10), cycle VARCHAR(8), market VARCHAR(2))");
+  ExecSQL(conn,
+    "CREATE STABLE IF NOT EXISTS adjust ("
+    "ts TIMESTAMP, fenhong DOUBLE, peigujia DOUBLE, songzhuangu DOUBLE, "
+    "peigu DOUBLE, category INT, name VARCHAR(64)) "
+    "TAGS (code VARCHAR(10), market VARCHAR(2))");
+
   quotes::StdQuotes sq;
   if (auto ec = sq.Connect()) {
     std::cerr << "ImportKlineFromNetwork: 连接服务器失败 " << ec.message() << "\n";
@@ -842,6 +855,33 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
     pull(Period::DAILY, "1d");
     pull(Period::MIN_1, "1m");
     pull(Period::MIN_5, "5m");
+
+    // 拉取复权因子（xdxr 0x0f；对齐 BatchNetImport:374-379，ImportKlineFromNetwork 原本遗漏此项）
+    if (NeedsAdjust(code)) {
+      try {
+        auto xdxr = sq.GetXdxr(market, code);
+        if (!xdxr.empty()) {
+          std::string atb = "a_" + MktPrefix(market) + code;
+          int64_t alast_ts = LastTimestamp(conn, atb);
+          for (const auto& x : xdxr) {
+            int y = 0, m = 0, d = 0;
+            std::sscanf(x.date.c_str(), "%d-%d-%d", &y, &m, &d);
+            int64_t ts = tdx::util::date_to_epoch(y, m, d) * 1000LL;
+            if (ts <= 0) continue;
+            if (alast_ts > 0 && ts <= alast_ts) continue;
+            char sql[1024];
+            std::snprintf(sql, sizeof(sql),
+              "INSERT INTO %s USING adjust TAGS('%s','%s') "
+              "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
+              atb.c_str(), code.c_str(), MktPrefix(market).c_str(), (long long)ts,
+              x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
+              x.category, EscapeSql(x.name).c_str());
+            if (ExecAffected(conn, sql) >= 0) ++result.adj_events;
+          }
+        }
+      } catch (...) {}
+    }
+
     if (ok_any) ++result.codes_ok;
   }
   sq.Close();

@@ -58,7 +58,11 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.14.2`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.14.3`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-08 v0.14.3
+
+- **修复**：`pull-kline` 两个缺陷——①清库后不建 `kline`/`adjust` 表（补 `CREATE STABLE IF NOT EXISTS`，`ImportKlineFromNetwork` 独立于 `DoImportTaos` 可用）；②遗漏复权因子（xdxr 0x0f）拉取，导致个股无除权除息事件（补 `NeedsAdjust` + `GetXdxr` + 增量写 `adjust` 表，恒瑞 600276 实证 85 条）。
 
 ### 2026-07-08 v0.14.2
 

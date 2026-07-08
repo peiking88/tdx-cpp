@@ -21,6 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.14.0**：fetch-quotes 默认采集自选股 `zxg.blk`（`--all_market` 全市场、`--quote_codes` 显式优先、`TDX_ZXG_BLK` 环境变量覆盖路径）+ 修复 `gbk_to_utf8` E2BIG 误 break（大 GBK 输入如 F10 全文 23KB 被截断到 ~256B）/ `IsQuoteTarget` 不认 `sh/sz/bj` 前缀 / finance·F10 误锁 `wi==0` 单 worker / finance 过滤指数·ETF 全 0 空壳
 - **v0.14.1**：`index-info` 指数价格 /100 缩放修复（`deserialize_index_info` 根源层，CLI 显示 + idx_info 入库一致）+ `unusual` 校验 market∈{0,1,2} + `board-quotes` 校验 board_id（防误用静默错路由）
 - **v0.14.2**：`finance` 过滤条件过严修复——v0.14.0 `industry||每股收益` 误删 ETF/基金/指数（个股字段对它们恒 0），改为任一字段非 0 即入库（ETF/基金有股本+IPO、指数有股本汇总）；`f10` 对 ETF/指数/基金本就完整无 bug
+- **v0.14.3**：修复 `pull-kline` 两个缺陷——①清库后不建 `kline`/`adjust` 表（补 `CREATE STABLE IF NOT EXISTS`）；②遗漏复权因子拉取（补 xdxr 0x0f，`NeedsAdjust` 判定个股，`ImportKlineFromNetwork` 独立完整可用）
 
 ## 项目目标
 

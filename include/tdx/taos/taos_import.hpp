@@ -45,6 +45,7 @@ bool IsAStock(const std::string& code);
 struct NetworkImportResult {
   int codes_ok = 0;
   int64_t kline_rows = 0;
+  int64_t adj_events = 0;
 };
 NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
                                            const std::vector<std::string>& codes);
