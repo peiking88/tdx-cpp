@@ -483,12 +483,13 @@ TEST(IndexInfoParser, Basic) {
   ep(resp, 4010); ep(resp, 1); ep(resp, 50);
   auto ii = deserialize_index_info(resp.data(), resp.size());
   EXPECT_EQ(ii.code, "399001");
-  EXPECT_DOUBLE_EQ(ii.close, 4000.0);
-  EXPECT_DOUBLE_EQ(ii.pre_close, 3990.0);
-  EXPECT_DOUBLE_EQ(ii.open, 4005.0);
-  EXPECT_DOUBLE_EQ(ii.high, 4030.0);
-  EXPECT_DOUBLE_EQ(ii.low, 3980.0);
-  EXPECT_DOUBLE_EQ(ii.diff, 10.0);
+  // 价格字段 /100 还原（点）：构造数据 base=4000 → close=40.0
+  EXPECT_DOUBLE_EQ(ii.close, 40.0);
+  EXPECT_DOUBLE_EQ(ii.pre_close, 39.9);
+  EXPECT_DOUBLE_EQ(ii.open, 40.05);
+  EXPECT_DOUBLE_EQ(ii.high, 40.3);
+  EXPECT_DOUBLE_EQ(ii.low, 39.8);
+  EXPECT_DOUBLE_EQ(ii.diff, 0.1);
   EXPECT_DOUBLE_EQ(ii.amount, 5000000.0);
   EXPECT_EQ(ii.up_count, 800);
   EXPECT_EQ(ii.down_count, 200);

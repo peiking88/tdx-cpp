@@ -526,7 +526,12 @@ int DoIndexInfo(int argc, char** argv) {
 
 // ---- 主力异动 0x563 ----
 int DoUnusual(int argc, char** argv) {
-  int market = argc > 2 ? std::atoi(argv[2]) : 1;
+  int market = 1;  // 默认 SH
+  if (argc > 2) {
+    std::string m = argv[2];
+    if (m == "0" || m == "1" || m == "2") market = std::atoi(m.c_str());
+    else { std::cerr << "用法: tdx unusual [market]  market∈{0=SZ,1=SH,2=BJ}（非股票代码）\n"; return 1; }
+  }
   quotes::StdQuotes sq;
   if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
   auto items = sq.GetUnusual(static_cast<Market>(market), 0, 600);
@@ -555,8 +560,11 @@ int DoBoardList(int argc, char** argv) {
 
 // ---- 板块成员报价 0x122C ----
 int DoBoardQuotes(int argc, char** argv) {
-  if (argc < 3) { std::cerr << "用法: tdx board-quotes <board_code>\n"; return 1; }
+  if (argc < 3) { std::cerr << "用法: tdx board-quotes <board_id>（板块ID，见 board-list 输出）\n"; return 1; }
   std::string code = argv[2];
+  if (code.find_first_not_of("0123456789") != std::string::npos || std::atoi(code.c_str()) <= 0) {
+    std::cerr << "board_id 须为正整数（来自 board-list），而非股票/指数代码\n"; return 1;
+  }
   quotes::SPQuotes sp;
   if (auto ec = sp.Connect()) { std::cerr << "SP连接失败: " << ec.message() << "\n"; return 1; }
   int board_code = std::atoi(code.c_str());
@@ -616,7 +624,7 @@ static void PrintUsage() {
             << "  tdx index-info <code>            指数信息\n"
             << "  tdx unusual [market=1]           主力异动\n"
             << "  tdx board-list [type=1]          板块列表\n"
-            << "  tdx board-quotes <code>          板块成员报价\n"
+            << "  tdx board-quotes <board_id>      板块成员报价（board_id 来自 board-list）\n"
             << "  tdx capital-flow <code>          资金流向\n";
 }
 

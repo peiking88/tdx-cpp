@@ -583,16 +583,18 @@ IndexInfo deserialize_index_info(const uint8_t* data, std::size_t len) {
   std::size_t pos = 13;
   auto close_p = get_price(data, len, pos); pos = close_p.new_pos;
   int64_t base = close_p.value;
-  ii.close = static_cast<double>(base);
+  // 0x51d 指数价格原始值 = 点×100，/100 还原（对齐 vol-profile；scaling.hpp 未覆盖此数据源）。
+  // 改在 deserialize 根源层，CLI 显示与 fetch-quotes idx_info 入库一致。
+  ii.close = base / 100.0;
   auto pre_close_diff = get_price(data, len, pos); pos = pre_close_diff.new_pos;
-  ii.pre_close = static_cast<double>(base + pre_close_diff.value);
-  ii.diff = static_cast<double>(-pre_close_diff.value);
+  ii.pre_close = (base + pre_close_diff.value) / 100.0;
+  ii.diff = -pre_close_diff.value / 100.0;
   auto open_diff = get_price(data, len, pos); pos = open_diff.new_pos;
-  ii.open = static_cast<double>(base + open_diff.value);
+  ii.open = (base + open_diff.value) / 100.0;
   auto high_diff = get_price(data, len, pos); pos = high_diff.new_pos;
-  ii.high = static_cast<double>(base + high_diff.value);
+  ii.high = (base + high_diff.value) / 100.0;
   auto low_diff = get_price(data, len, pos); pos = low_diff.new_pos;
-  ii.low = static_cast<double>(base + low_diff.value);
+  ii.low = (base + low_diff.value) / 100.0;
   { auto t = get_price(data, len, pos); pos = t.new_pos; }     // server_time
   { auto t = get_price(data, len, pos); pos = t.new_pos; }     // after_hour
   auto vol_p = get_price(data, len, pos); pos = vol_p.new_pos;

@@ -58,7 +58,11 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.14.0`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.14.1`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-08 v0.14.1
+
+- **修复**：`index-info` 指数价格未 /100（现价显示 `397088` 应为 `3970.88` 点）——在 `deserialize_index_info` 根源层缩放，CLI 显示与 `idx_info` 入库一致；`unusual` 校验 market∈{0,1,2}（误传 `sh000001` 不再静默查 SZ）；`board-quotes` 校验 board_id 正整数 + Help 文案 `<code>`→`<board_id>`。
 
 ### 2026-07-08 v0.14.0
 
