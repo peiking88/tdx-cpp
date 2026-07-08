@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <cmath>
 #include <csignal>
 #include <ctime>
@@ -62,6 +63,10 @@ ABSL_FLAG(bool, with_f10, false, "采集F10资料 0x2cf/0x2d0");
 ABSL_FLAG(bool, with_vol, false, "采集成交量分布 0x51a");
 ABSL_FLAG(bool, with_hist, false, "采集历史委托+逐笔 0xfb4/0xfb5");
 ABSL_FLAG(bool, with_board, false, "采集板块列表+资金流向 0x1231/0x1218");
+ABSL_FLAG(bool, all_market, false, "采集全市场（默认仅采集自选股 zxg.blk）");
+ABSL_FLAG(std::string, zxg_blk,
+          "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk",
+          "通达信自选股文件（每行7位：首位1=沪/0=深+6位代码）。可用环境变量 TDX_ZXG_BLK 覆盖");
 ABSL_FLAG(std::string, mmap_path, "",
           "盘中实时行情共享内存文件路径（建议 /dev/shm/xxx）；"
           "非空则启用「写 mmap 快照 + 异步入库」，空则退回同步入库（向后兼容）");
@@ -86,7 +91,13 @@ std::vector<std::string> SplitCodes(const std::string& s) {
 }
 
 // 盘中实时行情筛选：只保留指数、个股、ETF基金，排除 LOF/债券/B股/港股通
+// code 可为 6 位纯数字（FetchAllCodes 来自服务器）或带 sh/sz/bj 前缀（v0.13.8 规范，
+// --quote_codes 用户输入）。剥前缀后统一按 6 位判断。
 bool IsQuoteTarget(std::string_view code) {
+  if (code.size() >= 8) {
+    auto pre = code.substr(0, 2);
+    if (pre == "sh" || pre == "sz" || pre == "bj") code.remove_prefix(2);
+  }
   if (code.size() < 2) return false;
   char c0 = code[0], c1 = code[1];
   if (c0 == '0' || c0 == '3') return true;             // A 股深市 + 399xxx 指数
@@ -113,6 +124,24 @@ std::vector<std::string> FetchAllCodes() {
   }
   sq.Close();
   return all;
+}
+
+// 读取通达信自选股 zxg.blk：纯文本 CRLF，每行 7 位（首位 1=沪 sh / 0=深 sz + 6 位代码）。
+std::vector<std::string> ReadZxgBlk(const std::string& path) {
+  std::vector<std::string> out;
+  std::ifstream f(path);
+  if (!f) { std::cerr << "无法读取自选股文件: " << path << "\n"; return out; }
+  std::string line;
+  while (std::getline(f, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' ||
+                             line.back() == ' ' || line.back() == '\t'))
+      line.pop_back();
+    if (line.size() < 7) continue;          // 非代码行（空行/注释）跳过
+    char m = line[0];
+    if (m != '0' && m != '1') continue;     // 首位须为市场标志（1=沪/0=深）
+    out.push_back((m == '1' ? "sh" : "sz") + line.substr(1, 6));
+  }
+  return out;
 }
 
 std::string Esc(std::string_view s) {
@@ -596,19 +625,23 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
       }
     }
 
-    // 单 worker (wi==0) 负责市场级数据：finance / F10 / hist / unusual
-    if (do_fin && wi == 0) {
+    // finance/F10/hist 是每股票数据：各 worker 采自己分片内的票（勿限 wi==0，否则只采 1/jobs）。
+    // unusual 才是市场级（全局拉一次），仍限 wi==0（见下）。
+    if (do_fin) {
       for (const auto& req : batch) {
         try {
           auto body = proto::serialize_finance(req.market, req.code);
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgFinance,
                                   body.data(), body.size()));
           auto f = proto::deserialize_finance(resp.body.data(), resp.body.size());
-          if (!f.code.empty()) local.finances.push_back(std::move(f));
+          // 过滤指数/ETF 的全 0 空壳：非个股无行业/每股收益，服务器返空壳记录。
+          // 不入库可避免 finance 表被无信息量行污染（个股 industry 与 meigushouyi 至少一个非 0）。
+          if (!f.code.empty() && (f.industry != 0 || f.meigushouyi != 0.0))
+            local.finances.push_back(std::move(f));
         } catch (...) {}
       }
     }
-    if (do_f10 && wi == 0) {
+    if (do_f10) {
       for (const auto& req : batch) {
         try {
           auto body = proto::serialize_f10_category(req.market, req.code);
@@ -882,10 +915,18 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     codes.erase(std::remove_if(codes.begin(), codes.end(),
         [](const std::string& c) { return !IsQuoteTarget(c); }), codes.end());
     std::cerr << "指定代码: " << codes.size() << " 只\n";
-  } else {
+  } else if (absl::GetFlag(FLAGS_all_market)) {
     std::cerr << "拉取全市场股票列表...\n";
     codes = FetchAllCodes();
     std::cerr << "全市场代码: " << codes.size() << " 只\n";
+  } else {
+    // 默认：采集自选股 zxg.blk（入库 + mmap 共享同一采集范围，需求 1/2 同时满足）
+    std::string zxg = absl::GetFlag(FLAGS_zxg_blk);
+    if (const char* e = std::getenv("TDX_ZXG_BLK"); e && *e) zxg = e;
+    codes = ReadZxgBlk(zxg);
+    codes.erase(std::remove_if(codes.begin(), codes.end(),
+        [](const std::string& c) { return !IsQuoteTarget(c); }), codes.end());
+    std::cerr << "自选股: " << codes.size() << " 只 (" << zxg << ")\n";
   }
   if (codes.empty()) { std::cerr << "没有股票代码可拉取\n"; return 1; }
 

@@ -18,6 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.12.0**：盘中行情实时落库 + F10 文本资料入库 + SQL 注入防护（`IsValidCode`）+ iconv thread_local 缓存 + 硬编码日期改动态
 - **v0.12.2**：代码审查修复 16 项——性能（GetScaling 提升/snprintf 替代 ostringstream/move 语义/reserve）、健壮性（ReadVarChar 提取/e2e 连接守护/stoi→sscanf/熔断器模板化/CircuitBreaker 计数上限）、优化（Esc→string_view/gbk_raw 预分配/with_board 告警/IsIndexCode 零分配）
 - **v0.13.0**：Phase 6 盘中实时行情共享内存——`tdx fetch-quotes` 改「获取-缓存(mmap)-异步入库」（`--mmap_path`），新增 `tdx_shm` 模块（裸 mmap + seqlock 快照表，`/dev/shm` 跨进程共享）+ `tdx_quotes_reader` 只读查看器；采集节拍与 TDengine 入库解耦，多分析进程（Krono/czSC）零拷贝 O(1) 读最新价。设计见 `.claude/PRPs/prds/phase6-intraday-shm-design.md`（经三轮架构评审）。后续 6.2/6.3/6.4 见计划
+- **v0.14.0**：fetch-quotes 默认采集自选股 `zxg.blk`（`--all_market` 全市场、`--quote_codes` 显式优先、`TDX_ZXG_BLK` 环境变量覆盖路径）+ 修复 `gbk_to_utf8` E2BIG 误 break（大 GBK 输入如 F10 全文 23KB 被截断到 ~256B）/ `IsQuoteTarget` 不认 `sh/sz/bj` 前缀 / finance·F10 误锁 `wi==0` 单 worker / finance 过滤指数·ETF 全 0 空壳
 
 ## 项目目标
 

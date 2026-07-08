@@ -36,9 +36,11 @@ std::string gbk_to_utf8(const char* buf, std::size_t len) {
   char* inbuf = const_cast<char*>(buf);
   std::size_t inbytes = len;
 
-  // 循环转码：遇非法序列时跳过 1 字节续转，避免截断（iconv 默认遇错即停）。
+  // 流式转码：iconv 输出缓冲满（E2BIG）时清空继续转剩余输入，EILSEQ/EINVAL 跳 1 字节续转。
+  // ponytail: E2BIG 是 iconv 流式正常信号（非错误），必须 continue——旧代码误当致命错 break，
+  // 导致任何输出 >256 字节的 GBK（如 F10 全文 23KB）被截断到 ~256 字节。
   while (inbytes > 0) {
-    char tmp[256];
+    char tmp[4096];
     char* outptr = tmp;
     std::size_t outbytes = sizeof(tmp);
 
@@ -46,12 +48,13 @@ std::string gbk_to_utf8(const char* buf, std::size_t len) {
     out.append(tmp, sizeof(tmp) - outbytes);
 
     if (ret != static_cast<std::size_t>(-1)) break;           // 全部成功
+    if (errno == E2BIG) continue;                              // 输出缓冲满，继续转剩余输入
     if (errno == EILSEQ || errno == EINVAL) {
       // 跳过 1 个非法字节，重置 iconv 状态继续
       if (inbytes > 0) { ++inbuf; --inbytes; }
       iconv(cd, nullptr, nullptr, nullptr, nullptr);          // 复位 shift state
     } else {
-      break;  // E2BIG 等——不应在 256B 缓冲发生，视为致命错
+      break;  // 其他致命错
     }
   }
 

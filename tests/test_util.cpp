@@ -26,6 +26,19 @@ TEST(GbkToUtf8, ChineseCharZhong) {
   EXPECT_EQ(utf8, "\xE4\xB8\xAD");
 }
 
+TEST(GbkToUtf8, LargeInputNoTruncation) {
+  // 回归保护：输出 >256 字节时 iconv 返回 E2BIG，须 continue 续转，不能 break 截断。
+  // 旧代码误把 E2BIG 当致命错，导致 F10 全文等大 GBK 输入被截断到 ~85 字符。
+  // 「中」GBK=D6D0 → UTF8=E4B8AD（3字节）；200 个「中」=400 GBK → 600 UTF8 字节。
+  std::string gbk;
+  for (int i = 0; i < 200; ++i) gbk += "\xD6\xD0";
+  std::string utf8 = util::gbk_to_utf8(gbk);
+  EXPECT_EQ(utf8.size(), 600u);
+  std::string expected;
+  for (int i = 0; i < 200; ++i) expected += "\xE4\xB8\xAD";
+  EXPECT_EQ(utf8, expected);
+}
+
 TEST(TrimNull, StripsTrailingNull) {
   std::string s = std::string("abc\0def", 7);
   EXPECT_EQ(util::trim_null(s), "abc");

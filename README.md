@@ -26,7 +26,7 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 | `tdx sync-names` | 同步股票代码→名称对照表 |
 | `tdx check-names` | 检查名称表覆盖完整性 |
 | `tdx cleanup` | 清理对照表中已失效的冗余条目 |
-| `tdx fetch-quotes [--loop] [--quote_interval N] [--quote_jobs N] [--codes ...] [--mmap_path PATH] [--with_tx] [--with_tick] [--with_index] [--with_unusual] [--with_finance] [--with_f10] [--with_vol] [--with_hist]` | 实时行情采集入库；`--mmap_path` 启用「写 mmap 快照 + 异步入库」（采集与入库解耦、跨进程共享最新价），空则退回同步入库 |
+| `tdx fetch-quotes [--loop] [--quote_interval N] [--quote_jobs N] [--quote_codes ...] [--all_market] [--zxg_blk PATH] [--mmap_path PATH] [--with_finance] [--with_f10] ...` | 实时行情采集入库。**默认采集自选股 `zxg.blk`**（入库与 mmap 共享同一范围）；`--all_market` 全市场；`--quote_codes` 显式指定优先；`--mmap_path` 启用「写 mmap 快照 + 异步入库」，空则同步入库 |
 | `tdx_quotes_reader <mmap_path> <code> [interval_ms]` | 只读挂载共享内存，轮询打印某股票最新报价（供 Krono/czSC 等分析进程参考） |
 | `tdx truncate-quotes` | 清空实时行情表 |
 | `tdx finance <code>` | 财务数据（流通股本/总股本/每股收益等） |
@@ -58,7 +58,12 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.13.8`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.14.0`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-08 v0.14.0
+
+- **新功能**：`fetch-quotes` 默认采集自选股 `zxg.blk`（`--all_market` 全市场、`--quote_codes` 显式优先、`TDX_ZXG_BLK` 环境变量覆盖路径）；入库与 mmap 共享同一采集范围。
+- **修复**：`gbk_to_utf8` 把 iconv 的 `E2BIG`（输出缓冲满）误当致命错 `break`，导致任何 >256 字节输出的 GBK（如 F10 全文 23KB）被截断——改为流式 `continue` 续转；`IsQuoteTarget` 不认 `sh/sz/bj` 前缀（v0.13.8 后 `--quote_codes` 全被过滤）；finance/F10 误锁 `wi==0` 单 worker（只采 1/N 票）；finance 过滤指数/ETF 全 0 空壳记录。
 
 ### 2026-07-03 10:43:12
 ```
