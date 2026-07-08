@@ -58,7 +58,11 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.14.1`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.14.2`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-08 v0.14.2
+
+- **修复**：`finance` 过滤条件过严——v0.14.0 用 `industry!=0 || 每股收益!=0` 把 ETF/基金/指数（这两个字段是个股专属、对它们恒为 0）全过滤了，但它们有股本+IPO 数据。改为「任一字段非 0 即入库」，finance 表从 15 只个股扩到含 ETF/指数/基金（42 只里 15 个股 + 27 基金/指数）。`f10` 本就对 ETF/指数/基金有完整数据（基金概况/基金经理/基金净值等），无 bug。
 
 ### 2026-07-08 v0.14.1
 

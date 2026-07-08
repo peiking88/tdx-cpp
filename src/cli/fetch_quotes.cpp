@@ -634,9 +634,10 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgFinance,
                                   body.data(), body.size()));
           auto f = proto::deserialize_finance(resp.body.data(), resp.body.size());
-          // 过滤指数/ETF 的全 0 空壳：非个股无行业/每股收益，服务器返空壳记录。
-          // 不入库可避免 finance 表被无信息量行污染（个股 industry 与 meigushouyi 至少一个非 0）。
-          if (!f.code.empty() && (f.industry != 0 || f.meigushouyi != 0.0))
+          // 过滤完全无效的全 0 空壳（code 不存在的响应）。ETF/基金/指数有股本+IPO（无 EPS/行业），
+          // 个股有 EPS/行业——任一字段非 0 即入库。v0.14.0 旧条件 industry||EPS 太严，误删 ETF/基金/指数。
+          if (!f.code.empty() && (f.liutongguben != 0.0 || f.zongguben != 0.0 ||
+                                   f.ipo_date != 0 || f.industry != 0 || f.meigushouyi != 0.0))
             local.finances.push_back(std::move(f));
         } catch (...) {}
       }

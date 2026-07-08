@@ -20,6 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.13.0**：Phase 6 盘中实时行情共享内存——`tdx fetch-quotes` 改「获取-缓存(mmap)-异步入库」（`--mmap_path`），新增 `tdx_shm` 模块（裸 mmap + seqlock 快照表，`/dev/shm` 跨进程共享）+ `tdx_quotes_reader` 只读查看器；采集节拍与 TDengine 入库解耦，多分析进程（Krono/czSC）零拷贝 O(1) 读最新价。设计见 `.claude/PRPs/prds/phase6-intraday-shm-design.md`（经三轮架构评审）。后续 6.2/6.3/6.4 见计划
 - **v0.14.0**：fetch-quotes 默认采集自选股 `zxg.blk`（`--all_market` 全市场、`--quote_codes` 显式优先、`TDX_ZXG_BLK` 环境变量覆盖路径）+ 修复 `gbk_to_utf8` E2BIG 误 break（大 GBK 输入如 F10 全文 23KB 被截断到 ~256B）/ `IsQuoteTarget` 不认 `sh/sz/bj` 前缀 / finance·F10 误锁 `wi==0` 单 worker / finance 过滤指数·ETF 全 0 空壳
 - **v0.14.1**：`index-info` 指数价格 /100 缩放修复（`deserialize_index_info` 根源层，CLI 显示 + idx_info 入库一致）+ `unusual` 校验 market∈{0,1,2} + `board-quotes` 校验 board_id（防误用静默错路由）
+- **v0.14.2**：`finance` 过滤条件过严修复——v0.14.0 `industry||每股收益` 误删 ETF/基金/指数（个股字段对它们恒 0），改为任一字段非 0 即入库（ETF/基金有股本+IPO、指数有股本汇总）；`f10` 对 ETF/指数/基金本就完整无 bug
 
 ## 项目目标
 
