@@ -50,6 +50,18 @@ target_include_directories(test_parsers PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_parsers PRIVATE tdx_proto_parsers tdx_proto_core gtest gtest_main)
 add_test(NAME test_parsers COMMAND test_parsers)
 
+# bars / ex-bars 真网测试（原 CLI 命令回退为测试用例）
+add_executable(test_bars test_bars.cpp)
+target_include_directories(test_bars PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_bars PRIVATE tdx_quotes tdx_proto_parsers tdx_proto_core gtest gtest_main base fibers2)
+add_test(NAME test_bars COMMAND test_bars)
+
+# fetch-history 真网测试（原 CLI 命令回退为测试用例）
+add_executable(test_fetch_history test_fetch_history.cpp)
+target_include_directories(test_fetch_history PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_fetch_history PRIVATE tdx_data gtest gtest_main base fibers2)
+add_test(NAME test_fetch_history COMMAND test_fetch_history)
+
 add_executable(test_sp_codec test_sp_codec.cpp)
 target_include_directories(test_sp_codec PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_sp_codec PRIVATE tdx_proto_parsers tdx_proto_core gtest gtest_main)

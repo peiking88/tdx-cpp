@@ -51,6 +51,9 @@ class TaosConnection {
   TAOS* conn_ = nullptr;
 };
 
+// 连接 tdx 库（FromEnv 配置 + USE tdx），失败返回 nullptr。
+std::unique_ptr<TaosConnection> ConnectTdx();
+
 class TaosStmt {
  public:
   explicit TaosStmt(TAOS* conn);

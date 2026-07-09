@@ -17,20 +17,17 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 
 | 命令 | 说明 |
 |---|---|
-| `tdx bars <code> [period] [count]` | A 股 K 线（支持前/后复权） |
-| `tdx ex-bars <market> <code> [period] [count]` | 扩展行情 K 线（期货/港美股） |
-| `tdx batch-fetch --stock-list <file> --start <date> --end <date> -n <N>` | 并发批量拉取 + 断点续传 |
 | `tdx import --tdx-root <path>` | 本地 vipdoc 导入 TDengine（码表驱动 + 网络回退） |
-| `tdx pull-kline <sh|sz|bj><code> [code...]` | 网络拉取 K 线(1d/1m/5m) 补导缺失代码 |
-| `tdx fetch-history <sh|sz|bj><code> [code...] [period]` | 统一 API 拉历史 K 线（TdxData 层，支持断点续传） |
-| `tdx sync-names` | 同步股票代码→名称对照表 |
+| `tdx fetch-kline <code> [code...] [periods] [count]` | 当日 K 线循环刷新入库（1d/5m/1m，默认循环） |
+| `tdx batch-fetch --stock-list <file> --start <date> --end <date> -n <N>` | 并发批量拉取 + 断点续传 |
+| `tdx fetch-names` | 同步股票代码→名称对照表 |
 | `tdx check-names` | 检查名称表覆盖完整性 |
 | `tdx cleanup` | 清理对照表中已失效的冗余条目 |
 | `tdx fetch-quotes [--loop] [--quote_interval N] [--quote_jobs N] [--quote_codes ...] [--all_market] [--zxg_blk PATH] [--mmap_path PATH] [--with_finance] [--with_f10] ...` | 实时行情采集入库。**默认采集自选股 `zxg.blk`**（入库与 mmap 共享同一范围）；`--all_market` 全市场；`--quote_codes` 显式指定优先；`--mmap_path` 启用「写 mmap 快照 + 异步入库」，空则同步入库 |
 | `tdx_quotes_reader <mmap_path> <code> [interval_ms]` | 只读挂载共享内存，轮询打印某股票最新报价（供 Krono/czSC 等分析进程参考） |
 | `tdx truncate-quotes` | 清空实时行情表 |
-| `tdx finance <code>` | 财务数据（流通股本/总股本/每股收益等） |
-| `tdx f10 <code>` | F10 基本资料分类目录 |
+| `tdx fetch-finance <code>` | 财务数据入库（流通股本/总股本/每股收益等） |
+| `tdx fetch-f10 <code>` | F10 基本资料入库 |
 | `tdx history-orders <code> <YYYYMMDD>` | 历史委托队列 |
 | `tdx history-tx <code> <YYYYMMDD>` | 历史逐笔成交 |
 | `tdx vol-profile <code>` | 盘中成交量分布 |
@@ -62,14 +59,14 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ### 2026-07-09 v0.14.5
 
-- **历史 K 线数据流重构**：`tdx import` 默认从 vipdoc 导入历史 1d/1m/5m（默认仅导自选股 `zxg.blk`，`--all-market` 全市场，`--full-reset` 首次迁移全清；增量留历史只清当日）；当日盘中由 `tdx sync-kline` 默认循环刷新（60s 间隔，15:00 后 3 轮无新 bar 退出）。`import` 并发默认 4 线程。
+- **历史 K 线数据流重构**：`tdx import` 默认从 vipdoc 导入历史 1d/1m/5m（默认仅导自选股 `zxg.blk`，`--all-market` 全市场，`--full-reset` 首次迁移全清；增量留历史只清当日）；当日盘中由 `tdx fetch-kline` 默认循环刷新（60s 间隔，15:00 后 3 轮无新 bar 退出）。`import` 并发默认 4 线程。
 - **协议修复**：`deserialize_finance` 偏移错位——对齐 tdxpy 真实布局 `<fHHII+30f>`（含 `zhigonggu` 职工股，旧 opentdx 误标 `meigushouyi` 且少 1 字段导致后续全错位）；股本/资产/负债/收入/利润 ×10000 缩放（万股→股、万元→元），实测 600000 与 mootdx 完全一致。
-- **f10/finance 分离**：从 `fetch-quotes` 完全移除，独立为 `tdx f10` / `tdx finance` 命令（清库后从网络重导，finance 全 30 列；f10 目录+全文切片）。
+- **fetch-finance/fetch-f10 分离**：从 `fetch-quotes` 完全移除，独立为 `tdx fetch-f10` / `tdx fetch-finance` 命令（清库后从网络重导，finance 全 30 列；f10 目录+全文切片）。
 - **脏数据拦截**：`deserialize_kline` D7 交易时段校验，分钟 bar 须在 9:30–11:30 或 13:00–15:00，否则丢弃（解析器 D6 错位产生的 23:55/16:39 等非交易时段 bar 在 parser 层拦截）。
 
 ### 2026-07-08 v0.14.3
 
-- **修复**：`pull-kline` 两个缺陷——①清库后不建 `kline`/`adjust` 表（补 `CREATE STABLE IF NOT EXISTS`，`ImportKlineFromNetwork` 独立于 `DoImportTaos` 可用）；②遗漏复权因子（xdxr 0x0f）拉取，导致个股无除权除息事件（补 `NeedsAdjust` + `GetXdxr` + 增量写 `adjust` 表，恒瑞 600276 实证 85 条）。
+- **修复**：网络 K 线导入两个缺陷——①清库后不建 `kline`/`adjust` 表（补 `CREATE STABLE IF NOT EXISTS`，`ImportKlineFromNetwork` 独立于 `DoImportTaos` 可用）；②遗漏复权因子（xdxr 0x0f）拉取，导致个股无除权除息事件（补 `NeedsAdjust` + `GetXdxr` + 增量写 `adjust` 表，恒瑞 600276 实证 85 条）。已合并入 `tdx import` 网络补缺路径。
 
 ### 2026-07-08 v0.14.2
 

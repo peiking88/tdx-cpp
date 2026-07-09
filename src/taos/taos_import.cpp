@@ -301,7 +301,6 @@ struct KlineWorker {
     return InsertKlineBatch(conn, tb, market, code, period, new_bars);
   }
 };
-
 // 从 DB 读取调整因子回退（网络失败时使用）
 static std::vector<tdx::Xdxr> ReadAdjustFromDB(TAOS* conn, Market market,
                                                 const std::string& code) {
@@ -466,77 +465,27 @@ static NetImportResult BatchNetImport(
     const auto& code = item.code;
     Market market = item.market;
     std::string mp = MktPrefix(market);
-    auto esc = EscapeSql(code);
     bool kline_ok = false;
 
-    // 写 K 线（带增量过滤）
-    auto WriteKline = [&](const std::vector<KLine>& bars, const char* tag) {
-      if (bars.empty()) return;
-      std::string tb = "k_" + mp + code + "_" + tag;
-      int64_t last_ts = LastTimestamp(tconn.native(), tb);
-      std::vector<KLine> new_bars;
-      if (last_ts > 0) {
-        for (const auto& b : bars)
-          if (b.datetime * 1000LL > last_ts) new_bars.push_back(b);
-      } else {
-        new_bars = bars;
-      }
-      if (new_bars.empty()) return;
-
-      int64_t n = InsertKlineBatch(tconn.native(), tb, market, code, tag, new_bars);
-      if (n > 0) { r.kline_rows += n; kline_ok = true; }
-    };
-
-    WriteKline(item.bars_1d, "1d");
-    WriteKline(item.bars_1m, "1m");
-    WriteKline(item.bars_5m, "5m");
+    // 写 K 线（公用增量写入：LastTimestamp 过滤 + InsertKlineBatch）
+    bool has_kline = !item.bars_1d.empty() || !item.bars_1m.empty() || !item.bars_5m.empty();
+    int64_t item_rows = 0;
+    item_rows += WriteKlineToDB(tconn.native(), std::move(item.bars_1d), market, code, "1d");
+    item_rows += WriteKlineToDB(tconn.native(), std::move(item.bars_1m), market, code, "1m");
+    item_rows += WriteKlineToDB(tconn.native(), std::move(item.bars_5m), market, code, "5m");
+    if (item_rows > 0) kline_ok = true;
+    r.kline_rows += item_rows;
     if (kline_ok) ++r.kline_ok;
 
-    // 写复权因子
-    if (!item.xdxr.empty() && tdx::util::IsValidCode(code)) {
-      std::string tb = "a_" + mp + code;
-      int64_t last_ts = LastTimestamp(tconn.native(), tb);
-      int n = 0;
-      for (const auto& x : item.xdxr) {
-        int y = 0, m = 0, d = 0;
-        std::sscanf(x.date.c_str(), "%d-%d-%d", &y, &m, &d);
-        int64_t ts = tdx::util::date_to_epoch(y, m, d) * 1000LL;
-        if (ts <= 0) continue;
-        if (last_ts > 0 && ts <= last_ts) continue;
-        char sql[1024];
-        std::snprintf(sql, sizeof(sql),
-          "INSERT INTO %s USING adjust TAGS('%s','%s') "
-          "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
-          tb.c_str(), code.c_str(), mp.c_str(), (long long)ts,
-          x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
-          x.category, EscapeSql(x.name).c_str());
-        if (ExecAffected(tconn.native(), sql) >= 0) ++n;
-      }
-      if (n > 0) { r.adj_events += n; ++r.adj_ok; }
-    } else if (!item.bars_1d.empty() || !item.bars_1m.empty() || !item.bars_5m.empty()) {
+    // 写复权因子（公用增量写入）；网络无数据则回退到库中已有。
+    int64_t adj_n = WriteAdjustToDB(tconn.native(), item.xdxr, market, code);
+    if (adj_n > 0) {
+      r.adj_events += adj_n; ++r.adj_ok;
+    } else if (has_kline) {
       // 网络无复权数据，回退到 DB
       auto fallback = ReadAdjustFromDB(tconn.native(), market, code);
-      if (!fallback.empty()) {
-        int n = 0;
-        std::string tb = "a_" + mp + code;
-        int64_t last_ts = LastTimestamp(tconn.native(), tb);
-        for (const auto& x : fallback) {
-          int y = 0, m = 0, d = 0;
-          std::sscanf(x.date.c_str(), "%d-%d-%d", &y, &m, &d);
-          int64_t ts = tdx::util::date_to_epoch(y, m, d) * 1000LL;
-          if (ts <= 0) continue;
-          if (last_ts > 0 && ts <= last_ts) continue;
-          char sql[1024];
-          std::snprintf(sql, sizeof(sql),
-            "INSERT INTO %s USING adjust TAGS('%s') "
-            "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
-            tb.c_str(), code.c_str(), (long long)ts,
-            x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
-            x.category, EscapeSql(x.name).c_str());
-          if (ExecAffected(tconn.native(), sql) >= 0) ++n;
-        }
-        if (n > 0) { r.adj_events += n; ++r.adj_ok; }
-      }
+      int64_t n = WriteAdjustToDB(tconn.native(), fallback, market, code);
+      if (n > 0) { r.adj_events += n; ++r.adj_ok; }
     }
   }
 
@@ -546,6 +495,61 @@ static NetImportResult BatchNetImport(
 }  // namespace
 
 namespace tdx::taos {
+
+// 建 kline/adjust 超级表（IF NOT EXISTS 幂等）。
+void EnsureKlineTables(TAOS* conn) {
+  ExecSQL(conn,
+      "CREATE STABLE IF NOT EXISTS kline ("
+      "ts TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, "
+      "close DOUBLE, volume DOUBLE, amount DOUBLE) "
+      "TAGS (code VARCHAR(10), cycle VARCHAR(8), market VARCHAR(2))");
+  ExecSQL(conn,
+      "CREATE STABLE IF NOT EXISTS adjust ("
+      "ts TIMESTAMP, fenhong DOUBLE, peigujia DOUBLE, songzhuangu DOUBLE, "
+      "peigu DOUBLE, category INT, name VARCHAR(64)) "
+      "TAGS (code VARCHAR(10), market VARCHAR(2))");
+}
+
+// 单周期 K 线增量写入：LastTimestamp 过滤 → InsertKlineBatch。返回写入行数。
+int64_t WriteKlineToDB(TAOS* conn, std::vector<KLine> bars,
+                       Market market, const std::string& code, const char* tag) {
+  if (bars.empty()) return 0;
+  std::string tb = "k_" + MktPrefix(market) + code + "_" + tag;
+  int64_t last_ts = LastTimestamp(conn, tb);
+  if (last_ts > 0) {
+    std::vector<KLine> new_bars;
+    for (auto& b : bars)
+      if (b.datetime * 1000LL > last_ts) new_bars.push_back(std::move(b));
+    if (new_bars.empty()) return 0;
+    return InsertKlineBatch(conn, tb, market, code, tag, new_bars);
+  }
+  return InsertKlineBatch(conn, tb, market, code, tag, bars);
+}
+
+// 复权因子增量写入：LastTimestamp 过滤 → 逐条 INSERT。返回写入条数。
+int64_t WriteAdjustToDB(TAOS* conn, const std::vector<tdx::Xdxr>& xdxr,
+                        Market market, const std::string& code) {
+  if (xdxr.empty() || !tdx::util::IsValidCode(code)) return 0;
+  std::string tb = "a_" + MktPrefix(market) + code;
+  int64_t last_ts = LastTimestamp(conn, tb);
+  int64_t n = 0;
+  for (const auto& x : xdxr) {
+    int y = 0, m = 0, d = 0;
+    if (std::sscanf(x.date.c_str(), "%d-%d-%d", &y, &m, &d) != 3) continue;
+    int64_t ts = tdx::util::date_to_epoch(y, m, d) * 1000LL;
+    if (ts <= 0) continue;
+    if (last_ts > 0 && ts <= last_ts) continue;
+    char sql[1024];
+    std::snprintf(sql, sizeof(sql),
+      "INSERT INTO %s USING adjust TAGS('%s','%s') "
+      "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
+      tb.c_str(), code.c_str(), MktPrefix(market).c_str(), (long long)ts,
+      x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
+      x.category, EscapeSql(x.name).c_str());
+    if (ExecAffected(conn, sql) >= 0) ++n;
+  }
+  return n;
+}
 
 // 清理非 A 股及退市标的：遍历 kline/adjust 子表，删除不在 stock_name 中的代码。
 int CleanupStaleCodes(TAOS* conn) {
@@ -685,16 +689,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     return result;
   }
   ExecSQL(conn.native(), "USE tdx");
-  ExecSQL(conn.native(),
-          "CREATE STABLE IF NOT EXISTS kline ("
-          "ts TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, "
-          "close DOUBLE, volume DOUBLE, amount DOUBLE) "
-          "TAGS (code VARCHAR(10), cycle VARCHAR(8), market VARCHAR(2))");
-  ExecSQL(conn.native(),
-          "CREATE STABLE IF NOT EXISTS adjust ("
-          "ts TIMESTAMP, fenhong DOUBLE, peigujia DOUBLE, songzhuangu DOUBLE, "
-          "peigu DOUBLE, category INT, name VARCHAR(64)) "
-          "TAGS (code VARCHAR(10), market VARCHAR(2))");
+  EnsureKlineTables(conn.native());
 
   // === 第一步：网络拉取全量码表入库 ===
   std::cerr << "=== 第一步：同步全量码表 ===" << std::endl;
@@ -931,16 +926,7 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
 
   // 建表（IF NOT EXISTS 安全幂等；ImportKlineFromNetwork 独立于 DoImportTaos，原本遗漏）
   ExecSQL(conn, "USE tdx");
-  ExecSQL(conn,
-    "CREATE STABLE IF NOT EXISTS kline ("
-    "ts TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, "
-    "close DOUBLE, volume DOUBLE, amount DOUBLE) "
-    "TAGS (code VARCHAR(10), cycle VARCHAR(8), market VARCHAR(2))");
-  ExecSQL(conn,
-    "CREATE STABLE IF NOT EXISTS adjust ("
-    "ts TIMESTAMP, fenhong DOUBLE, peigujia DOUBLE, songzhuangu DOUBLE, "
-    "peigu DOUBLE, category INT, name VARCHAR(64)) "
-    "TAGS (code VARCHAR(10), market VARCHAR(2))");
+  EnsureKlineTables(conn);
 
   quotes::StdQuotes sq;
   if (auto ec = sq.Connect()) {
@@ -952,53 +938,33 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
     auto [market, code] = ParseMarketCode(raw);
     bool ok_any = false;
 
-    // 拉取单周期网络 K 线
-    auto pull = [&](Period p, const char* tag) {
-      std::string tb = "k_" + MktPrefix(market) + code + "_" + tag;
-      int64_t last_ts = LastTimestamp(conn, tb);
-      std::vector<KLine> new_bars;
+    // 拉取单周期网络 K 线（分页 800/批），公用 WriteKlineToDB 增量写入。
+    for (auto [period, tag] : {std::pair{Period::DAILY, "1d"},
+                                   {Period::MIN_1, "1m"},
+                                   {Period::MIN_5, "5m"}}) {
+      std::vector<KLine> bars;
       for (uint16_t off = 0; off < kKlineMaxCount; off += 800) {
-        auto bars = sq.Bars(market, code, p, off, 800);
-        if (bars.empty()) break;
-        for (auto& b : bars) {
-          if (last_ts <= 0 || b.datetime * 1000LL > last_ts) new_bars.push_back(std::move(b));
-        }
-        if (bars.size() < 800) break;
+        auto part = sq.Bars(market, code, period, off, 800);
+        if (part.empty()) break;
+        bars.insert(bars.end(), std::make_move_iterator(part.begin()),
+                                 std::make_move_iterator(part.end()));
+        if (part.size() < 800) break;
       }
-      if (new_bars.empty()) return;
+      int64_t nr = WriteKlineToDB(conn, std::move(bars), market, code, tag);
+      if (nr > 0) { result.kline_rows += nr; ok_any = true; }
+    }
 
-      int64_t n = InsertKlineBatch(conn, tb, market, code, tag, new_bars);
-      if (n > 0) { result.kline_rows += n; ok_any = true; }
-    };
-
-    pull(Period::DAILY, "1d");
-    pull(Period::MIN_1, "1m");
-    pull(Period::MIN_5, "5m");
-
-    // 拉取复权因子（xdxr 0x0f；对齐 BatchNetImport:374-379，ImportKlineFromNetwork 原本遗漏此项）
+    // 复权因子：公用 WriteAdjustToDB 增量写入。
     if (NeedsAdjust(code, market)) {
       try {
         auto xdxr = sq.GetXdxr(market, code);
-        if (!xdxr.empty()) {
-          std::string atb = "a_" + MktPrefix(market) + code;
-          int64_t alast_ts = LastTimestamp(conn, atb);
-          for (const auto& x : xdxr) {
-            int y = 0, m = 0, d = 0;
-            std::sscanf(x.date.c_str(), "%d-%d-%d", &y, &m, &d);
-            int64_t ts = tdx::util::date_to_epoch(y, m, d) * 1000LL;
-            if (ts <= 0) continue;
-            if (alast_ts > 0 && ts <= alast_ts) continue;
-            char sql[1024];
-            std::snprintf(sql, sizeof(sql),
-              "INSERT INTO %s USING adjust TAGS('%s','%s') "
-              "VALUES(%lld, %.4f, %.4f, %.4f, %.4f, %d, '%s')",
-              atb.c_str(), code.c_str(), MktPrefix(market).c_str(), (long long)ts,
-              x.fenhong, x.peigujia, x.songzhuangu, x.peigu,
-              x.category, EscapeSql(x.name).c_str());
-            if (ExecAffected(conn, sql) >= 0) ++result.adj_events;
-          }
-        }
-      } catch (...) {}
+        int64_t n = WriteAdjustToDB(conn, xdxr, market, code);
+        if (n > 0) { result.adj_events += n; ++result.adj_ok; }
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "ImportKlineFromNetwork: %s xdxr 失败: %s\n", code.c_str(), e.what());
+      } catch (...) {
+        std::fprintf(stderr, "ImportKlineFromNetwork: %s xdxr 失败(未知异常)\n", code.c_str());
+      }
     }
 
     if (ok_any) ++result.codes_ok;

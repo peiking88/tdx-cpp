@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.7.0**：TDengine 多线程并发导入 + 增量/全量自动判断
 - **v0.8.0**：移除 DuckDB，统一存储后端为 TDengine
 - **v0.9.0**：导入后自动建立股票代码→名称对照表
-- **v0.9.1**：A股代码名称管理三件套（`sync-names` / `cleanup` / `check-names`）
+- **v0.9.1**：A股代码名称管理三件套（`fetch-names` / `cleanup` / `check-names`）
 - **v0.9.2**：导入过滤修复——补全北交所/ETF/LOF/板块指数遗漏
 - **v0.10.x**：网络 K 线 OHLC /1000 缩放修复 + vipdoc 基金/指数量价系数 + MarketFromCode 市场映射修复 + 统一字段缩放配置（`scaling.hpp`）+ 盘中实时数据落库
 - **v0.11.0**：补全 8 个盘中接口（财务/F10/历史委托/历史逐笔/成交量分布/指数信息/主力异动/资金流向）+ thread-affinity 修复（Close/Call 跨线程清理须经 `proactor_->Await`）+ SP/MAC 真网测试独立二进制 + SelectBest 单调度器并行
@@ -21,8 +21,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.14.0**：fetch-quotes 默认采集自选股 `zxg.blk`（`--all_market` 全市场、`--quote_codes` 显式优先、`TDX_ZXG_BLK` 环境变量覆盖路径）+ 修复 `gbk_to_utf8` E2BIG 误 break（大 GBK 输入如 F10 全文 23KB 被截断到 ~256B）/ `IsQuoteTarget` 不认 `sh/sz/bj` 前缀 / finance·F10 误锁 `wi==0` 单 worker / finance 过滤指数·ETF 全 0 空壳
 - **v0.14.1**：`index-info` 指数价格 /100 缩放修复（`deserialize_index_info` 根源层，CLI 显示 + idx_info 入库一致）+ `unusual` 校验 market∈{0,1,2} + `board-quotes` 校验 board_id（防误用静默错路由）
 - **v0.14.2**：`finance` 过滤条件过严修复——v0.14.0 `industry||每股收益` 误删 ETF/基金/指数（个股字段对它们恒 0），改为任一字段非 0 即入库（ETF/基金有股本+IPO、指数有股本汇总）；`f10` 对 ETF/指数/基金本就完整无 bug
-- **v0.14.3**：修复 `pull-kline` 两个缺陷——①清库后不建 `kline`/`adjust` 表（补 `CREATE STABLE IF NOT EXISTS`）；②遗漏复权因子拉取（补 xdxr 0x0f，`NeedsAdjust` 判定个股，`ImportKlineFromNetwork` 独立完整可用）
-- **v0.14.5**：①历史 K 线数据流重构——`tdx import` 默认从 vipdoc 导入历史 1d/1m/5m（默认仅导自选股 `zxg.blk`，`--all-market` 全市场，`--full-reset` 首次迁移全清；`ClearTodayIntraday` 增量留历史只清当日）；当日盘中由 `tdx sync-kline` 默认循环刷新（60s 间隔，15:00 后 3 轮无新 bar 退出，trading-hours + OHLC 正数/high≥low 过滤）。②`deserialize_kline` D7 交易时段校验拦截脏 bar。③`f10`/`finance` 从 `fetch-quotes` 分离为独立命令 `tdx f10`/`tdx finance`（清库重导，finance 全 30 列）；④**`deserialize_finance` 协议偏移修复**——对齐 tdxpy 真实布局 `<fHHII+30f>`（含 `zhigonggu` 职工股，旧 opentdx 误标 `meigushouyi` 且少 1 字段导致后续全错位）；股本/资产/负债/收入/利润 ×10000 缩放（万股→股、万元→元），实测 600000 与 mootdx 完全一致
+- **v0.14.3**：修复网络 K 线导入两个缺陷——①清库后不建 `kline`/`adjust` 表（补 `CREATE STABLE IF NOT EXISTS`）；②遗漏复权因子拉取（补 xdxr 0x0f，`NeedsAdjust` 判定个股，`ImportKlineFromNetwork` 独立完整可用，已合并入 `tdx import` 网络补缺路径）
+- **v0.14.5**：①历史 K 线数据流重构——`tdx import` 默认从 vipdoc 导入历史 1d/1m/5m（默认仅导自选股 `zxg.blk`，`--all-market` 全市场，`--full-reset` 首次迁移全清；`ClearTodayIntraday` 增量留历史只清当日）；当日盘中由 `tdx fetch-kline` 默认循环刷新（60s 间隔，15:00 后 3 轮无新 bar 退出，trading-hours + OHLC 正数/high≥low 过滤）。②`deserialize_kline` D7 交易时段校验拦截脏 bar。③`fetch-finance`/`fetch-f10` 从 `fetch-quotes` 分离为独立命令（清库重导，finance 全 30 列）；④**`deserialize_finance` 协议偏移修复**——对齐 tdxpy 真实布局 `<fHHII+30f>`（含 `zhigonggu` 职工股，旧 opentdx 误标 `meigushouyi` 且少 1 字段导致后续全错位）；股本/资产/负债/收入/利润 ×10000 缩放（万股→股、万元→元），实测 600000 与 mootdx 完全一致
 
 ## 项目目标
 
@@ -100,7 +100,7 @@ C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser
 | 港股通 | `7xxxxx` | |
 | B股 | `9xxxxx` | |
 
-对照表 `stock_names.json` 由 `sync-names` 建立，`check-names` 校验完整性，`cleanup` 清理对照表中已不再覆盖的冗余条目。
+对照表 `stock_names.json` 由 `fetch-names` 建立，`check-names` 校验完整性，`cleanup` 清理对照表中已不再覆盖的冗余条目。
 
 ## 上游短板与改进路线（Phase 4 全部完成 ✅）
 
@@ -165,7 +165,7 @@ C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser
 | `tdx::data` | `tdx_data` | 数据管理层（Calendar / Adjust / Resampler / SyncState / TdxData） |
 | `tdx::taos` | `tdx_taos` | TDengine 导入层（多线程 + 批量 INSERT） |
 | `tdx::batch` | `tdx_batch` | 并发批量拉取（helio fiber 池分片 + `-n` 并发数） |
-| `tdx` (exe) | `tdx` | CLI 入口（server-test / bars / ex-bars / import / sync-names / cleanup / check-names / batch-fetch） |
+| `tdx` (exe) | `tdx` | CLI 入口（server-test / import / fetch-quotes / fetch-kline / fetch-finance / fetch-f10 / fetch-names / cleanup / check-names / batch-fetch / history-orders / history-tx / vol-profile / index-info / unusual / board-list / board-quotes / capital-flow） |
 
 ## helio fiber 编码纪律（关键约束）
 
@@ -205,14 +205,15 @@ ctest --test-dir build -R <test_name> -V
 
 # 4. CLI 示例
 ./build/bin/tdx server-test                              # 测速选服
-./build/bin/tdx bars 600000 4 10                         # 拉日 K
-./build/bin/tdx ex-bars 31 HSImain 4 10                  # 扩展行情 K 线
+./build/bin/tdx fetch-kline sh600000 1d 240               # 当日K线循环刷新入库
+./build/bin/tdx fetch-finance sh600000                    # 拉取财务数据入库
 ./build/bin/tdx batch-fetch --stock-list stock.txt \
     --start 2024-01-01 --end 2024-06-01 -n 16 --resume   # 批量拉取+断点续传
 ./build/bin/tdx import --tdx-root ~/.wine/.../tdx        # 本地 vipdoc 导入 TDengine
-./build/bin/tdx sync-names                               # 同步股票代码→名称对照表
-./build/bin/tdx cleanup                                   # 清理冗余代码
+./build/bin/tdx fetch-names                              # 同步股票代码→名称对照表
+./build/bin/tdx cleanup                                   # 清理非A股/退市标的
 ./build/bin/tdx check-names                               # 检查名称表覆盖完整性
+./build/bin/tdx fetch-kline sh000001 1d 240               # 当日K线循环刷新入库
 ```
 
 **真实网络测试**（连接通达信服务器）优先级高于 mock，参考上游的 `pytest -m live`（连真服）与 `-m local`（读本地文件）划分。e2e 测试（`test_e2e`）在服务器不可达时自动 `GTEST_SKIP`，不视为失败。
@@ -225,7 +226,7 @@ ctest --test-dir build -R <test_name> -V
 - **字段缩放**：`include/tdx/data/scaling.hpp`（纯头文件）——`SecurityClass × DataSource → FieldScaling`。7 条数据路径 × 4 类标的 × 7 字段。新增 parser/数据源必走此表。
 - **SP 测试**：独立二进制 `test_sp_e2e`（同进程两个 ProactorPool 增加 fiber 调度复杂度）。
 - **精度**：遵循全局规范——价位/金额 `%.2f`、数量 `%d`、百分比 `%d%%`。
-- **市场前缀（v0.13.8）**：所有 code 必须带市场前缀 `sh`/`sz`/`bj`（如 `sh000001`、`sz000001`、`bj430047`），用 `tdx::ParseMarketCode` 解析；无前缀视为无效（不回退 `MarketFromCode` 推断）。歧义 code（`000001` SH=上证指数 / SZ=平安银行）须显式前缀区分。CLI 命令（bars/sync-kline/pull-kline/finance/f10/history-orders/history-tx/vol-profile/index-info/capital-flow）、batch-fetch stock list、fetch-quotes 均要求前缀；导入内部 `BatchNetImport` 用 `stock_name.market` 字段而非 `MarketFromCode`。
+- **市场前缀（v0.13.8）**：所有 code 必须带市场前缀 `sh`/`sz`/`bj`（如 `sh000001`、`sz000001`、`bj430047`），用 `tdx::ParseMarketCode` 解析；无前缀视为无效（不回退 `MarketFromCode` 推断）。歧义 code（`000001` SH=上证指数 / SZ=平安银行）须显式前缀区分。CLI 命令（fetch-kline/fetch-finance/fetch-f10/history-orders/history-tx/vol-profile/index-info/capital-flow）、batch-fetch stock list、fetch-quotes 均要求前缀；导入内部 `BatchNetImport` 用 `stock_name.market` 字段而非 `MarketFromCode`。
 - **复权**：tdxdata 的复权因子是**基于 xdxr 事件流自行计算**（`tdxdata/sources/adjust.py:49`，区分前复权 qfq 的 backward-asof 与后复权 hfq 的 forward-asof），不是直接取交易所因子。移植时须对照其单测。
 - **A 股时段感知重采样**：15m/30m/1h 由 5m 重采样，1w/1mon 由 1d 重采样，且 K 线结束时间须按 A 股交易时段（上午 9:30、下午 13:00 开盘）标注。参考 `tdxdata/sources/base.py:56-132`。
 - **K 线周期常量**：`0`=5min、`1`=15min、`2`=30min、`3`=1h、`4`=日、`5`=周、`6`=月、`7`=扩展1min、`8`=1min、`9`=日K、`10`=季、`11`=年。单次请求 K 线上限 800 条、分笔 2000 条。
@@ -248,9 +249,9 @@ ctest --test-dir build -R <test_name> -V
 | 数据来源 | 命令 | 周期 | 范围 |
 |---|---|---|---|
 | 本地 vipdoc | `tdx import` | 1d/1m/5m | 历史（今日之前） |
-| 网络 | `tdx sync-kline` | 1d/5m/1m | 当日盘中 |
+| 网络 | `tdx fetch-kline` | 1d/5m/1m | 当日盘中 |
 
 - `tdx import` 默认仅导自选股 `zxg.blk`（与 `fetch-quotes` 一致），加 `--all-market` 导全市场
 - 导入时自动 DROP+重建 1d/1m/5m 子表，清除网络旧数据（含解析错位产生的 23:55/16:39 脏 bar）
 - Parser 层 D7 校验：分钟 bar 须在 9:30–11:30 或 13:00–15:00，否则丢弃
-- `sync-kline` 仅保留当日 bar + 交易时段校验 + OHLC 正数/high≥low
+- `fetch-kline` 仅保留当日 bar + 交易时段校验 + OHLC 正数/high≥low

@@ -49,6 +49,7 @@ bool IsAStock(const std::string& code);
 struct NetworkImportResult {
   int codes_ok = 0;
   int64_t kline_rows = 0;
+  int adj_ok = 0;
   int64_t adj_events = 0;
 };
 NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
@@ -58,6 +59,22 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
 // 返回实际写入行数；DB 错误返回 -1。调用前需 USE tdx + 确保 kline 超级表存在。
 int64_t UpsertBars(TAOS* conn, Market market, const std::string& code,
                    const std::string& cycle, const std::vector<KLine>& bars);
+
+// ==================== kline 超级表与公用写入助手 ====================
+
+// 建 kline + adjust 超级表（IF NOT EXISTS 安全幂等）。
+// 调用前需 USE tdx。DoImportTaos / ImportKlineFromNetwork / DoFetchKline 均依赖此函数。
+void EnsureKlineTables(TAOS* conn);
+
+// 单周期 K 线增量写入：LastTimestamp 过滤 → InsertKlineBatch。返回写入行数。
+// bars 参数为非 const 拷贝（调用方可 std::move 入参），调用前需 USE tdx。
+int64_t WriteKlineToDB(TAOS* conn, std::vector<KLine> bars,
+                       Market market, const std::string& code, const char* tag);
+
+// 复权因子增量写入：LastTimestamp 过滤 → 逐条 INSERT。返回写入条数。
+// 调用前需 USE tdx + 确保 adjust 超级表存在。
+int64_t WriteAdjustToDB(TAOS* conn, const std::vector<tdx::Xdxr>& xdxr,
+                        Market market, const std::string& code);
 
 // ==================== f10 / finance 独立导入（从 fetch-quotes 分离）====================
 // finance 全列（34 业务字段：股本结构/每股/资产负债/损益/现金流/属性）。

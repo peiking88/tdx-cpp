@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <mutex>
 
 namespace tdx::taos {
@@ -21,6 +22,19 @@ TaosConfig TaosConfig::FromEnv() {
   read("TDX_TAOS_PASS", cfg.pass);
   read("TDX_TAOS_DB", cfg.db);
   return cfg;
+}
+
+std::unique_ptr<TaosConnection> ConnectTdx() {
+  auto conn = std::make_unique<TaosConnection>(TaosConfig::FromEnv());
+  if (!conn || !conn->native()) {
+    std::cerr << "TDengine 连接失败\n";
+    return nullptr;
+  }
+  if (!ExecSQL(conn->native(), "USE tdx")) {
+    std::cerr << "TDengine USE tdx 失败\n";
+    return nullptr;
+  }
+  return conn;
 }
 
 bool ExecSQL(TAOS* conn, const char* sql) {
