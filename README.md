@@ -58,7 +58,14 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.14.3`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.14.5`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-09 v0.14.5
+
+- **历史 K 线数据流重构**：`tdx import` 默认从 vipdoc 导入历史 1d/1m/5m（默认仅导自选股 `zxg.blk`，`--all-market` 全市场，`--full-reset` 首次迁移全清；增量留历史只清当日）；当日盘中由 `tdx sync-kline` 默认循环刷新（60s 间隔，15:00 后 3 轮无新 bar 退出）。`import` 并发默认 4 线程。
+- **协议修复**：`deserialize_finance` 偏移错位——对齐 tdxpy 真实布局 `<fHHII+30f>`（含 `zhigonggu` 职工股，旧 opentdx 误标 `meigushouyi` 且少 1 字段导致后续全错位）；股本/资产/负债/收入/利润 ×10000 缩放（万股→股、万元→元），实测 600000 与 mootdx 完全一致。
+- **f10/finance 分离**：从 `fetch-quotes` 完全移除，独立为 `tdx f10` / `tdx finance` 命令（清库后从网络重导，finance 全 30 列；f10 目录+全文切片）。
+- **脏数据拦截**：`deserialize_kline` D7 交易时段校验，分钟 bar 须在 9:30–11:30 或 13:00–15:00，否则丢弃（解析器 D6 错位产生的 23:55/16:39 等非交易时段 bar 在 parser 层拦截）。
 
 ### 2026-07-08 v0.14.3
 

@@ -284,22 +284,23 @@ TEST(FinanceParser, Basic) {
   pu16(resp, 1);                // type/num
   resp.push_back(1);            // market=SH
   for (char ch : std::string("600000")) resp.push_back(ch);
-  pf32(resp, 100000.0f);        // liutongguben
+  pf32(resp, 100000.0f);        // liutongguben（万股，入库×10000→股）
   pu16(resp, 31);               // province
   pu16(resp, 102);              // industry
   pu32(resp, 20260101);         // updated_date
   pu32(resp, 20200601);         // ipo_date
-  for (int i = 0; i < 29; ++i) pf32(resp, 1.0f + i);  // 29 float 字段
+  for (int i = 0; i < 30; ++i) pf32(resp, 1.0f + i);  // 30 float（含 zhigonggu）
   auto f = deserialize_finance(resp.data(), resp.size());
-  EXPECT_DOUBLE_EQ(f.liutongguben, 100000.0);
+  EXPECT_DOUBLE_EQ(f.liutongguben, 100000.0 * 10000.0);  // ×10000 缩放
   EXPECT_EQ(f.ipo_date, 20200601u);
   EXPECT_EQ(f.industry, 102);
-  EXPECT_DOUBLE_EQ(f.meigushouyi, 7.0);   // 29-field index 6 (1.0+6)
-  EXPECT_DOUBLE_EQ(f.meigujinzichan, 29.0); // index 28 (1.0+28)
+  EXPECT_DOUBLE_EQ(f.zhigonggu, (1.0 + 6) * 10000.0);      // index 6 = zhigonggu
+  EXPECT_DOUBLE_EQ(f.gudongrenshu, 1.0 + 11);              // index 11 不缩放
+  EXPECT_DOUBLE_EQ(f.meigujingzichan, 1.0 + 28);           // 倒数第2 不缩放
 }
 
 TEST(FinanceParser, Truncated) {
-  uint8_t d[8] = {};  // < 141B → 空 Finance（code 为空是区分信号）
+  uint8_t d[8] = {};  // < 145B → 空 Finance（code 为空是区分信号）
   auto f = deserialize_finance(d, 8);
   EXPECT_TRUE(f.code.empty());
 }
@@ -539,6 +540,91 @@ TEST(UnusualParser, Basic) {
 
 TEST(UnusualParser, Empty) {
   EXPECT_TRUE(deserialize_unusual(nullptr, 0).empty());
+}
+
+// ---- 交易时段校验（D7）：parser 层拦截非交易时段 bar ----
+// 构造单根 minute bar 响应：count=1 + date_num(紧凑) + OHLC + vol + amount。
+// 紧凑 date_num = (minutes << 16) | ((year-2004)<<11) | (month*100+day)。
+static std::vector<uint8_t> MakeMinuteResp(int y, int mo, int d, int hh, int mi,
+                                            int o, int c, int h, int l) {
+  std::vector<uint8_t> resp;
+  pu16(resp, 1);
+  int zip = ((y - 2004) << 11) | (mo * 100 + d);
+  int64_t num = (static_cast<int64_t>(hh * 60 + mi) << 16) | static_cast<int64_t>(zip);
+  pu32(resp, static_cast<uint32_t>(num));
+  ep(resp, o); ep(resp, c); ep(resp, h); ep(resp, l);
+  pf32(resp, 1000.0f);
+  pf32(resp, 5000000.0f);
+  return resp;
+}
+
+TEST(KlineParser, DropsOutOfTradingHoursMinute) {
+  // 23:55 收盘后脏数据（对应历史 stray 2004-08-24 23:55），应被 parser 丢弃。
+  auto resp = MakeMinuteResp(2024, 8, 24, 23, 55, 1000, 1010, 1020, 990);
+  auto bars = deserialize_kline(resp.data(), resp.size(), Period::MIN_1);
+  EXPECT_TRUE(bars.empty());
+}
+
+TEST(KlineParser, DropsAfterHoursMinute) {
+  // 16:39 盘中收盘后（对应历史 stray 2022-09-26 16:39）。
+  auto resp = MakeMinuteResp(2022, 9, 26, 16, 39, 1000, 1010, 1020, 990);
+  auto bars = deserialize_kline(resp.data(), resp.size(), Period::MIN_1);
+  EXPECT_TRUE(bars.empty());
+}
+
+TEST(KlineParser, DropsPreMarketMinute) {
+  // 9:29 开盘前，不在交易时段。
+  auto resp = MakeMinuteResp(2024, 1, 2, 9, 29, 1000, 1010, 1020, 990);
+  auto bars = deserialize_kline(resp.data(), resp.size(), Period::MIN_1);
+  EXPECT_TRUE(bars.empty());
+}
+
+TEST(KlineParser, KeepsInTradingHoursMinute) {
+  // 9:31 早盘，应保留。
+  auto resp = MakeMinuteResp(2024, 1, 2, 9, 31, 1000, 1010, 1020, 990);
+  auto bars = deserialize_kline(resp.data(), resp.size(), Period::MIN_1);
+  ASSERT_EQ(bars.size(), 1u);
+  auto ci = util::epoch_to_cst(bars[0].datetime);
+  EXPECT_EQ(ci.hour, 9);
+  EXPECT_EQ(ci.minute, 31);
+}
+
+TEST(KlineParser, KeepsAfternoonMinute) {
+  // 14:55 午盘最后一根（15:00 前一根）。
+  auto resp = MakeMinuteResp(2024, 1, 2, 14, 55, 1000, 1010, 1020, 990);
+  auto bars = deserialize_kline(resp.data(), resp.size(), Period::MIN_1);
+  ASSERT_EQ(bars.size(), 1u);
+}
+
+TEST(KlineParser, KeepsCloseMinute) {
+  // 15:00 收盘最后一根，应保留。
+  auto resp = MakeMinuteResp(2024, 1, 2, 15, 0, 1000, 1010, 1020, 990);
+  auto bars = deserialize_kline(resp.data(), resp.size(), Period::MIN_1);
+  ASSERT_EQ(bars.size(), 1u);
+}
+
+TEST(KlineParser, MixedKeepsOnlyInHours) {
+  // 两根 bar：9:35 保留 + 16:00 丢弃。
+  std::vector<uint8_t> resp;
+  pu16(resp, 2);
+  // 9:35
+  {
+    int zip = ((2024 - 2004) << 11) | (1 * 100 + 2);
+    int64_t num = (static_cast<int64_t>(9 * 60 + 35) << 16) | static_cast<int64_t>(zip);
+    pu32(resp, static_cast<uint32_t>(num));
+    ep(resp, 1000); ep(resp, 1010); ep(resp, 1020); ep(resp, 990);
+    pf32(resp, 1000.0f); pf32(resp, 5000000.0f);
+  }
+  // 16:00
+  {
+    int zip = ((2024 - 2004) << 11) | (1 * 100 + 2);
+    int64_t num = (static_cast<int64_t>(16 * 60) << 16) | static_cast<int64_t>(zip);
+    pu32(resp, static_cast<uint32_t>(num));
+    ep(resp, 1000); ep(resp, 1010); ep(resp, 1020); ep(resp, 990);
+    pf32(resp, 1000.0f); pf32(resp, 5000000.0f);
+  }
+  auto bars = deserialize_kline(resp.data(), resp.size(), Period::MIN_1);
+  EXPECT_EQ(bars.size(), 1u);
 }
 
 // ---- 请求构造验证 ----

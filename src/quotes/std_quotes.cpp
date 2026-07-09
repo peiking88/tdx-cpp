@@ -10,6 +10,7 @@
 #include "tdx/errors.hpp"
 #include "tdx/proto/frame.hpp"
 #include "tdx/util/byte_order.hpp"
+#include "tdx/util/gbk.hpp"
 
 namespace tdx::quotes {
 
@@ -220,6 +221,29 @@ F10Content StdQuotes::GetF10Content(Market market, std::string_view code,
     auto resp = Call(proto::kMsgF10Content, body);
     return proto::deserialize_f10_content(resp.body.data(), resp.body.size());
   });
+}
+
+// 分页拉取 F10 单分类全文：累积 raw GBK 字节，末尾统一 gbk_to_utf8。
+// 单分类可达 76KB，单次响应 ≤65535 字节 → 必须分页循环。
+std::string StdQuotes::GetF10FullText(Market market, std::string_view code,
+                                      const F10Category& cat) {
+  std::string gbk_raw;
+  gbk_raw.reserve(cat.length);
+  constexpr uint32_t kChunk = 32000;
+  for (uint32_t offset = 0; offset < cat.length; ) {
+    uint32_t want = std::min<uint32_t>(kChunk, cat.length - offset);
+    auto body = proto::serialize_f10_content(market, code, cat.filename,
+                                             cat.start + offset, want);
+    auto resp = proactor_->Await([&] { return Call(proto::kMsgF10Content, body); });
+    if (resp.body.size() < 12) break;
+    uint16_t got = static_cast<uint16_t>(resp.body[10]) |
+                   static_cast<uint16_t>(static_cast<uint16_t>(resp.body[11]) << 8);
+    if (got == 0) break;
+    if (static_cast<std::size_t>(12) + got > resp.body.size()) break;
+    gbk_raw.append(reinterpret_cast<const char*>(resp.body.data() + 12), got);
+    offset += got;
+  }
+  return util::gbk_to_utf8(gbk_raw);
 }
 
 std::vector<HistoryOrder> StdQuotes::GetHistoryOrders(Market market, std::string_view code,

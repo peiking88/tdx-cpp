@@ -10,6 +10,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "base/init.h"
@@ -19,7 +20,8 @@
 
 #include "tdx/consts.hpp"
 
-ABSL_FLAG(uint32_t, jobs, 16, "import 并行线程数 (0=CPU 核数)");
+ABSL_FLAG(uint32_t, jobs, 4, "import 并行线程数 (0=CPU 核数)");
+ABSL_FLAG(int32_t, kline_interval, 60, "sync-kline 循环间隔（秒）");
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/proto/vipdoc_reader.hpp"
 #include "tdx/proto/sp_parsers.hpp"
@@ -34,11 +36,16 @@ ABSL_FLAG(uint32_t, jobs, 16, "import 并行线程数 (0=CPU 核数)");
 #include "tdx/util/code_validate.hpp"
 #include "tdx/util/time_util.hpp"
 
+#include <atomic>
+#include <csignal>
 #include <set>
 #include <taos.h>
 
 using namespace tdx;
 using tdx::taos::ReadVarChar;
+
+// sync-kline 循环模式退出标志（SIGINT/SIGTERM 触发）。
+namespace { std::atomic<bool> g_kline_stop{false}; void OnKlineSignal(int) { g_kline_stop = true; } }
 
 namespace {
 
@@ -304,11 +311,17 @@ int DoCleanup() {
 // ponytail: 重复运行当日 bar 会积重复行——清库重导前仅作补抓当日数据用。
 int DoSyncKline(int argc, char** argv) {
   // 位置参数：tdx sync-kline <code> [code...] [periods=1d,5m,1m] [count=240]
+  // 默认循环模式（--kline_interval=60s），收盘后 3 轮无新 bar 退出。
+  // absl flag（--kline_interval）遇子命令后不再解析，留在 argv 中，
+  // 这里跳过以 '-' 开头的参数，避免被误当 code。
   std::vector<std::string> codes;
   std::string periods = "1d,5m,1m";
   int count = 240;
-  for (int i = 2; i < argc; ++i)
-    codes.emplace_back(argv[i]);
+  for (int i = 2; i < argc; ++i) {
+    std::string a = argv[i];
+    if (!a.empty() && a[0] == '-') continue;  // 跳过 absl flag
+    codes.emplace_back(std::move(a));
+  }
   // 末位若为纯数字且非 6 位（排除股票代码） = count
   if (!codes.empty()) {
     const auto& last = codes.back();
@@ -326,7 +339,7 @@ int DoSyncKline(int argc, char** argv) {
   }
   if (codes.empty() || count <= 0) {
     std::cerr << "用法: tdx sync-kline <code> [code...] [1d|5m|1m|1d,5m,1m] [count]\n"
-              << "  拉取最新 count 根 K 线写入 kline 表（默认三周期 240 根）\n"
+              << "  循环拉取当日 K 线写入 kline 表（默认三周期 240 根，间隔 --kline_interval 秒）\n"
               << "  code 可带市场前缀 sh/sz/bj（sh000001=上证指数；000001 默认 SZ=平安银行）\n";
     return 1;
   }
@@ -357,50 +370,111 @@ int DoSyncKline(int argc, char** argv) {
   if (!conn) { std::cerr << "TDengine 连接失败\n"; return 1; }
   ExecSQL(conn.native(), "USE tdx");
 
-  int64_t total = 0;
-  for (const auto& raw : codes) {
-    auto [market, code] = tdx::ParseMarketCode(raw);
-    if (!tdx::util::IsValidCode(code)) { std::cerr << raw << ": 非法代码，跳过\n"; continue; }
-    for (const auto& [period, tag, vsrc] : ps) {
-      // opentdx 量按该周期历史源系数归一：日线 ×0.01（手），分钟 ×1.0（原样）。
-      double vol_f = tdx::data::GetScaling(tdx::data::ClassifySecurity(code, market), vsrc).volume;
-      auto bars = sq.Bars(market, code, period, 0, static_cast<uint16_t>(count));
-      if (bars.empty()) { std::cerr << code << " " << tag << ": 无数据\n"; continue; }
+  // 当日 00:00 CST epoch：仅保留当日盘中 bar，历史 K 线由 vipdoc 导入。
+  const int64_t today_midnight_epoch = tdx::util::TodayMidnightEpoch();
 
-      std::string mp = tdx::proto::VipdocReader::MarketDir(market);
-      auto header = [&mp](const std::string& c, const char* t) {
-        std::ostringstream s;
-        s << "INSERT INTO k_" << mp << c << "_" << t
-          << " USING kline TAGS('" << c << "','" << t << "','" << mp << "') VALUES";
-        return s.str();
-      };
-      std::ostringstream sql;
-      sql << header(code, tag);
-      int n = 0;
-      for (const auto& b : bars) {
-        if (b.datetime <= 0 || b.datetime > 4102444800LL) continue;  // 1970~2100
-        if (std::isnan(b.open) || std::isnan(b.close) || std::isnan(b.high) ||
-            std::isnan(b.low) || std::isnan(b.volume) || std::isnan(b.amount)) continue;
-        char row[256];
-        std::snprintf(row, sizeof(row), "(%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f)",
-                      static_cast<long long>(b.datetime * 1000LL),
-                      b.open, b.high, b.low, b.close, b.volume * vol_f, b.amount);
-        sql << row;
-        if (++n % 200 == 0) {  // ponytail: 分批避免单 SQL 过长
-          if (!ExecSQL(conn.native(), sql.str().c_str()))
-            std::cerr << code << " " << tag << " 批量写入失败\n";
-          sql.str("");
-          sql << header(code, tag);
+  int interval = absl::GetFlag(FLAGS_kline_interval);
+  if (interval <= 0) interval = 60;
+
+  // 单轮：拉所有 code×period 的当日 bar 写入 TDengine，返回本轮写入 bar 数与最新 ts。
+  // 用返回值判断"是否还有新 bar"（连续 3 轮无新 + 收盘后退出）。
+  auto run_once = [&]() -> std::pair<int, int64_t> {
+    int round_n = 0;
+    int64_t round_max_ts = 0;
+    for (const auto& raw : codes) {
+      auto [market, code] = tdx::ParseMarketCode(raw);
+      if (!tdx::util::IsValidCode(code)) { std::cerr << raw << ": 非法代码，跳过\n"; continue; }
+      for (const auto& [period, tag, vsrc] : ps) {
+        double vol_f = tdx::data::GetScaling(tdx::data::ClassifySecurity(code, market), vsrc).volume;
+        auto bars = sq.Bars(market, code, period, 0, static_cast<uint16_t>(count));
+        if (bars.empty()) continue;
+
+        std::string mp = tdx::proto::VipdocReader::MarketDir(market);
+        auto header = [&mp](const std::string& c, const char* t) {
+          std::ostringstream s;
+          s << "INSERT INTO k_" << mp << c << "_" << t
+            << " USING kline TAGS('" << c << "','" << t << "','" << mp << "') VALUES";
+          return s.str();
+        };
+        std::ostringstream sql;
+        sql << header(code, tag);
+        int n = 0;
+        for (const auto& b : bars) {
+          if (b.datetime <= 0 || b.datetime > 4102444800LL) continue;  // 1970~2100
+          if (std::isnan(b.open) || std::isnan(b.close) || std::isnan(b.high) ||
+              std::isnan(b.low) || std::isnan(b.volume) || std::isnan(b.amount)) continue;
+          if (b.datetime < today_midnight_epoch) continue;  // 仅当日
+          if (!tdx::util::IsBarInTradingHours(b.datetime, period)) continue;  // D7 交易时段
+          if (b.open <= 0 || b.close <= 0 || b.high <= 0 || b.low <= 0) continue;
+          if (b.high < b.low) continue;
+          if (b.volume < 0 || b.amount < 0) continue;
+          char row[256];
+          std::snprintf(row, sizeof(row), "(%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f)",
+                        static_cast<long long>(b.datetime * 1000LL),
+                        b.open, b.high, b.low, b.close, b.volume * vol_f, b.amount);
+          sql << row;
+          if (b.datetime > round_max_ts) round_max_ts = b.datetime;
+          if (++n % 200 == 0) {  // ponytail: 分批避免单 SQL 过长
+            if (!ExecSQL(conn.native(), sql.str().c_str()))
+              std::cerr << code << " " << tag << " 批量写入失败\n";
+            sql.str("");
+            sql << header(code, tag);
+          }
         }
+        if (n % 200 != 0)
+          if (!ExecSQL(conn.native(), sql.str().c_str()))
+            std::cerr << code << " " << tag << " 写入失败\n";
+        round_n += n;
       }
-      if (n % 200 != 0)
-        if (!ExecSQL(conn.native(), sql.str().c_str()))
-          std::cerr << code << " " << tag << " 写入失败\n";
-      total += n;
-      std::cout << code << " " << tag << ": " << n << " 根\n";
+    }
+    return {round_n, round_max_ts};
+  };
+
+  // 当前 CST 时刻是否已过收盘（>=15:00）。
+  auto market_closed = []() {
+    auto c = tdx::util::epoch_to_cst(std::time(nullptr));
+    return c.hour > 15 || (c.hour == 15 && c.minute >= 0);
+  };
+
+  // 默认循环模式：每 interval 秒一轮，收盘后连续 3 轮无新 bar 退出。
+  std::signal(SIGINT, OnKlineSignal);
+  std::signal(SIGTERM, OnKlineSignal);
+  std::cerr << "=== sync-kline 循环模式，间隔 " << interval
+            << "s，15:00 后 3 轮无新 bar 退出（Ctrl-C 中断）===\n";
+  int64_t total = 0;
+  int idle = 0;            // 连续无新 bar 轮数
+  int64_t last_max_ts = 0;
+  int round_idx = 0;
+  while (!g_kline_stop) {
+    auto t0 = std::chrono::steady_clock::now();
+    ++round_idx;
+    auto [n, max_ts] = run_once();
+    total += n;
+    bool new_bar = (max_ts > last_max_ts);
+    last_max_ts = max_ts;
+    std::cerr << "[轮 " << round_idx << "] " << n << " 行"
+              << (new_bar ? "" : " (无新 bar)")
+              << "  累计 " << total << "\n";
+    if (!new_bar) {
+      ++idle;
+      if (market_closed() && idle >= 3) {
+        std::cerr << "收盘后连续 " << idle << " 轮无新 bar，退出\n";
+        break;
+      }
+    } else {
+      idle = 0;
+    }
+    if (g_kline_stop) break;
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    int64_t wait = interval - elapsed;
+    if (wait > 0) {
+      for (int64_t w = 0; w < wait && !g_kline_stop; ++w)
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
   }
-  std::cout << "=== sync-kline 完成，共 " << total << " 行 ===\n";
+  std::cout << "=== sync-kline 循环结束，共 " << total << " 行 ===\n";
   return 0;
 }
 
@@ -432,32 +506,93 @@ int DoPullKline(int argc, char** argv) {
   return (result.kline_rows >= 0) ? 0 : 1;
 }
 
-// ---- 财务 0x10 ----
+// ---- 财务 0x10：清库后从网络重导，入库 finance 全 34 列 ----
 int DoFinance(int argc, char** argv) {
-  if (argc < 3) { std::cerr << "用法: tdx finance <sh|sz|bj><code>\n"; return 1; }
-  auto [market, code] = tdx::ParseMarketCode(argv[2]);
-  if (code.empty()) { std::cerr << "缺市场前缀（sh/sz/bj）\n"; return 1; }
+  if (argc < 3) { std::cerr << "用法: tdx finance <sh|sz|bj><code> [code...]\n"; return 1; }
+  std::vector<std::pair<Market, std::string>> targets;
+  for (int i = 2; i < argc; ++i) {
+    auto [m, c] = tdx::ParseMarketCode(argv[i]);
+    if (c.empty()) { std::cerr << argv[i] << ": 缺市场前缀（sh/sz/bj）\n"; return 1; }
+    targets.emplace_back(m, std::move(c));
+  }
   quotes::StdQuotes sq;
-  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
-  auto f = sq.GetFinance(market, code);
-  printf("%s 财务:\n", code.c_str());
-  printf("  流通股本: %.0f万股  总股本: %.0f万股  每股收益: %.4f\n", f.liutongguben, f.zongguben, f.meigushouyi);
-  printf("  上市日期: %u  行业: %d  省份: %d\n", f.ipo_date, f.industry, f.province);
-  printf("  每股净资产: %.4f  营业收入: %.0f  净利润: %.0f\n", f.meigujinzichan, f.yinyezongshouru, f.guimujinlirun);
+  if (auto ec = sq.Connect()) { std::cerr << "opentdx 连接失败: " << ec.message() << "\n"; return 1; }
+  using tdx::taos::TaosConfig;
+  using tdx::taos::TaosConnection;
+  using tdx::taos::ExecSQL;
+  TaosConnection conn(TaosConfig::FromEnv());
+  if (!conn) { std::cerr << "TDengine 连接失败\n"; return 1; }
+  ExecSQL(conn.native(), "USE tdx");
+  tdx::taos::EnsureFinanceTable(conn.native());
+
+  int64_t now_ms = static_cast<int64_t>(std::time(nullptr)) * 1000LL;
+  int ok = 0;
+  for (auto& [market, code] : targets) {
+    auto cleared = tdx::taos::ClearFinance(conn.native(), code);
+    auto f = sq.GetFinance(market, code);
+    // 过滤全 0 空壳（code 不存在）。任一字段非 0 即入库（含 ETF/基金/指数）。
+    if (f.code.empty() || (f.liutongguben == 0.0 && f.zongguben == 0.0 &&
+        f.ipo_date == 0 && f.industry == 0)) {
+      std::cerr << code << ": 空壳响应，跳过（已清 " << cleared << " 行）\n";
+      continue;
+    }
+    auto n = tdx::taos::InsertFinanceFull(conn.native(), f, now_ms);
+    if (n > 0) {
+      ++ok;
+      std::cout << code << ": finance 重导完成（清 " << cleared << " → 写 1 行 34 列）\n";
+    } else {
+      std::cerr << code << ": 写入失败\n";
+    }
+  }
+  std::cout << "=== finance 完成，" << ok << "/" << targets.size() << " 只 ===\n";
   return 0;
 }
 
-// ---- F10 0x2cf/0x2d0 ----
+// ---- F10 0x2cf/0x2d0：清库后从网络重导（目录 + 全文切片）----
 int DoF10(int argc, char** argv) {
-  if (argc < 3) { std::cerr << "用法: tdx f10 <sh|sz|bj><code>\n"; return 1; }
-  auto [market, code] = tdx::ParseMarketCode(argv[2]);
-  if (code.empty()) { std::cerr << "缺市场前缀（sh/sz/bj）\n"; return 1; }
+  if (argc < 3) { std::cerr << "用法: tdx f10 <sh|sz|bj><code> [code...]\n"; return 1; }
+  std::vector<std::pair<Market, std::string>> targets;
+  for (int i = 2; i < argc; ++i) {
+    auto [m, c] = tdx::ParseMarketCode(argv[i]);
+    if (c.empty()) { std::cerr << argv[i] << ": 缺市场前缀（sh/sz/bj）\n"; return 1; }
+    targets.emplace_back(m, std::move(c));
+  }
   quotes::StdQuotes sq;
-  if (auto ec = sq.Connect()) { std::cerr << "连接失败: " << ec.message() << "\n"; return 1; }
-  auto cats = sq.GetF10Category(market, code);
-  std::cout << code << " F10 目录 (" << cats.size() << " 项):\n";
-  for (const auto& c : cats)
-    printf("  %s [%s] start=%u len=%u\n", c.name.c_str(), c.filename.c_str(), c.start, c.length);
+  if (auto ec = sq.Connect()) { std::cerr << "opentdx 连接失败: " << ec.message() << "\n"; return 1; }
+  using tdx::taos::TaosConfig;
+  using tdx::taos::TaosConnection;
+  using tdx::taos::ExecSQL;
+  TaosConnection conn(TaosConfig::FromEnv());
+  if (!conn) { std::cerr << "TDengine 连接失败\n"; return 1; }
+  ExecSQL(conn.native(), "USE tdx");
+  tdx::taos::EnsureF10Tables(conn.native());
+
+  // day_ts = 当日 00:00 CST 毫秒，全文切片 ts = day_ts + seq（重导覆盖不膨胀）。
+  std::time_t now = std::time(nullptr);
+  std::tm lt{}; localtime_r(&now, &lt);
+  lt.tm_hour = 0; lt.tm_min = 0; lt.tm_sec = 0;
+  int64_t now_ms = static_cast<int64_t>(std::time(nullptr)) * 1000LL;
+  int64_t day_ts = static_cast<int64_t>(std::mktime(&lt)) * 1000LL;
+
+  int ok = 0;
+  for (auto& [market, code] : targets) {
+    int64_t cleared = tdx::taos::ClearF10(conn.native(), code);
+    auto cats = sq.GetF10Category(market, code);
+    if (cats.empty()) {
+      std::cerr << code << ": 无 F10 目录（已清 " << cleared << " 子表）\n";
+      continue;
+    }
+    int64_t cat_n = tdx::taos::InsertF10Cat(conn.native(), cats, code, now_ms);
+    int64_t text_n = 0;
+    for (size_t j = 0; j < cats.size(); ++j) {
+      auto full = sq.GetF10FullText(market, code, cats[j]);
+      text_n += tdx::taos::InsertF10Text(conn.native(), code, j, cats[j], full, day_ts);
+    }
+    ++ok;
+    std::cout << code << ": F10 重导完成（清 " << cleared << " 子表，目录 " << cat_n
+              << " + 切片 " << text_n << "，" << cats.size() << " 类）\n";
+  }
+  std::cout << "=== f10 完成，" << ok << "/" << targets.size() << " 只 ===\n";
   return 0;
 }
 
@@ -616,7 +751,7 @@ static void PrintUsage() {
             << "  tdx cleanup                     清理非A股/退市标的子表\n"
             << "  tdx truncate-quotes             清空实时行情表（DROP+重建）\n"
             << "  tdx pull-kline <code> [code...] 网络拉取日线→TDengine（补导缺失代码）\n"
-            << "  tdx sync-kline <code> [code...] [periods] [count]  当日K线→TDengine（1d/5m/1m，盘中刷新）\n"
+            << "  tdx sync-kline <code> [code...] [periods] [count]  当日K线→TDengine（1d/5m/1m，循环刷新）\n"
             << "  tdx finance <code>              财务数据\n"
             << "  tdx f10 <code>                  F10基本资料\n"
             << "  tdx history-orders <code> <date> 历史委托(YYYYMMDD)\n"

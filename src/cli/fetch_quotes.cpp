@@ -58,8 +58,6 @@ ABSL_FLAG(bool, with_tx, false, "同步采集逐笔成交 0xfc5");
 ABSL_FLAG(bool, with_tick, false, "同步采集分时图 0x537");
 ABSL_FLAG(bool, with_index, false, "同步采集指数信息 0x51d");
 ABSL_FLAG(bool, with_unusual, false, "同步采集主力异动 0x563");
-ABSL_FLAG(bool, with_finance, false, "采集财务数据 0x10");
-ABSL_FLAG(bool, with_f10, false, "采集F10资料 0x2cf/0x2d0");
 ABSL_FLAG(bool, with_vol, false, "采集成交量分布 0x51a");
 ABSL_FLAG(bool, with_hist, false, "采集历史委托+逐笔 0xfb4/0xfb5");
 ABSL_FLAG(bool, with_board, false, "采集板块列表+资金流向 0x1231/0x1218");
@@ -150,34 +148,10 @@ std::string Esc(std::string_view s) {
   return out;
 }
 
-// F10 正文专用转义：TDengine SQL 字面量支持 \\ \' \n \r \t 转义序列。
-// 必须转义换行/制表（否则字面量跨行触发 SQL 语法错误 0x0216）、反斜杠、单引号；
-// 其他控制字符（\b \f \v 等 F10 文本残留）TDengine 字面量无法表达，替换为空格。
-std::string EscText(const std::string& s) {
-  std::string out;
-  out.reserve(s.size() + 8);
-  for (unsigned char ch : s) {
-    switch (ch) {
-      case '\\': out += "\\\\"; break;
-      case '\'': out += "\\'"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:
-        if (ch < 0x20 || ch == 0x7F) {
-          out += ' ';  // 其他控制字符：替换空格
-        } else {
-          out += static_cast<char>(ch);
-        }
-    }
-  }
-  return out;
-}
-
 // ---- 建表 & INSERT 辅助 ----
 
 void EnsureTables(TAOS* conn, bool do_tx, bool do_tick, bool do_idx, bool do_unu,
-                  bool do_fin, bool do_f10, bool do_vol, bool do_hist) {
+                  bool do_vol, bool do_hist) {
   tdx::taos::ExecSQL(conn, "USE tdx");
   tdx::taos::ExecSQL(conn,
     "CREATE STABLE IF NOT EXISTS quote (ts TIMESTAMP, price DOUBLE, pre_close DOUBLE, "
@@ -200,22 +174,6 @@ void EnsureTables(TAOS* conn, bool do_tx, bool do_tick, bool do_idx, bool do_unu
   if (do_unu) tdx::taos::ExecSQL(conn,
     "CREATE STABLE IF NOT EXISTS unusual (ts TIMESTAMP, unusual_type TINYINT, "
     "descr VARCHAR(64), val DOUBLE, val_str VARCHAR(64)) TAGS (code VARCHAR(10))");
-  if (do_fin) tdx::taos::ExecSQL(conn,
-    "CREATE STABLE IF NOT EXISTS finance (ts TIMESTAMP, liutongguben DOUBLE, "
-    "zongguben DOUBLE, meigushouyi DOUBLE, meigujinzichan DOUBLE, "
-    "yinyezongshouru DOUBLE, guimujinlirun DOUBLE, ipo_date INT, industry INT) "
-    "TAGS (code VARCHAR(10))");
-  if (do_f10) {
-    tdx::taos::ExecSQL(conn,
-      "CREATE STABLE IF NOT EXISTS f10_cat (ts TIMESTAMP, cat_name VARCHAR(64), "
-      "filename VARCHAR(80), start_pos INT, len_val INT) TAGS (code VARCHAR(10))");
-    // F10 全文（单分类可达 76KB，超 TDengine 单行上限 → 按 3900 字符切片，seq 为片序）。
-    // content 列独占 row，cat_name/filename 放 TAG 不占 row size。
-    tdx::taos::ExecSQL(conn,
-      "CREATE STABLE IF NOT EXISTS f10_text (ts TIMESTAMP, seq SMALLINT, "
-      "content NCHAR(1000), content_len INT) "
-      "TAGS (code VARCHAR(10), cat_name VARCHAR(64), filename VARCHAR(80))");
-  }
   if (do_vol) tdx::taos::ExecSQL(conn,
     "CREATE STABLE IF NOT EXISTS vol (ts TIMESTAMP, price DOUBLE, pre_close DOUBLE, "
     "open DOUBLE, high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE) "
@@ -383,91 +341,7 @@ int64_t DayStartMs() {
 }
 
 // ==================== 采集核心 ====================
-// ---- finance/F10/vol/hist INSERT helpers ----
-int64_t InsertFinance(TAOS* conn, const Finance& f, int64_t now_ms) {
-  if (!tdx::util::IsValidCode(f.code)) return 0;
-  std::ostringstream sql;
-  sql << "INSERT INTO fn_" << f.code << " USING finance TAGS('" << Esc(f.code) << "') VALUES("
-      << now_ms << "," << f.liutongguben << "," << f.zongguben << ","
-      << f.meigushouyi << "," << f.meigujinzichan << ","
-      << f.yinyezongshouru << "," << f.guimujinlirun << ","
-      << (int)f.ipo_date << "," << f.industry << ")";
-  return ExecSql(conn, sql.str());
-}
-
-int64_t InsertF10Cat(TAOS* conn, const std::vector<F10Category>& cats,
-                      std::string_view code, int64_t now_ms) {
-  if (cats.empty() || !tdx::util::IsValidCode(code)) return 0; int64_t written = 0;
-  std::string esc_code = Esc(code);
-  for (size_t i = 0; i < cats.size(); i += 50) {
-    size_t end = std::min(i + 50, cats.size());
-    std::ostringstream sql; sql << "INSERT INTO ";
-    for (size_t j = i; j < end; ++j) {
-      if (j > i) sql << ' ';
-      sql << "fc_" << code << "_" << j << " USING f10_cat TAGS('" << esc_code << "') VALUES("
-          << now_ms << ",'" << Esc(cats[j].name) << "','" << Esc(cats[j].filename) << "',"
-          << cats[j].start << "," << cats[j].length                    << ")";
-    }
-    int64_t n = ExecSql(conn, sql.str()); if (n < 0) break; written += static_cast<int64_t>(end - i);
-  }
-  return written;
-}
-
-// 分页拉取 F10 单分类全文。cat.start 为该分类在全文件中的累计偏移，cat.length 为 GBK 字节总长。
-// 响应 12B 头中 length(u16) 为本次返回字节数（≤65535），而单分类可达 76KB → 必须分页循环。
-// 累积原始 GBK 字节、末尾统一 gbk_to_utf8 解码，避免双字节字符在分页边界被切断。
-std::string FetchF10FullText(proto::Connection& conn, Market mkt, const std::string& code,
-                             const F10Category& cat) {
-  std::string gbk_raw;
-  gbk_raw.reserve(cat.length);
-  constexpr uint32_t kChunk = 32000;
-  for (uint32_t offset = 0; offset < cat.length; ) {
-    uint32_t want = std::min<uint32_t>(kChunk, cat.length - offset);
-    auto body = proto::serialize_f10_content(mkt, code, cat.filename, cat.start + offset, want);
-    auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgF10Content,
-                            body.data(), body.size()));
-    if (resp.body.size() < 12) break;
-    uint16_t got = static_cast<uint16_t>(resp.body[10]) |
-                   static_cast<uint16_t>(static_cast<uint16_t>(resp.body[11]) << 8);
-    if (got == 0) break;
-    if (static_cast<std::size_t>(12) + got > resp.body.size()) break;  // 响应不完整
-    gbk_raw.append(reinterpret_cast<const char*>(resp.body.data() + 12), got);
-    offset += got;
-    // 不因 got<want 提前终止——服务端可能分片返回，须持续拉至 offset>=length 或 got==0。
-  }
-  return tdx::util::gbk_to_utf8(gbk_raw);
-}
-
-// F10 全文按 1000 字节切片入库 f10_text，子表 ft_<code>_<j>（j 对齐 f10_cat 的目录序号）。
-// ts = day_ts + seq：同日 --loop 重复采集时相同 (子表,ts) 覆盖、不膨胀。content_len 记完整字符数。
-int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
-                      const F10Category& cat, const std::string& full, int64_t day_ts) {
-  if (full.empty() || !tdx::util::IsValidCode(code)) return 0;
-  constexpr size_t kSlice = 1000;
-  std::ostringstream tb;
-  tb << "ft_" << code << "_" << j;
-  const std::string esc_code = Esc(code), esc_cat = Esc(cat.name), esc_fn = Esc(cat.filename);
-  const std::string tb_name = tb.str();
-  int64_t written = 0;
-  for (size_t pos = 0, seq = 0; pos < full.size(); ++seq) {
-    size_t end = std::min(pos + kSlice, full.size());
-    // 切片边界对齐 UTF-8 字符（非尾片时），回退到非续字节。
-    if (end < full.size()) {
-      while (end > pos && (static_cast<unsigned char>(full[end]) & 0xC0) == 0x80)
-        --end;
-    }
-    std::ostringstream sql;
-    sql << "INSERT INTO " << tb_name << " USING f10_text TAGS('" << esc_code << "','"
-        << esc_cat << "','" << esc_fn << "') VALUES("
-        << (day_ts + static_cast<int64_t>(seq)) << "," << seq << ",'"
-        << EscText(full.substr(pos, end - pos)) << "'," << full.size() << ")";
-    if (ExecSql(conn, sql.str()) < 0) continue;  // 单片失败不中断分类
-    ++written;
-    pos = end;  // ponytail: pos = end 非 pos += kSlice——否则跳过回退字节产生断裂 UTF-8
-  }
-  return written;
-}
-
+// ---- vol/hist INSERT helpers（f10/finance 已分离到独立命令 tdx f10/finance）----
 int64_t InsertVol(TAOS* conn, const VolProfile& vp, int64_t now_ms) {
   if (!tdx::util::IsValidCode(vp.code)) return 0;
   std::ostringstream sql;
@@ -523,19 +397,15 @@ struct FetchChunk {
   std::vector<Quote> quotes;
   struct TxData { std::string code; std::vector<Transaction> txns; };
   struct TickData { std::string code; std::vector<Tick> ticks; };
-  struct F10Data { std::string code; std::vector<F10Category> cats;
-                   std::vector<std::pair<size_t, std::string>> texts; };  // (cat_idx, full_utf8)
   std::vector<TxData> txns;
   std::vector<TickData> ticks;
   std::vector<IndexInfo> indices;
   std::vector<UnusualItem> unusuals;
-  std::vector<Finance> finances;
   std::vector<VolProfile> vols;
   struct HistOrdData { std::string code; std::vector<HistoryOrder> orders; };
   struct HistTxData { std::string code; std::vector<HistoryTransaction> txns; };
   std::vector<HistOrdData> hist_ords;
   std::vector<HistTxData> hist_txs;
-  std::vector<F10Data> f10s;
   int errors = 0;
 };
 
@@ -543,7 +413,7 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
                ::util::FiberSocketBase::endpoint_type ep,
                const std::vector<std::string>& codes, int n, int batch_size,
                bool do_tx, bool do_tick, bool do_idx, bool do_unu,
-               bool do_fin, bool do_f10, bool do_vol, bool do_hist,
+               bool do_vol, bool do_hist,
                int wi, std::vector<FetchChunk>& chunks, ::util::fb2::Mutex& mu) {
   proto::Connection conn(pb);
   if (conn.Connect(ep)) { std::lock_guard<::util::fb2::Mutex> lk(mu); chunks.back().errors++; return; }
@@ -627,43 +497,9 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
       }
     }
 
-    // finance/F10/hist 是每股票数据：各 worker 采自己分片内的票（勿限 wi==0，否则只采 1/jobs）。
+    // hist 是每股票数据：各 worker 采自己分片内的票（勿限 wi==0，否则只采 1/jobs）。
     // unusual 才是市场级（全局拉一次），仍限 wi==0（见下）。
-    if (do_fin) {
-      for (const auto& req : batch) {
-        try {
-          auto body = proto::serialize_finance(req.market, req.code);
-          auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgFinance,
-                                  body.data(), body.size()));
-          auto f = proto::deserialize_finance(resp.body.data(), resp.body.size());
-          // 过滤完全无效的全 0 空壳（code 不存在的响应）。ETF/基金/指数有股本+IPO（无 EPS/行业），
-          // 个股有 EPS/行业——任一字段非 0 即入库。v0.14.0 旧条件 industry||EPS 太严，误删 ETF/基金/指数。
-          if (!f.code.empty() && (f.liutongguben != 0.0 || f.zongguben != 0.0 ||
-                                   f.ipo_date != 0 || f.industry != 0 || f.meigushouyi != 0.0))
-            local.finances.push_back(std::move(f));
-        } catch (...) {}
-      }
-    }
-    if (do_f10) {
-      for (const auto& req : batch) {
-        try {
-          auto body = proto::serialize_f10_category(req.market, req.code);
-          auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgF10Category,
-                                  body.data(), body.size()));
-          auto cats = proto::deserialize_f10_category(resp.body.data(), resp.body.size());
-          if (!cats.empty()) {
-            FetchChunk::F10Data fd;
-            fd.code = req.code;
-            fd.cats = std::move(cats);
-            for (size_t j = 0; j < fd.cats.size(); ++j) {
-              auto full = FetchF10FullText(conn, req.market, req.code, fd.cats[j]);
-              if (!full.empty()) fd.texts.push_back({j, std::move(full)});
-            }
-            local.f10s.push_back(std::move(fd));
-          }
-        } catch (...) {}
-      }
-    }
+    // f10/finance 已分离到独立命令 tdx f10 / tdx finance（清库重导），不在 fetch-quotes 采集。
     if (do_hist) {
       time_t now_t = std::time(nullptr);
       struct tm now_tm{};
@@ -709,7 +545,7 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
 
 struct Counters {
   int64_t quote = 0, tx = 0, tick = 0, index = 0, unusual = 0;
-  int64_t finance = 0, f10 = 0, vol = 0, hist = 0;
+  int64_t vol = 0, hist = 0;
   int errors = 0;
   int64_t dropped = 0;  // 异步入库队列满丢弃的 chunk 数（设计 §D4 背压）
   int64_t skipped = 0;  // 非当日数据被拦截数
@@ -726,7 +562,7 @@ bool IsQuoteValid(int64_t epoch_sec, int64_t now_epoch) {
 // 单 chunk 落库（同步路径与 IngestWorker 共用）。抽取自原阶段B 入库循环。
 void IngestChunk(TAOS* conn, FetchChunk& ch, int64_t now_ms, int64_t day_ts,
                  bool do_tx, bool do_tick, bool do_idx, bool do_unu,
-                 bool do_fin, bool do_f10, bool do_vol, bool do_hist, Counters& cnt) {
+                 bool do_vol, bool do_hist, Counters& cnt) {
   if (!ch.quotes.empty()) {
     int64_t now_epoch = now_ms / 1000;
     std::vector<Quote> valid; valid.reserve(ch.quotes.size());
@@ -746,23 +582,16 @@ void IngestChunk(TAOS* conn, FetchChunk& ch, int64_t now_ms, int64_t day_ts,
   for (auto& td : ch.ticks) cnt.tick += InsertTick(conn, td.ticks, td.code, day_ts);
   for (auto& ii : ch.indices) cnt.index += InsertIdx(conn, ii, now_ms);
   if (!ch.unusuals.empty()) cnt.unusual += InsertUnu(conn, ch.unusuals, now_ms);
-  for (auto& f : ch.finances) if (InsertFinance(conn, f, now_ms) > 0) cnt.finance++;
   for (auto& vp : ch.vols) if (InsertVol(conn, vp, now_ms) > 0) cnt.vol++;
   for (auto& ho : ch.hist_ords) cnt.hist += InsertHistOrd(conn, ho.orders, ho.code, day_ts);
   for (auto& ht : ch.hist_txs) cnt.hist += InsertHistTx2(conn, ht.txns, ht.code, day_ts);
-  for (auto& fd : ch.f10s) {
-    if (!fd.cats.empty()) { InsertF10Cat(conn, fd.cats, fd.code, now_ms); cnt.f10++; }
-    for (auto& [j, text] : fd.texts) {
-      cnt.f10 += InsertF10Text(conn, fd.code, j, fd.cats[j], text, day_ts);
-    }
-  }
   cnt.errors += ch.errors;
 }
 
 // 单轮采集：两阶段——fiber 拉取 → 主线程写 mmap 快照 / 投递异步入库（或同步入库）
 Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_size,
                      bool do_tx, bool do_tick, bool do_idx, bool do_unu,
-                     bool do_fin, bool do_f10, bool do_vol, bool do_hist,
+                     bool do_vol, bool do_hist,
                      tdx::shm::Segment* shm,
                      folly::ProducerConsumerQueue<FetchChunk>* ingest_q) {
   Counters cnt;
@@ -799,7 +628,7 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
             ::util::fb2::Fiber::Opts{.stack_size = 128 * 1024},
             [&, wi] { WorkerRun(pb, ep, codes, n, batch_size,
                                 do_tx, do_tick, do_idx, do_unu,
-                                do_fin, do_f10, do_vol, do_hist, wi, chunks, mu); }));
+                                do_vol, do_hist, wi, chunks, mu); }));
       }
       for (auto& w : workers) w.Join();
     });
@@ -840,10 +669,10 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
   tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
   tdx::taos::TaosConnection tconn(tcfg);
   if (!tconn) { cnt.errors++; return cnt; }
-  EnsureTables(tconn.native(), do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
+  EnsureTables(tconn.native(), do_tx, do_tick, do_idx, do_unu, do_vol, do_hist);
   for (auto& ch : chunks) {
     IngestChunk(tconn.native(), ch, now_ms, day_ts,
-                do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist, cnt);
+                do_tx, do_tick, do_idx, do_unu, do_vol, do_hist, cnt);
   }
   return cnt;
 }
@@ -854,7 +683,7 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
 void IngestWorker(tdx::shm::SegmentHeader* shm_header,
                   folly::ProducerConsumerQueue<FetchChunk>& q,
                   bool do_tx, bool do_tick, bool do_idx, bool do_unu,
-                  bool do_fin, bool do_f10, bool do_vol, bool do_hist) {
+                  bool do_vol, bool do_hist) {
   tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
   std::unique_ptr<tdx::taos::TaosConnection> conn;  // 惰性：延迟到首次有数据才连接，避免 taos_connect 阻塞 join
   bool tables_ok = false;
@@ -862,7 +691,7 @@ void IngestWorker(tdx::shm::SegmentHeader* shm_header,
     if (!conn) {
       conn = std::make_unique<tdx::taos::TaosConnection>(tcfg);
       if (!*conn) { conn.reset(); return; }  // 连接失败，下轮重试
-      EnsureTables(conn->native(), do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
+      EnsureTables(conn->native(), do_tx, do_tick, do_idx, do_unu, do_vol, do_hist);
       tables_ok = true;
     }
     if (!tables_ok) return;
@@ -872,7 +701,7 @@ void IngestWorker(tdx::shm::SegmentHeader* shm_header,
           std::chrono::system_clock::now().time_since_epoch()).count();
       Counters dummy;
       IngestChunk(conn->native(), ch, now_ms, DayStartMs(),
-                  do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist, dummy);
+                  do_tx, do_tick, do_idx, do_unu, do_vol, do_hist, dummy);
     }
     if (shm_header) shm_header->last_ingested_epoch.store(
         static_cast<uint64_t>(std::time(nullptr)), std::memory_order_release);
@@ -896,8 +725,6 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   bool do_tick = absl::GetFlag(FLAGS_with_tick);
   bool do_idx = absl::GetFlag(FLAGS_with_index);
   bool do_unu  = absl::GetFlag(FLAGS_with_unusual);
-  bool do_fin  = absl::GetFlag(FLAGS_with_finance);
-  bool do_f10  = absl::GetFlag(FLAGS_with_f10);
   bool do_vol  = absl::GetFlag(FLAGS_with_vol);
   bool do_hist = absl::GetFlag(FLAGS_with_hist);
   bool do_brd  = absl::GetFlag(FLAGS_with_board);
@@ -938,8 +765,6 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   if (do_tick) std::cerr << " +tick";
   if (do_idx) std::cerr << " +idx";
   if (do_unu) std::cerr << " +unu";
-  if (do_fin) std::cerr << " +fin";
-  if (do_f10) std::cerr << " +f10";
   if (do_vol) std::cerr << " +vol";
   if (do_hist) std::cerr << " +hist";
   if (do_brd) std::cerr << " +board";
@@ -957,7 +782,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     ingest_q = std::make_unique<folly::ProducerConsumerQueue<FetchChunk>>(64);
     std::signal(SIGINT, OnSignal); std::signal(SIGTERM, OnSignal);  // 异步模式需 g_stop 控制 worker
     ingest_worker = std::thread(IngestWorker, &shm->Header(), std::ref(*ingest_q),
-                                do_tx, do_tick, do_idx, do_unu, do_fin, do_f10, do_vol, do_hist);
+                                do_tx, do_tick, do_idx, do_unu, do_vol, do_hist);
     std::cerr << "异步入库已启用，共享内存: " << mmap_path << "\n";
   } else if (loop) {
     std::signal(SIGINT, OnSignal); std::signal(SIGTERM, OnSignal);
@@ -969,18 +794,16 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     ++round;
     auto t0 = std::chrono::steady_clock::now();
     auto cnt = RunOneRound(codes, jobs, batch_size, do_tx, do_tick, do_idx, do_unu,
-                           do_fin, do_f10, do_vol, do_hist, shm.get(), ingest_q.get());
+                           do_vol, do_hist, shm.get(), ingest_q.get());
     total.quote += cnt.quote; total.tx += cnt.tx; total.tick += cnt.tick;
     total.index += cnt.index; total.unusual += cnt.unusual;
-    total.finance += cnt.finance; total.f10 += cnt.f10; total.vol += cnt.vol; total.hist += cnt.hist;
+    total.vol += cnt.vol; total.hist += cnt.hist;
     total.dropped += cnt.dropped; total.skipped += cnt.skipped;
     total.errors += cnt.errors;
 
     std::cerr << "第" << round << "轮:"
               << " quote=" << cnt.quote << " tx=" << cnt.tx
               << " tick=" << cnt.tick << " idx=" << cnt.index << " unu=" << cnt.unusual;
-    if (cnt.finance) std::cerr << " fin=" << cnt.finance;
-    if (cnt.f10) std::cerr << " f10=" << cnt.f10;
     if (cnt.vol) std::cerr << " vol=" << cnt.vol;
     if (cnt.hist) std::cerr << " hist=" << cnt.hist;
     if (cnt.errors) std::cerr << " err=" << cnt.errors;
@@ -1010,8 +833,6 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
             << " quote:" << total.quote << " tx:" << total.tx
             << " tick:" << total.tick << " idx:" << total.index
             << " unu:" << total.unusual;
-  if (total.finance) std::cerr << " fin:" << total.finance;
-  if (total.f10) std::cerr << " f10:" << total.f10;
   if (total.vol) std::cerr << " vol:" << total.vol;
   if (total.hist) std::cerr << " hist:" << total.hist;
   if (total.dropped) std::cerr << " dropped:" << total.dropped;

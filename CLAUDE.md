@@ -22,6 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.14.1**：`index-info` 指数价格 /100 缩放修复（`deserialize_index_info` 根源层，CLI 显示 + idx_info 入库一致）+ `unusual` 校验 market∈{0,1,2} + `board-quotes` 校验 board_id（防误用静默错路由）
 - **v0.14.2**：`finance` 过滤条件过严修复——v0.14.0 `industry||每股收益` 误删 ETF/基金/指数（个股字段对它们恒 0），改为任一字段非 0 即入库（ETF/基金有股本+IPO、指数有股本汇总）；`f10` 对 ETF/指数/基金本就完整无 bug
 - **v0.14.3**：修复 `pull-kline` 两个缺陷——①清库后不建 `kline`/`adjust` 表（补 `CREATE STABLE IF NOT EXISTS`）；②遗漏复权因子拉取（补 xdxr 0x0f，`NeedsAdjust` 判定个股，`ImportKlineFromNetwork` 独立完整可用）
+- **v0.14.5**：①历史 K 线数据流重构——`tdx import` 默认从 vipdoc 导入历史 1d/1m/5m（默认仅导自选股 `zxg.blk`，`--all-market` 全市场，`--full-reset` 首次迁移全清；`ClearTodayIntraday` 增量留历史只清当日）；当日盘中由 `tdx sync-kline` 默认循环刷新（60s 间隔，15:00 后 3 轮无新 bar 退出，trading-hours + OHLC 正数/high≥low 过滤）。②`deserialize_kline` D7 交易时段校验拦截脏 bar。③`f10`/`finance` 从 `fetch-quotes` 分离为独立命令 `tdx f10`/`tdx finance`（清库重导，finance 全 30 列）；④**`deserialize_finance` 协议偏移修复**——对齐 tdxpy 真实布局 `<fHHII+30f>`（含 `zhigonggu` 职工股，旧 opentdx 误标 `meigushouyi` 且少 1 字段导致后续全错位）；股本/资产/负债/收入/利润 ×10000 缩放（万股→股、万元→元），实测 600000 与 mootdx 完全一致
 
 ## 项目目标
 
@@ -239,3 +240,17 @@ ctest --test-dir build -R <test_name> -V
 - 统一 API 与熔断/增量设计：`/home/li/peiking88/tdxdata/api.py`、`tdxdata/core/data_manager.py`、`tdxdata/errors.py`、`tdxdata/sync.py`。
 - 复权计算与时段重采样：`/home/li/peiking88/tdxdata/sources/adjust.py`、`base.py`。
 - 用户全局开发规范：`~/.claude/CLAUDE.md`（Git 认证、中文、编译并行参数、测试覆盖率>80%、精度格式等，本项目一并遵循）。
+
+## 数据导入架构（v0.14.5）
+
+**历史 K 线 = vipdoc，当日盘中 = 网络**：
+
+| 数据来源 | 命令 | 周期 | 范围 |
+|---|---|---|---|
+| 本地 vipdoc | `tdx import` | 1d/1m/5m | 历史（今日之前） |
+| 网络 | `tdx sync-kline` | 1d/5m/1m | 当日盘中 |
+
+- `tdx import` 默认仅导自选股 `zxg.blk`（与 `fetch-quotes` 一致），加 `--all-market` 导全市场
+- 导入时自动 DROP+重建 1d/1m/5m 子表，清除网络旧数据（含解析错位产生的 23:55/16:39 脏 bar）
+- Parser 层 D7 校验：分钟 bar 须在 9:30–11:30 或 13:00–15:00，否则丢弃
+- `sync-kline` 仅保留当日 bar + 交易时段校验 + OHLC 正数/high≥low

@@ -17,8 +17,12 @@ namespace {
 
 struct ImportConfig {
   std::string vipdoc_path = "";  // ponytail: 默认空，由 TDX_HOME 环境变量设定
+  std::string zxg_blk = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk";
   std::string engine = "taos";  // 默认 taos
   bool no_adjust = false;
+  bool clear_intraday = true;  // 清当日盘中数据（增量留历史）
+  bool full_reset = false;     // 首次迁移：DROP 整表全清
+  bool all_market = false;     // 导入全市场（默认仅导入自选股 zxg.blk）
   std::vector<std::string> codes;
   tdx::taos::TaosConfig taos = tdx::taos::TaosConfig::FromEnv();
 };
@@ -33,6 +37,10 @@ ImportConfig ParseArgs(int argc, char** argv) {
     std::string a = argv[i];
     if (a == "--jobs") { ++i; continue; }
     if (a.rfind("--jobs=", 0) == 0) continue;
+    if (a == "--no-clear-intraday") { cfg.clear_intraday = false; continue; }
+    if (a == "--full-reset") { cfg.full_reset = true; cfg.clear_intraday = false; continue; }
+    if (a == "--all-market") { cfg.all_market = true; continue; }
+    if (a == "--zxg-blk") { if (i + 1 < argc) cfg.zxg_blk = argv[++i]; continue; }
     if (a == "taos") cfg.engine = "taos";
     else if (a == "duckdb") {
       std::cerr << "错误: DuckDB 引擎已移除，请使用 taos。\n";
@@ -41,8 +49,17 @@ ImportConfig ParseArgs(int argc, char** argv) {
     else if (a == "help") {
       std::cout << "用法: tdx import [taos] [codes...]\n\n"
                 << "  taos            存储引擎（默认）\n"
-                << "  codes...        股票代码（默认扫描 vipdoc 全部）\n\n"
+                << "  codes...        股票代码（默认仅导入自选股 zxg.blk）\n"
+                << "  --all-market    导入全市场（默认仅导入自选股）\n"
+                << "  --zxg-blk PATH  自选股文件路径\n"
+                << "  --full-reset    首次迁移：DROP 整表全清后 vipdoc 全量重建\n"
+                << "  --no-clear-intraday  不清当日（保留 sync-kline 写的盘中数据）\n\n"
+                << "说明: 历史增量从 vipdoc 导入，默认只清当日盘中（sync-kline 循环刷新）。"
+                << "首次迁移历史脏数据用 --full-reset。"
+                << "默认仅导自选股（与 fetch-quotes 一致），--all-market 导全市场。\n\n"
                 << "环境变量:\n"
+                << "  TDX_ZXG_BLK      自选股文件路径（覆盖 --zxg-blk）\n\n"
+                << "其他环境变量:\n"
                 << "  TDX_HOME         vipdoc 路径（当前: " << cfg.vipdoc_path << "）\n"
                 << "  TDX_NO_ADJUST=1  跳过复权因子\n"
                 << "  TDX_TAOS_HOST    TDengine 主机（默认 localhost）\n"
@@ -73,11 +90,15 @@ int DoImport(int argc, char** argv, int jobs) {
   }
 
   tdx::taos::ImportTaosConfig tcfg;
-  tcfg.taos        = cfg.taos;
-  tcfg.vipdoc_path = cfg.vipdoc_path;
-  tcfg.no_adjust   = cfg.no_adjust;
-  tcfg.jobs        = jobs;
-  tcfg.codes       = cfg.codes;
+  tcfg.taos            = cfg.taos;
+  tcfg.vipdoc_path     = cfg.vipdoc_path;
+  tcfg.zxg_blk         = cfg.zxg_blk;
+  tcfg.no_adjust       = cfg.no_adjust;
+  tcfg.clear_intraday  = cfg.clear_intraday;
+  tcfg.full_reset      = cfg.full_reset;
+  tcfg.all_market      = cfg.all_market;
+  tcfg.jobs            = jobs;
+  tcfg.codes           = cfg.codes;
   auto result = tdx::taos::DoImportTaos(tcfg);
   return (result.kline_rows >= 0) ? 0 : 1;
 }

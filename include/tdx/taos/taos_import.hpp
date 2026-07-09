@@ -15,7 +15,11 @@ namespace tdx::taos {
 struct ImportTaosConfig {
   TaosConfig taos;
   std::string vipdoc_path = "/home/li/.local/share/tdxcfv/drive_c/tc/vipdoc";
+  std::string zxg_blk = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk";
   bool no_adjust = false;
+  bool clear_intraday = true;  // 清当日 1d/1m/5m 盘中数据（增量留历史）
+  bool full_reset = false;     // 首次迁移：DROP 整表全清，vipdoc 全量重建
+  bool all_market = false;     // 导入全市场（默认仅导入自选股 zxg.blk）
   int  jobs = 1;  // 0 = auto (hardware_concurrency)
   std::vector<std::string> codes;
 };
@@ -54,5 +58,20 @@ NetworkImportResult ImportKlineFromNetwork(TAOS* conn,
 // 返回实际写入行数；DB 错误返回 -1。调用前需 USE tdx + 确保 kline 超级表存在。
 int64_t UpsertBars(TAOS* conn, Market market, const std::string& code,
                    const std::string& cycle, const std::vector<KLine>& bars);
+
+// ==================== f10 / finance 独立导入（从 fetch-quotes 分离）====================
+// finance 全列（34 业务字段：股本结构/每股/资产负债/损益/现金流/属性）。
+// 旧库（8 列）通过 ALTER STABLE ADD COLUMN 补齐 26 个缺失列，历史数据 NULL 不丢。
+bool EnsureFinanceTable(TAOS* conn);
+int64_t ClearFinance(TAOS* conn, std::string_view code);           // DROP fn_<code>
+int64_t InsertFinanceFull(TAOS* conn, const Finance& f, int64_t now_ms);  // 写全 34 列
+
+// f10 目录 + 全文切片（单分类可达 76KB，按 1000 字符切片，seq 为片序）。
+bool EnsureF10Tables(TAOS* conn);
+int64_t ClearF10(TAOS* conn, std::string_view code);               // DROP fc|ft_<code>_*
+int64_t InsertF10Cat(TAOS* conn, const std::vector<F10Category>& cats,
+                     std::string_view code, int64_t now_ms);
+int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
+                      const F10Category& cat, const std::string& full, int64_t day_ts);
 
 }  // namespace tdx::taos

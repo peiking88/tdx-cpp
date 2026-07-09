@@ -58,6 +58,8 @@ class StdQuotes {
   // F10 内容 0x2d0
   F10Content GetF10Content(Market market, std::string_view code,
                            std::string_view filename, uint32_t start, uint32_t length);
+  // F10 单分类全文：分页累积 raw GBK，末尾统一 gbk_to_utf8（避免双字节字符在分页边界切断）。
+  std::string GetF10FullText(Market market, std::string_view code, const F10Category& cat);
   // 历史委托 0xfb4
   std::vector<HistoryOrder> GetHistoryOrders(Market market, std::string_view code, uint32_t date_yyyymmdd);
   // 历史逐笔 0xfb5

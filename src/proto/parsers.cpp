@@ -10,6 +10,7 @@
 #include "tdx/proto/codec.hpp"        // get_price / to_datetime
 #include "tdx/util/byte_order.hpp"
 #include "tdx/util/gbk.hpp"
+#include "tdx/util/time_util.hpp"     // IsBarInTradingHours
 
 namespace tdx::proto {
 using tdx::util::push_u16;
@@ -54,6 +55,12 @@ std::vector<KLine> deserialize_kline(const uint8_t* data, std::size_t len, Perio
     uint32_t date_num = util::rd_u32(data + pos);
     pos += 4;
     int64_t datetime = to_datetime(date_num, minute_category);
+
+    // 交易时段校验（D7）：parser 层直接拦截脏数据，不让其进入 DB。
+    // 1d 锚定 15:00 收盘；1m/5m 须在 9:30–11:30 或 13:00–15:00。
+    // 历史脏数据（如 2004-08-24 23:55、2022-09-26 16:39）在这里被丢弃。
+    bool out_of_hours = (datetime > 0 && datetime <= 4102444800LL &&
+                         !tdx::util::IsBarInTradingHours(datetime, period));
 
     // OHLC 顺序：open → close → high → low（反直觉，D3）。每步前检查剩余空间。
     if (pos + 9 > len) break;
@@ -104,7 +111,7 @@ std::vector<KLine> deserialize_kline(const uint8_t* data, std::size_t len, Perio
     bar.amount = static_cast<double>(amount);
     bar.up_count = up_count;
     bar.down_count = down_count;
-    bars.push_back(std::move(bar));
+    if (!out_of_hours) bars.push_back(std::move(bar));
   }
   return bars;
 }
@@ -293,43 +300,34 @@ std::vector<uint8_t> serialize_finance(Market market, std::string_view code) {
 
 Finance deserialize_finance(const uint8_t* data, std::size_t len) {
   Finance f{};
-  // <HB6sfHHIIffffffffffffffffffffffffffffff> = 2+1+6+4+2+2+4+4+29×4 = 141B
-  if (len < 141) return f;
-  f.liutongguben = util::rd_f32(data + 9);                        // +9 = H(2)+B(1)+6s(6)
+  // 对齐 tdxpy GetFinanceInfo：<HB6s + fHHII + 30f> = 2+1+6+4+2+2+4+4 + 30×4 = 145B。
+  // 注意第 12 个 float 是 zhigonggu（职工股），旧 opentdx 误标为 meigushouyi 且少 1 字段 → 后续全错位。
+  if (len < 145) return f;
+  f.liutongguben = util::rd_f32(data + 9) * 10000.0;              // +9 = H(2)+B(1)+6s(6)
   f.province     = util::rd_u16(data + 13);
   f.industry     = util::rd_u16(data + 15);
   f.updated_date = util::rd_u32(data + 17);
   f.ipo_date     = util::rd_u32(data + 21);
+  // 股本/资产/负债/收入/利润 ×10000（万股→股，万元→元），对齐 tdxpy _get_v(v)*10000。
   const uint8_t* p = data + 25;
-  f.zongguben             = util::rd_f32(p);      p += 4;
-  f.guojiagu              = util::rd_f32(p);      p += 4;
-  f.faqirenfarengu        = util::rd_f32(p);      p += 4;
-  f.farengu               = util::rd_f32(p);      p += 4;
-  f.bgu                   = util::rd_f32(p);      p += 4;
-  f.hgu                   = util::rd_f32(p);      p += 4;
-  f.meigushouyi           = util::rd_f32(p);      p += 4;
-  f.zichanzongji          = util::rd_f32(p);      p += 4;
-  f.liudongzichanzongji   = util::rd_f32(p);      p += 4;
-  f.gudingzichanjine      = util::rd_f32(p);      p += 4;
-  f.wuxingzichan          = util::rd_f32(p);      p += 4;
-  f.gudongrenshu          = util::rd_f32(p);      p += 4;
-  f.liudongfuzhaiheji     = util::rd_f32(p);      p += 4;
-  f.changqifuzhai         = util::rd_f32(p);      p += 4;
-  f.zibengongjijin        = util::rd_f32(p);      p += 4;
-  f.guimuquanyineji       = util::rd_f32(p);      p += 4;
-  f.yinyezongshouru       = util::rd_f32(p);      p += 4;
-  f.yinyechengben         = util::rd_f32(p);      p += 4;
-  f.yingshouzhanngkuan    = util::rd_f32(p);      p += 4;
-  f.yinyelirun            = util::rd_f32(p);      p += 4;
-  f.touzishouyi           = util::rd_f32(p);      p += 4;
-  f.jingyinxianjinliujine = util::rd_f32(p);      p += 4;
-  f.zongxianjinliu        = util::rd_f32(p);      p += 4;
-  f.cunhuo                = util::rd_f32(p);      p += 4;
-  f.lirunzonge            = util::rd_f32(p);      p += 4;
-  f.shuihoulirun          = util::rd_f32(p);      p += 4;
-  f.guimujinlirun         = util::rd_f32(p);      p += 4;
-  f.weifenlirun           = util::rd_f32(p);      p += 4;
-  f.meigujinzichan        = util::rd_f32(p);
+  auto x1w = [&]() { double v = util::rd_f32(p) * 10000.0; p += 4; return v; };
+  auto raw = [&]() { double v = util::rd_f32(p); p += 4; return v; };
+  f.zongguben          = x1w();   f.guojiagu        = x1w();
+  f.faqirenfarengu     = x1w();   f.farengu         = x1w();
+  f.bgu                = x1w();   f.hgu             = x1w();
+  f.zhigonggu          = x1w();   f.zongzichan      = x1w();
+  f.liudongzichan      = x1w();   f.gudingzichan    = x1w();
+  f.wuxingzichan       = x1w();   f.gudongrenshu    = raw();   // 股东人数不缩放
+  f.liudongfuzhai      = x1w();   f.changqifuzhai   = x1w();
+  f.zibengongjijin     = x1w();   f.jingzichan      = x1w();
+  f.zhuyingshouu       = x1w();   f.zhuyinglirun    = x1w();
+  f.yingshouzhangkuan  = x1w();   f.yingyelirun     = x1w();
+  f.touzishouyu        = x1w();   f.jingyingxianjinliu = x1w();
+  f.zongxianjinliu     = x1w();   f.cunhuo          = x1w();
+  f.lirunzonghe        = x1w();   f.shuihoulirun    = x1w();
+  f.jinglirun          = x1w();   f.weifenlirun     = x1w();
+  f.meigujingzichan    = raw();   // 每股净资产不缩放
+  f.baoliu2            = raw();
   std::string code_raw(reinterpret_cast<const char*>(data + 3), 6);
   f.code = util::trim_null(code_raw);
   return f;

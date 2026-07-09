@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <cstring>
 #include <filesystem>
@@ -57,6 +58,28 @@ namespace {
 
 using tdx::taos::IsAStock;
 using tdx::taos::NeedsAdjust;
+
+// 读取通达信自选股 zxg.blk：纯文本 CRLF，每行 7 位（首位 1=沪 sh / 0=深 sz + 6 位代码）。
+// 与 fetch_quotes.cpp::ReadZxgBlk 逻辑一致，作为导入默认代码源。
+std::vector<std::string> ReadZxgBlk(const std::string& path) {
+  std::vector<std::string> out;
+  std::ifstream f(path);
+  if (!f) {
+    std::cerr << "无法读取自选股文件: " << path << "（将回退到全市场）\n";
+    return out;
+  }
+  std::string line;
+  while (std::getline(f, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' ||
+                             line.back() == ' ' || line.back() == '\t'))
+      line.pop_back();
+    if (line.size() < 7) continue;
+    char m = line[0];
+    if (m != '0' && m != '1') continue;
+    out.push_back((m == '1' ? "sh" : "sz") + line.substr(1, 6));
+  }
+  return out;
+}
 
 // 子表名市场前缀（sh/sz/bj），复用 VipdocReader::MarketDir 避免重复映射。
 // 子表命名：k_{mkt}{code}_{cycle}（如 k_sh000001_5m）、a_{mkt}{code}（如 a_sz000001），
@@ -112,6 +135,43 @@ int64_t LastTimestamp(TAOS* conn, const std::string& tbname) {
   int64_t val = *static_cast<int64_t*>(row[0]);
   ::taos_free_result(res);
   return val;
+}
+
+// 清除当日（CST 00:00 起）1d/1m/5m 盘中数据，为增量导入腾位置。
+// 常态：保留历史 vipdoc 数据，只清当日（sync-kline 循环刷新会重写）。
+// 返回清除行数，出错返回 -1（按周期继续，不中断）。
+int64_t ClearTodayIntraday(TAOS* conn, Market market, const std::string& code) {
+  int64_t today_ms = tdx::util::TodayMidnightEpoch() * 1000LL;
+  std::string mkt = MktPrefix(market);
+  int64_t total = 0;
+  for (const char* cy : {"1d", "1m", "5m"}) {
+    std::string tb = "k_" + mkt + code + "_" + cy;
+    auto code_start = tb.find('_');
+    if (code_start == std::string::npos) continue;
+    size_t code_pos = code_start + 1 + 2;
+    if (code_pos + 6 > tb.size()) continue;
+    std::string_view cv(tb.data() + code_pos, 6);
+    if (!tdx::util::IsValidCode(cv)) continue;
+
+    std::string sql = "DELETE FROM " + tb + " WHERE ts >= " +
+                      std::to_string(today_ms);
+    int64_t n = ExecAffected(conn, sql);
+    if (n < 0) return -1;
+    total += n;
+  }
+  return total;
+}
+
+// 首次迁移：DROP 整张 1d/1m/5m 子表（全清，含历史脏数据）。
+// 供 --full-reset 一次性清除网络脏数据后由 vipdoc 全量重建。
+// 返回 0 成功 / -1 失败。
+int64_t DropKlineTables(TAOS* conn, Market market, const std::string& code) {
+  std::string mkt = MktPrefix(market);
+  for (const char* cy : {"1d", "1m", "5m"}) {
+    std::string tb = "k_" + mkt + code + "_" + cy;
+    if (ExecAffected(conn, "DROP TABLE IF EXISTS " + tb) < 0) return -1;
+  }
+  return 0;
 }
 
 // 批量 INSERT K 线数据（共享工具，消除重复）。
@@ -681,13 +741,72 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
   result.codes_total = static_cast<int>(all_codes.size());
   if (all_codes.empty()) { std::cerr << "码表为空，无代码可处理。\n"; return result; }
 
+  // 解析用户指定的代码列表（兼容前缀 sh/sz/bj 与裸 code）：
+  // 从带前缀形式提取裸 code，放入 want set 与 stock_name 的裸 code 对齐。
+  auto bare_codes = [](const std::vector<std::string>& in) {
+    std::set<std::string> out;
+    for (const auto& s : in) {
+      if (s.size() == 8 && (s[0] == 's' || s[0] == 'b')) out.insert(s.substr(2));
+      else out.insert(s);
+    }
+    return out;
+  };
+
   if (!cfg.codes.empty()) {
-    std::set<std::string> want(cfg.codes.begin(), cfg.codes.end());
+    std::set<std::string> want = bare_codes(cfg.codes);
     std::vector<std::pair<std::string, Market>> t;
     for (auto& p : all_codes) if (want.count(p.first)) t.push_back(std::move(p));
     if (t.empty()) { std::cerr << "指定代码均不在码表中。\n"; return result; }
     all_codes = std::move(t);
     result.codes_total = static_cast<int>(all_codes.size());
+  } else if (!cfg.all_market) {
+    // 默认：仅导入自选股 zxg.blk（与 fetch-quotes 行为一致，避免 16000+ 只压垮 vipdoc 扫描）。
+    std::string zxg = cfg.zxg_blk;
+    if (const char* e = std::getenv("TDX_ZXG_BLK"); e && *e) zxg = e;
+    auto zxg_codes = ReadZxgBlk(zxg);
+    if (!zxg_codes.empty()) {
+      // zxg 产出带前缀代码（如 sh999999），需与裸 code 对齐。
+      std::set<std::string> want = bare_codes(zxg_codes);
+      std::vector<std::pair<std::string, Market>> t;
+      for (auto& p : all_codes) if (want.count(p.first)) t.push_back(std::move(p));
+      if (!t.empty()) {
+        all_codes = std::move(t);
+        result.codes_total = static_cast<int>(all_codes.size());
+        std::cerr << "自选股过滤: " << result.codes_total << " 只（" << zxg << "）\n";
+      } else {
+        std::cerr << "自选股 " << zxg_codes.size()
+                  << " 只均不在码表中，回退全市场\n";
+      }
+    } else {
+      std::cerr << "自选股文件为空/不可读，回退全市场\n";
+    }
+  }
+
+  // ---- 步骤 0：清库（两种语义，二选一）----
+  //   full_reset：DROP 整张 1d/1m/5m 子表——首次迁移，清除历史网络脏数据，vipdoc 全量重建。
+  //   默认（清当日）：DELETE ts>=今日00:00——增量留历史，只清当日盘中，由 sync-kline 循环重写。
+  if ((cfg.full_reset || cfg.clear_intraday) && !all_codes.empty()) {
+    if (cfg.full_reset) {
+      std::cerr << "=== 第零步：full-reset DROP 1d/1m/5m 子表（首次迁移）===" << std::endl;
+      int dropped = 0;
+      for (const auto& [code, market] : all_codes) {
+        if (DropKlineTables(conn.native(), market, code) < 0)
+          std::cerr << "DROP " << code << " 失败，继续\n";
+        else ++dropped;
+      }
+      std::cerr << "DROP: " << dropped << " 只\n";
+    } else {
+      std::cerr << "=== 第零步：清除当日 1d/1m/5m 盘中数据（增量留历史）===" << std::endl;
+      int64_t cleared = 0;
+      int cleared_codes = 0;
+      for (const auto& [code, market] : all_codes) {
+        int64_t n = ClearTodayIntraday(conn.native(), market, code);
+        if (n < 0) { std::cerr << "清除 " << code << " 失败，继续\n"; continue; }
+        if (n > 0) ++cleared_codes;
+        cleared += n;
+      }
+      std::cerr << "清除: " << cleared << " 行 / " << cleared_codes << " 只\n";
+    }
   }
 
   int n_threads = cfg.jobs > 0 ? cfg.jobs
@@ -941,6 +1060,180 @@ int64_t UpsertBars(TAOS* conn, Market market, const std::string& code,
   if (new_bars.empty()) return 0;
 
   return InsertKlineBatch(conn, tb, market, code, cycle, new_bars);
+}
+
+// ==================== f10 / finance 独立导入（从 fetch-quotes 分离）====================
+namespace {
+
+// F10 正文专用转义：TDengine 字面量支持 \\ \' \n \r \t，其余控制字符替换空格。
+std::string EscText(const std::string& s) {
+  std::string out;
+  out.reserve(s.size() + 8);
+  for (unsigned char ch : s) {
+    switch (ch) {
+      case '\\': out += "\\\\"; break;
+      case '\'': out += "\\'"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (ch < 0x20 || ch == 0x7F) out += ' ';
+        else out += static_cast<char>(ch);
+    }
+  }
+  return out;
+}
+
+// NaN→0（finance 字段 float 解析可能得 NaN/inf，避免写入非法值）。
+inline double nz(double v) { return std::isnan(v) ? 0.0 : v; }
+
+}  // namespace
+
+bool EnsureFinanceTable(TAOS* conn) {
+  // tdxpy 真实协议字段（30 float）。旧表（opentdx 命名/缺 zhigonggu）字段集不同，
+  // 无法 ALTER 改名 → 检测旧列（meigushouyi）存在则 DROP STABLE 重建。
+  auto has_col = [&](const char* col) {
+    TAOS_RES* res = ::taos_query(conn, "DESCRIBE finance");
+    if (!res || ::taos_errno(res) != 0) { if (res) ::taos_free_result(res); return false; }
+    bool found = false;
+    TAOS_ROW row;
+    TAOS_FIELD* fields = ::taos_fetch_fields(res);
+    int n = ::taos_num_fields(res);
+    while ((row = ::taos_fetch_row(res))) {
+      if (row[0] && std::strcmp(reinterpret_cast<char*>(row[0]), col) == 0) found = true;
+    }
+    (void)fields; (void)n;
+    ::taos_free_result(res);
+    return found;
+  };
+  if (has_col("meigushouyi")) {  // 旧 opentdx schema → 重建
+    ::taos_query(conn, "DROP STABLE IF EXISTS finance");
+  }
+  ExecSQL(conn,
+    "CREATE STABLE IF NOT EXISTS finance (ts TIMESTAMP, "
+    "liutongguben DOUBLE, province INT, industry INT, updated_date INT, ipo_date INT, "
+    "zongguben DOUBLE, guojiagu DOUBLE, faqirenfarengu DOUBLE, farengu DOUBLE, "
+    "bgu DOUBLE, hgu DOUBLE, zhigonggu DOUBLE, "
+    "zongzichan DOUBLE, liudongzichan DOUBLE, gudingzichan DOUBLE, wuxingzichan DOUBLE, "
+    "gudongrenshu DOUBLE, liudongfuzhai DOUBLE, changqifuzhai DOUBLE, zibengongjijin DOUBLE, "
+    "jingzichan DOUBLE, zhuyingshouu DOUBLE, zhuyinglirun DOUBLE, yingshouzhangkuan DOUBLE, "
+    "yingyelirun DOUBLE, touzishouyu DOUBLE, jingyingxianjinliu DOUBLE, zongxianjinliu DOUBLE, "
+    "cunhuo DOUBLE, lirunzonghe DOUBLE, shuihoulirun DOUBLE, jinglirun DOUBLE, "
+    "weifenlirun DOUBLE, meigujingzichan DOUBLE, baoliu2 DOUBLE) "
+    "TAGS (code VARCHAR(10))");
+  return true;
+}
+
+int64_t ClearFinance(TAOS* conn, std::string_view code) {
+  std::string c(code);
+  if (!tdx::util::IsValidCode(c)) return 0;
+  return ExecAffected(conn, "DROP TABLE IF EXISTS fn_" + c);
+}
+
+int64_t InsertFinanceFull(TAOS* conn, const Finance& f, int64_t now_ms) {
+  if (!tdx::util::IsValidCode(f.code)) return 0;
+  // 列顺序与 EnsureFinanceTable CREATE 一致（30 业务列）。
+  std::ostringstream sql;
+  sql << "INSERT INTO fn_" << f.code << " USING finance TAGS('" << EscapeSql(f.code) << "') VALUES("
+      << now_ms
+      << "," << nz(f.liutongguben) << "," << f.province << "," << f.industry
+      << "," << static_cast<int>(f.updated_date) << "," << static_cast<int>(f.ipo_date)
+      << "," << nz(f.zongguben) << "," << nz(f.guojiagu) << "," << nz(f.faqirenfarengu)
+      << "," << nz(f.farengu) << "," << nz(f.bgu) << "," << nz(f.hgu) << "," << nz(f.zhigonggu)
+      << "," << nz(f.zongzichan) << "," << nz(f.liudongzichan) << "," << nz(f.gudingzichan)
+      << "," << nz(f.wuxingzichan) << "," << nz(f.gudongrenshu) << "," << nz(f.liudongfuzhai)
+      << "," << nz(f.changqifuzhai) << "," << nz(f.zibengongjijin) << "," << nz(f.jingzichan)
+      << "," << nz(f.zhuyingshouu) << "," << nz(f.zhuyinglirun) << "," << nz(f.yingshouzhangkuan)
+      << "," << nz(f.yingyelirun) << "," << nz(f.touzishouyu) << "," << nz(f.jingyingxianjinliu)
+      << "," << nz(f.zongxianjinliu) << "," << nz(f.cunhuo) << "," << nz(f.lirunzonghe)
+      << "," << nz(f.shuihoulirun) << "," << nz(f.jinglirun) << "," << nz(f.weifenlirun)
+      << "," << nz(f.meigujingzichan) << "," << nz(f.baoliu2) << ")";
+  return ExecAffected(conn, sql.str());
+}
+
+bool EnsureF10Tables(TAOS* conn) {
+  ExecSQL(conn,
+    "CREATE STABLE IF NOT EXISTS f10_cat (ts TIMESTAMP, cat_name VARCHAR(64), "
+    "filename VARCHAR(80), start_pos INT, len_val INT) TAGS (code VARCHAR(10))");
+  ExecSQL(conn,
+    "CREATE STABLE IF NOT EXISTS f10_text (ts TIMESTAMP, seq SMALLINT, "
+    "content NCHAR(1000), content_len INT) "
+    "TAGS (code VARCHAR(10), cat_name VARCHAR(64), filename VARCHAR(80))");
+  return true;
+}
+
+// 查某 code 在超级表里的所有子表名（TBNAME 伪列），逐个 DROP。
+static int64_t DropSubtablesByCode(TAOS* conn, const char* stable, const std::string& code) {
+  std::string sql = std::string("SELECT DISTINCT TBNAME FROM ") + stable +
+                    " WHERE code='" + code + "'";
+  TAOS_RES* res = ::taos_query(conn, sql.c_str());
+  if (!res || ::taos_errno(res) != 0) { if (res) ::taos_free_result(res); return 0; }
+  int64_t dropped = 0;
+  TAOS_ROW row;
+  while ((row = ::taos_fetch_row(res))) {
+    if (row[0]) {
+      std::string tbname = tdx::taos::ReadVarChar(row[0]);
+      if (!tbname.empty()) {
+        ExecAffected(conn, "DROP TABLE IF EXISTS " + tbname);
+        ++dropped;
+      }
+    }
+  }
+  ::taos_free_result(res);
+  return dropped;
+}
+
+int64_t ClearF10(TAOS* conn, std::string_view code) {
+  std::string c(code);
+  if (!tdx::util::IsValidCode(c)) return 0;
+  return DropSubtablesByCode(conn, "f10_cat", c) + DropSubtablesByCode(conn, "f10_text", c);
+}
+
+int64_t InsertF10Cat(TAOS* conn, const std::vector<F10Category>& cats,
+                     std::string_view code, int64_t now_ms) {
+  if (cats.empty()) return 0;
+  std::string c(code);
+  if (!tdx::util::IsValidCode(c)) return 0;
+  std::string esc_code = EscapeSql(c);
+  int64_t written = 0;
+  for (size_t i = 0; i < cats.size(); i += 50) {
+    size_t end = std::min(i + 50, cats.size());
+    std::ostringstream sql;
+    sql << "INSERT INTO ";
+    for (size_t j = i; j < end; ++j) {
+      if (j > i) sql << ' ';
+      sql << "fc_" << c << "_" << j << " USING f10_cat TAGS('" << esc_code << "') VALUES("
+          << now_ms << ",'" << EscapeSql(cats[j].name) << "','" << EscapeSql(cats[j].filename)
+          << "'," << cats[j].start << "," << cats[j].length << ")";
+    }
+    if (ExecAffected(conn, sql.str()) < 0) break;
+    written += static_cast<int64_t>(end - i);
+  }
+  return written;
+}
+
+int64_t InsertF10Text(TAOS* conn, const std::string& code, size_t j,
+                      const F10Category& cat, const std::string& full, int64_t day_ts) {
+  if (full.empty() || !tdx::util::IsValidCode(code)) return 0;
+  constexpr size_t kSlice = 1000;
+  std::string tb_name = "ft_" + code + "_" + std::to_string(j);
+  std::string esc_code = EscapeSql(code), esc_cat = EscapeSql(cat.name), esc_fn = EscapeSql(cat.filename);
+  int64_t written = 0;
+  for (size_t pos = 0, seq = 0; pos < full.size(); ++seq) {
+    size_t end = std::min(pos + kSlice, full.size());
+    if (end < full.size()) {  // 切片边界对齐 UTF-8 字符
+      while (end > pos && (static_cast<unsigned char>(full[end]) & 0xC0) == 0x80) --end;
+    }
+    std::ostringstream sql;
+    sql << "INSERT INTO " << tb_name
+        << " USING f10_text TAGS('" << esc_code << "','" << esc_cat << "','" << esc_fn << "') VALUES("
+        << (day_ts + static_cast<int64_t>(seq)) << "," << seq << ",'"
+        << EscText(full.substr(pos, end - pos)) << "'," << full.size() << ")";
+    if (ExecAffected(conn, sql.str()) < 0) continue;
+    ++written;
+    pos = end;
+  }
+  return written;
 }
 
 }  // namespace tdx::taos

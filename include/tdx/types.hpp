@@ -128,42 +128,46 @@ struct ExQuote {
 };
 
 // ---- 财务数据 0x10（对齐 company_info.py:Finance） ----
+// ---- 财务 0x10（对齐 tdxpy GetFinanceInfo：30 个 float，含 zhigonggu）----
+// 股本/资产/负债/收入/利润字段在 deserialize 层 ×10000（万股→股，万元→元），
+// gudongrenshu/meigujingzichan/baoliu2 保持服务端原值。
 struct Finance {
   std::string code;
-  double liutongguben = 0.0;   // 流通股本（万股）
-  int province = 0;
-  int industry = 0;            // 行业代码
-  uint32_t updated_date = 0;   // YYYYMMDD
-  uint32_t ipo_date = 0;       // 上市日期
-  double zongguben = 0.0;      // 总股本
-  double guojiagu = 0.0;
-  double faqirenfarengu = 0.0;
-  double farengu = 0.0;
-  double bgu = 0.0;
-  double hgu = 0.0;
-  double meigushouyi = 0.0;    // 每股收益
-  double zichanzongji = 0.0;
-  double liudongzichanzongji = 0.0;
-  double gudingzichanjine = 0.0;
-  double wuxingzichan = 0.0;
-  double gudongrenshu = 0.0;
-  double liudongfuzhaiheji = 0.0;
-  double changqifuzhai = 0.0;
-  double zibengongjijin = 0.0;
-  double guimuquanyineji = 0.0;
-  double yinyezongshouru = 0.0;
-  double yinyechengben = 0.0;
-  double yingshouzhanngkuan = 0.0;
-  double yinyelirun = 0.0;
-  double touzishouyi = 0.0;
-  double jingyinxianjinliujine = 0.0;
-  double zongxianjinliu = 0.0;
-  double cunhuo = 0.0;
-  double lirunzonge = 0.0;
-  double shuihoulirun = 0.0;
-  double guimujinlirun = 0.0;
-  double weifenlirun = 0.0;
-  double meigujinzichan = 0.0;
+  double liutongguben = 0.0;     // 流通股本（股）
+  int province = 0;              // 省份代码
+  int industry = 0;              // 行业代码
+  uint32_t updated_date = 0;     // YYYYMMDD
+  uint32_t ipo_date = 0;         // 上市日期
+  double zongguben = 0.0;        // 总股本（股）
+  double guojiagu = 0.0;         // 国家股
+  double faqirenfarengu = 0.0;   // 发起人法人股
+  double farengu = 0.0;          // 法人股
+  double bgu = 0.0;              // B 股
+  double hgu = 0.0;              // H 股
+  double zhigonggu = 0.0;        // 职工股
+  double zongzichan = 0.0;       // 总资产
+  double liudongzichan = 0.0;    // 流动资产
+  double gudingzichan = 0.0;     // 固定资产
+  double wuxingzichan = 0.0;     // 无形资产
+  double gudongrenshu = 0.0;     // 股东人数（原值，不缩放）
+  double liudongfuzhai = 0.0;    // 流动负债
+  double changqifuzhai = 0.0;    // 长期负债
+  double zibengongjijin = 0.0;   // 资本公积金
+  double jingzichan = 0.0;       // 净资产
+  double zhuyingshouu = 0.0;     // 主营收入
+  double zhuyinglirun = 0.0;     // 主营利润
+  double yingshouzhangkuan = 0.0;// 应收账款
+  double yingyelirun = 0.0;      // 营业利润
+  double touzishouyu = 0.0;      // 投资收益
+  double jingyingxianjinliu = 0.0;// 经营现金流
+  double zongxianjinliu = 0.0;   // 总现金流
+  double cunhuo = 0.0;           // 存货
+  double lirunzonghe = 0.0;      // 利润总额
+  double shuihoulirun = 0.0;     // 税后利润
+  double jinglirun = 0.0;        // 净利润
+  double weifenlirun = 0.0;      // 未分配利润
+  double meigujingzichan = 0.0;  // 每股净资产（原值，不缩放）
+  double baoliu2 = 0.0;          // 保留字段（原值，不缩放）
 };
 
 // ---- F10 分类目录 0x2cf（对齐 company_info.py:Category） ----
