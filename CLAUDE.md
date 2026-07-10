@@ -27,7 +27,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.15.4**：移除已回退命令的 CLI 分发（batch-fetch/bars/ex-bars/fetch-history/pull-kline 全部落入未知命令；tdx 链接移除 tdx_batch）+ 文档清理（README/CLAUDE 移除 batch-fetch/quotes_reader 引用）
 - **v0.15.5**：新增编排脚本 `scripts/fetch-today.py`——并行启动 fetch-kline + fetch-quotes --quote_loop，每分钟报告进度；codes 来自 zxg.blk / --codes / --codes-file，可选 --mmap
 - **v0.15.6**：修复 fetch-today.py——codes-file 支持空格/换行分隔；stderr 改 mkstemp 单一 fd + stdbuf 行缓冲（防 abort 丢 trace）+ 环形缓冲 dump；Ctrl-C 8s grace 优雅退出
-- **v0.15.7**：新增 `scripts/view.py`——一键启动 mmap 实时行情终端（自动拉起 fetch-quotes --mmap_path + 前台 tools/mmap_viewer）；修复 `tools/mmap_viewer` 必须显式 `--mmap_path` 的使用门槛
+- **v0.15.7**：新增 `scripts/view.py`——一键启动 mmap 实时行情终端（自动拉起 fetch-quotes --mmap_path + 前台 tools/mmap_viewer，3s 刷新）
+- **v0.15.8**：修复 `scripts/view.py` 日志落盘（stderr 改 `view.log`，避免污染前台 viewer）；修复 `tools/mmap_viewer` 报价表列宽；清理 `README.md` 中与 CLAUDE.md 重复的 CLI/导入/技术栈块
 
 **上游短板改进**（C++ 版相对 Python 上游）：①并发批量下载（`tdx_batch` helio fiber 池 + `-n`）；②断点续传（`SyncState` JSON 持久化）；③统一 TDengine 时序存储（替代上游零散存储）。
 

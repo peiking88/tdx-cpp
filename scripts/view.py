@@ -51,7 +51,8 @@ def main():
     shutil.which(args.bin)  # 尽早发现，不影响已存在时的语义
 
     shm = args.shm
-    sys.stderr.write(
+    log = open(os.path.join(os.path.dirname(shm) or "/dev/shm", "view.log"), "a")
+    log.write(
         f"=== view: shm={shm} | blk={args.blk} | writer 间隔 {args.interval}s ===\n")
 
     # ---------- 起 writer（后台） ----------
@@ -60,7 +61,7 @@ def main():
                   "--quote_loop",
                   "--quote_interval", str(args.interval),
                   "--quote_jobs", str(args.jobs)]
-    sys.stderr.write(f"[writer] 启动：{' '.join(writer_cmd)}\n")
+    log.write(f"[writer] 启动：{' '.join(writer_cmd)}\n")
     writer = subprocess.Popen(
         writer_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
@@ -72,7 +73,8 @@ def main():
                 if writer.poll() is not None:
                     break
                 continue
-            sys.stderr.write(f"  [writer] {line.rstrip()}\n")
+            log.write(f"[writer] {line}")
+            log.flush()
 
     import threading
     t = threading.Thread(target=relay_writer_log, daemon=True)
@@ -106,7 +108,7 @@ def main():
         except OSError:
             pass
         time.sleep(0.5)
-    sys.stderr.write(f"shm 就绪（{os.path.getsize(shm)} B），拉起 viewer\n")
+    log.write(f"shm 就绪（{os.path.getsize(shm)} B），拉起 viewer\n")
 
     # ---------- 起 viewer（前台，3s 刷新循环） ----------
     viewer_cmd = [args.mmap_viewer, "--shm", shm, "--blk", args.blk]
