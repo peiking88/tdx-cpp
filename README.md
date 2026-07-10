@@ -23,7 +23,7 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 | `tdx fetch-names` | 同步股票代码→名称对照表 |
 | `tdx check-names` | 检查名称表覆盖完整性 |
 | `tdx cleanup` | 清理对照表中已失效的冗余条目 |
-| `tdx fetch-quotes [--loop] [--quote_interval N] [--quote_jobs N] [--quote_codes ...] [--all_market] [--zxg_blk PATH] [--mmap_path PATH] [--with_finance] [--with_f10] ...` | 实时行情采集入库。**默认采集自选股 `zxg.blk`**（入库与 mmap 共享同一范围）；`--all_market` 全市场；`--quote_codes` 显式指定优先；`--mmap_path` 启用「写 mmap 快照 + 异步入库」，空则同步入库 |
+| `tdx fetch-quotes [--loop] [--quote_interval N] [--quote_jobs N] [--quote_codes ...] [--all_market] [--zxg_blk PATH] [--mmap_path PATH] [--with_tx] [--with_tick] [--with_index] [--with_unusual] [--with_vol] [--with_hist]` | 实时行情采集入库。**默认采集自选股 `zxg.blk`**（入库与 mmap 共享同一范围）；`--all_market` 全市场；`--quote_codes` 显式指定优先；`--mmap_path` 启用「写 mmap 快照 + 异步入库」，空则同步入库 |
 | `tdx_quotes_reader <mmap_path> <code> [interval_ms]` | 只读挂载共享内存，轮询打印某股票最新报价（供 Krono/czSC 等分析进程参考） |
 | `tdx truncate-quotes` | 清空实时行情表 |
 | `tdx fetch-finance <code>` | 财务数据入库（流通股本/总股本/每股收益等） |
@@ -55,7 +55,11 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.15.2`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.15.3`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-10 v0.15.3
+
+- **文档整理**：`CLAUDE.md` 全面重组（合并项目状态+目标为概述、里程碑历史压缩、目录/命名空间表补 `tdx::shm` 模块、CLI 命令补全并注明别名、补「定时器回调不可同步 Suspend」v0.15.1 教训）；`README.md` 删除误粘的 git diff stat 块、修正 fetch-quotes 过时 flag（`--with_finance`/`--with_f10` 已随 v0.14.5 分离移除）。
 
 ### 2026-07-10 v0.15.2
 
@@ -92,21 +96,3 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 - **新功能**：`fetch-quotes` 默认采集自选股 `zxg.blk`（`--all_market` 全市场、`--quote_codes` 显式优先、`TDX_ZXG_BLK` 环境变量覆盖路径）；入库与 mmap 共享同一采集范围。
 - **修复**：`gbk_to_utf8` 把 iconv 的 `E2BIG`（输出缓冲满）误当致命错 `break`，导致任何 >256 字节输出的 GBK（如 F10 全文 23KB）被截断——改为流式 `continue` 续转；`IsQuoteTarget` 不认 `sh/sz/bj` 前缀（v0.13.8 后 `--quote_codes` 全被过滤）；finance/F10 误锁 `wi==0` 单 worker（只采 1/N 票）；finance 过滤指数/ETF 全 0 空壳记录。
 
-### 2026-07-03 10:43:12
-```
- .claude/PRPs/prds/phase6-intraday-shm-design.md    | 563 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- .claude/PRPs/reviews/phase6-intraday-shm.review.md | 280 ++++++++++++++++++++++++++++++++++++++++++++++++++
- CLAUDE.md                                          |   1 +
- CMakeLists.txt                                     |   2 +-
- README.md                                          |   5 +-
- include/tdx/shm/payload.hpp                        |  67 ++++++++++++
- include/tdx/shm/segment.hpp                        |  69 +++++++++++++
- include/tdx/shm/snapshot.hpp                       |  53 ++++++++++
- include/tdx/types.hpp                              |   1 +
- src/CMakeLists.txt                                 |   9 +-
- src/cli/fetch_quotes.cpp                           | 167 +++++++++++++++++++-----------
- src/cli/quotes_reader.cpp                          |  53 ++++++++++
- src/shm/CMakeLists.txt                             |   9 ++
- src/shm/segment.cpp                                | 118 +++++++++++++++++++++
- src/shm/snapshot.cpp                               |  73 +++++++++++++
-```
