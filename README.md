@@ -53,7 +53,11 @@ C++17 / CMake + Ninja / helio (io\_uring+fiber) / TDengine / Boost.Context / Ope
 
 ## 版本
 
-当前 `0.15.4`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.15.5`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-10 v0.15.5
+
+*   **新增编排脚本 `scripts/fetch-today.py`**：并行启动 `fetch-kline`（当日 K 线循环入库，codes 来自 zxg.blk 或参数/文件）+ `fetch-quotes --quote_loop`（实时行情），后台线程每 60s（可配）解析两进程 stderr 汇总进度；任一子进程退出或 Ctrl-C 优雅终止。
 
 ### 2026-07-10 v0.15.4
 

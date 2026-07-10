@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 依赖链 `tdxdata → mootdx → opentdx`。C++ 版合并为单库，分层同源，不再跨语言依赖。本文件是 C++ 实现的设计蓝图与协议知识库。
 
-**完成状态**：Phase 1-6 全部完成（v0.15.4）。
+**完成状态**：Phase 1-6 全部完成（v0.15.5）。
 
 **里程碑**（详见 git log / README changelog）：
 - **Phase 1-3（v0.1-0.3）**：协议层 + A股标准/扩展/SP/MAC 行情 + 数据管理核心（Calendar/Adjust/Resampler/SyncState/TdxData）
@@ -25,6 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.15**：心跳 dispatcher 崩溃修复（blocker，`OnTimer` 包 `MakeFiber`）+ fetch-kline 日志去重/非交易日早退 + fetch-quotes 三处修复
 - **v0.15.3**：文档整理——CLAUDE.md 全面重组（补 shm 模块/命令/心跳教训，里程碑压缩）+ README.md 删垃圾 diff 块/修过时 flag
 - **v0.15.4**：移除已回退命令的 CLI 分发（batch-fetch/bars/ex-bars/fetch-history/pull-kline 全部落入未知命令；tdx 链接移除 tdx_batch）+ 文档清理（README/CLAUDE 移除 batch-fetch/quotes_reader 引用）
+- **v0.15.5**：新增编排脚本 `scripts/fetch-today.py`——并行启动 fetch-kline + fetch-quotes --quote_loop，每分钟报告进度；codes 来自 zxg.blk / --codes / --codes-file，可选 --mmap
 
 **上游短板改进**（C++ 版相对 Python 上游）：①并发批量下载（`tdx_batch` helio fiber 池 + `-n`）；②断点续传（`SyncState` JSON 持久化）；③统一 TDengine 时序存储（替代上游零散存储）。
 
