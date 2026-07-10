@@ -242,9 +242,8 @@ namespace
   }
 
   // 当日K线落库：拉最新 N 根 K 线（1d/5m/1m）写入 TDengine kline。
-  // 成交量单位为股（Vipdoc1d/VipdocMin volume 统一为 1.0，网络源直写），
-  // 与 vipdoc 导入（清库重导后）跨 cycle 一致，SUM(分钟)≈日线。
-  // ponytail: 重复运行当日 bar 会积重复行——清库重导前仅作补抓当日数据用。
+  // 成交量单位为股（个股/基金直写，指数日线手→股×100 对齐 vipdoc），与 vipdoc 导入跨 cycle 一致，SUM(分钟)≈日线。
+  // TDengine 子表以时间戳为主键——每轮重写当日 bar 是 upsert(覆盖)，幂等，不积重复行。
   int DoFetchKline(int argc, char **argv)
   {
     // 位置参数：tdx fetch-kline <code> [code...] [periods=1d,5m,1m] [count=240]
@@ -297,7 +296,9 @@ namespace
       return 1;
     }
 
-    // 成交量单位统一为股：Vipdoc1d/VipdocMin volume 均=1.0，网络直写不缩放。
+    // ponytail: vsrc 借用 Vipdoc* 系数表凑「网络源直写」效果——scaling.hpp 对网络K线无按类别×
+    // 周期独立条目，而 Vipdoc1d 恰个股1.0/指数100.0、VipdocMin 全1.0，与网络源 volume 语义一致。
+    // 升级路径=给 NetKlineStd 增加按类别 volume 条目后改用之；此处仅标注借用，不改计算结果。
     struct KlineCycle
     {
       Period p;
@@ -325,6 +326,18 @@ namespace
       return 1;
     }
 
+    // 非交易日（周末/节假日）直接退出，避免空转到 15:00。cfg/holidays.json 缺失则降级为仅判周末。
+    {
+      tdx::data::Calendar cal;
+      auto c = tdx::util::epoch_to_cst(std::time(nullptr));
+      if (!cal.IsTradingDay(c.year, c.month, c.day))
+      {
+        std::cerr << "今日(" << c.year << "-" << c.month << "-" << c.day
+                  << ")非 A 股交易日，无需拉取，退出\n";
+        return 0;
+      }
+    }
+
     quotes::StdQuotes sq;
     if (auto ec = sq.Connect())
     {
@@ -338,6 +351,9 @@ namespace
 
     // 当日 00:00 CST epoch：仅保留当日盘中 bar，历史 K 线由 vipdoc 导入。
     const int64_t today_midnight_epoch = tdx::util::TodayMidnightEpoch();
+
+    // 当日入库 bar 去重键（跨轮累积，TDengine upsert 幂等）：seen_keys.size() = 当日实际 bar 数。
+    std::set<std::string> seen_keys;
 
     int interval = absl::GetFlag(FLAGS_kline_interval);
     if (interval <= 0)
@@ -399,6 +415,7 @@ namespace
                           static_cast<long long>(b.datetime * 1000LL),
                           b.open, b.high, b.low, b.close, b.volume * vol_f, b.amount);
             sql << row;
+            seen_keys.insert(code + "|" + tag + "|" + std::to_string(b.datetime));
             if (b.datetime > round_max_ts)
               round_max_ts = b.datetime;
             if (++n % 200 == 0)
@@ -430,7 +447,6 @@ namespace
     std::signal(SIGTERM, OnFetchKlineSignal);
     std::cerr << "=== fetch-kline 循环模式，间隔 " << interval
               << "s，15:00 后 3 轮无新 bar 退出（Ctrl-C 中断）===\n";
-    int64_t total = 0;
     int idle = 0; // 连续无新 bar 轮数
     int64_t last_max_ts = 0;
     int round_idx = 0;
@@ -439,12 +455,11 @@ namespace
       auto t0 = std::chrono::steady_clock::now();
       ++round_idx;
       auto [n, max_ts] = run_once();
-      total += n;
       bool new_bar = (max_ts > last_max_ts);
       last_max_ts = max_ts;
-      std::cerr << "[轮 " << round_idx << "] " << n << " 行"
+      std::cerr << "[轮 " << round_idx << "] " << n << " 行(含覆盖)"
                 << (new_bar ? "" : " (无新 bar)")
-                << "  累计 " << total << "\n";
+                << "  当日入库 " << seen_keys.size() << " 根(去重)\n";
       if (!new_bar)
       {
         ++idle;
@@ -471,7 +486,7 @@ namespace
           std::this_thread::sleep_for(std::chrono::seconds(1));
       }
     }
-    std::cout << "=== fetch-kline 循环结束，共 " << total << " 行 ===\n";
+    std::cout << "=== fetch-kline 循环结束，当日共入库 " << seen_keys.size() << " 根(去重) ===\n";
     return 0;
   }
 
@@ -891,7 +906,28 @@ int main(int argc, char **argv)
     }
   }
 
-  MainInitGuard guard(&argc, &argv);
+  // helio MainInitGuard 内的 absl::ParseCommandLine 会拒绝未注册的 '--' flag（报
+  // "Unknown command line flag" 直接退出）。import 子命令的 --full-reset /
+  // --no-clear-intraday / --all-market / --zxg-blk 是手动解析（import.cpp::ParseArgs）
+  // 的非 absl flag，故先把它们从 argv 剥离，让 absl 只解析已注册的 --jobs 等；
+  // MainInitGuard 后保留原 argc/argv，交由各子命令自行解析（argv[0] 程序名不变）。
+  std::vector<char *> absl_argv{argv[0]};
+  for (int i = 1; i < argc; ++i)
+  {
+    std::string a = argv[i];
+    bool manual = a == "--full-reset" || a == "--no-clear-intraday" ||
+                  a == "--all-market" || a == "--zxg-blk";
+    if (manual)
+    {
+      if (a == "--zxg-blk" && i + 1 < argc) ++i;  // 跳过它的路径值
+      continue;
+    }
+    absl_argv.push_back(argv[i]);
+  }
+  int absl_argc = static_cast<int>(absl_argv.size());
+  char **absl_argv_ptr = absl_argv.data();
+  MainInitGuard guard(&absl_argc, &absl_argv_ptr);
+
   if (argc < 2)
   {
     PrintUsage();

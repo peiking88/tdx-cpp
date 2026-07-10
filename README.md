@@ -55,7 +55,12 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.14.5`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.15.1`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-10 v0.15.1
+
+- **心跳 dispatcher 崩溃修复（blocker）**：`Heartbeat::OnTimer` 由 `AddPeriodic` 注册、跑在 helio periodic dispatcher fiber 上，该 fiber 不允许 `Suspend`；而 `SendHeartbeat`→`conn_->Call` 会 Suspend，落在了 dispatcher 上触发 `Should not preempt dispatcher` abort（fetch-kline 跑不过一个心跳周期 ~30s）。修复：`OnTimer` 把 `send_fn`/`timeout_fn` 包 `::util::MakeFiber().Detach()` 切到普通 fiber 执行，惠及 StdQuotes + SPQuotes。
+- **fetch-kline 循环逻辑改进**：①日志去重计数——`std::set<code|tag|ts>` 跨轮累积，显示「当日入库 N 根(去重)」取代误导性的累计 INSERT 行数（TDengine 主键 upsert 幂等，旧 `total` 严重高估）；②非交易日早退——`Calendar::IsTradingDay` 判今日，周末/节假日直接退出不空转到 15:00；③修正「积重复行」误导注释；④vsrc 枚举借用关系 `ponytail:` 注释。
 
 ### 2026-07-09 v0.14.5
 

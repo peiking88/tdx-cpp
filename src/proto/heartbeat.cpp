@@ -1,5 +1,7 @@
 #include "tdx/proto/heartbeat.hpp"
 
+#include "util/fibers/fibers.h"
+
 namespace tdx::proto {
 
 Heartbeat::Heartbeat(::util::fb2::ProactorBase* proactor,
@@ -63,15 +65,20 @@ void Heartbeat::OnTimer() {
       send_fn = send_heartbeat_;  // 发心跳
     }
   }
-  // 在锁外执行回调，避免 send/timeout 阻塞持有锁
+  // 在锁外执行回调，避免 send/timeout 阻塞持有锁。
+  // OnTimer 跑在 helio periodic dispatcher fiber，不可同步 Suspend（否则触发
+  // "Should not preempt dispatcher" abort）——send_fn 内 conn_->Call 会 Suspend，
+  // 故包 MakeFiber 切到普通 fiber 执行，惠及 StdQuotes/SPQuotes 等所有心跳用户。
   if (timeout_fn) {
-    timeout_fn();
+    ::util::MakeFiber([timeout_fn = std::move(timeout_fn)] { timeout_fn(); }).Detach();
   } else if (send_fn) {
-    try {
-      send_fn();
-    } catch (...) {
-      // 心跳发送失败（连接断）忽略，由 Connection 状态/熔断器处理
-    }
+    ::util::MakeFiber([send_fn = std::move(send_fn)] {
+      try {
+        send_fn();
+      } catch (...) {
+        // 心跳发送失败（连接断）忽略，由 Connection 状态/熔断器处理
+      }
+    }).Detach();
   }
 }
 
