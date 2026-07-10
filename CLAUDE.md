@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 依赖链 `tdxdata → mootdx → opentdx`。C++ 版合并为单库，分层同源，不再跨语言依赖。本文件是 C++ 实现的设计蓝图与协议知识库。
 
-**完成状态**：Phase 1-6 全部完成（v0.15.2）。
+**完成状态**：Phase 1-6 全部完成（v0.15.4）。
 
 **里程碑**（详见 git log / README changelog）：
 - **Phase 1-3（v0.1-0.3）**：协议层 + A股标准/扩展/SP/MAC 行情 + 数据管理核心（Calendar/Adjust/Resampler/SyncState/TdxData）
@@ -24,6 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.14**：`fetch-quotes` 默认采集自选股 `zxg.blk` + `fetch-finance`/`fetch-f10` 分离为独立命令 + `deserialize_finance` 协议偏移修复
 - **v0.15**：心跳 dispatcher 崩溃修复（blocker，`OnTimer` 包 `MakeFiber`）+ fetch-kline 日志去重/非交易日早退 + fetch-quotes 三处修复
 - **v0.15.3**：文档整理——CLAUDE.md 全面重组（补 shm 模块/命令/心跳教训，里程碑压缩）+ README.md 删垃圾 diff 块/修过时 flag
+- **v0.15.4**：移除已回退命令的 CLI 分发（batch-fetch/bars/ex-bars/fetch-history/pull-kline 全部落入未知命令；tdx 链接移除 tdx_batch）+ 文档清理（README/CLAUDE 移除 batch-fetch/quotes_reader 引用）
 
 **上游短板改进**（C++ 版相对 Python 上游）：①并发批量下载（`tdx_batch` helio fiber 池 + `-n`）；②断点续传（`SyncState` JSON 持久化）；③统一 TDengine 时序存储（替代上游零散存储）。
 
@@ -151,8 +152,8 @@ output/      程序输出（不入 git）
 - **采集/入库**：`server-test`（测速选服）、`import`（vipdoc 历史导入）、`fetch-quotes`（实时行情→TDengine/mmap）、`fetch-kline`（当日K线循环）、`fetch-finance`/`fetch-f10`（财务/F10 独立重导）、`truncate-quotes`（清当日盘中队列）
 - **盘中接口**：`history-orders`、`history-tx`、`vol-profile`、`index-info`、`unusual`、`board-list`、`board-quotes`、`capital-flow`
 - **代码名称管理**：`fetch-names`、`cleanup`、`check-names`
-- **批量**：`batch-fetch`（fiber 池 + 断点续传）
-- **别名**（已重命名，保留兼容提示）：`sync-names`→`fetch-names`、`finance`→`fetch-finance`、`sync-kline`→`fetch-kline`；`pull-kline` 已移除（换 `import`）；`bars`/`ex-bars`/`fetch-history` 已回退为测试用例
+- **批量**：`tdx_batch`（src/batch/，BatchFetchKline 用于并发测试，已从 CLI 移除）
+- **已移除命令**：`pull-kline`（换 `import`）；`bars`/`ex-bars`/`fetch-history`/`batch-fetch` 已从 CLI 移除（`batch-fetch` 回落为测试用例）
 
 ## helio fiber 编码纪律（关键约束）
 
@@ -181,7 +182,7 @@ helio 的 Proactor 线程内**禁用**标准库阻塞原语——它们会阻塞
 - **字段缩放**：`include/tdx/data/scaling.hpp`（纯头文件）——`SecurityClass × DataSource → FieldScaling`。新增 parser/数据源必走此表。
 - **SP 测试**：独立二进制 `test_sp_e2e`（同进程两个 ProactorPool 增加 fiber 调度复杂度）。
 - **精度**：遵循全局规范——价位/金额 `%.2f`、数量 `%d`、百分比 `%d%%`。
-- **市场前缀**：所有 code 必须带市场前缀 `sh`/`sz`/`bj`（如 `sh000001`、`sz000001`、`bj430047`），用 `tdx::ParseMarketCode` 解析；无前缀视为无效（不回退 `MarketFromCode` 推断）。歧义 code（`000001` SH=上证指数 / SZ=平安银行）须显式前缀区分。CLI 命令、batch-fetch stock list、fetch-quotes 均要求前缀；导入内部 `BatchNetImport` 用 `stock_name.market` 字段而非 `MarketFromCode`。
+- **市场前缀**：所有 code 必须带市场前缀 `sh`/`sz`/`bj`（如 `sh000001`、`sz000001`、`bj430047`），用 `tdx::ParseMarketCode` 解析；无前缀视为无效（不回退 `MarketFromCode` 推断）。歧义 code（`000001` SH=上证指数 / SZ=平安银行）须显式前缀区分。CLI 命令、fetch-quotes 均要求前缀；导入内部 `BatchNetImport` 用 `stock_name.market` 字段而非 `MarketFromCode`。
 - **复权**：tdxdata 的复权因子是**基于 xdxr 事件流自行计算**（`tdxdata/sources/adjust.py:49`，区分前复权 qfq 的 backward-asof 与后复权 hfq 的 forward-asof），不是直接取交易所因子。移植时须对照其单测。
 - **A 股时段感知重采样**：15m/30m/1h 由 5m 重采样，1w/1mon 由 1d 重采样，且 K 线结束时间须按 A 股交易时段（上午 9:30、下午 13:00 开盘）标注。参考 `tdxdata/sources/base.py:56-132`。
 - **K 线周期常量**：`0`=5min、`1`=15min、`2`=30min、`3`=1h、`4`=日、`5`=周、`6`=月、`7`=扩展1min、`8`=1min、`9`=日K、`10`=季、`11`=年。单次请求 K 线上限 800 条、分笔 2000 条。
@@ -210,8 +211,6 @@ ctest --test-dir build -R <test_name> -V   # 单个用例
 ./build/bin/tdx fetch-quotes --mmap_path /dev/shm/tdx    # 实时行情→mmap+异步入库
 ./build/bin/tdx fetch-finance sh600000                   # 财务数据入库
 ./build/bin/tdx fetch-names && tdx check-names           # 代码→名称对照表
-./build/bin/tdx batch-fetch --stock-list stock.txt \
-    --start 2024-01-01 --end 2024-06-01 -n 16 --resume   # 批量拉取+断点续传
 ```
 
 **真实网络测试**（连接通达信服务器）优先级高于 mock，参考上游的 `pytest -m live`（连真服）与 `-m local`（读本地文件）划分。e2e 测试（`test_e2e`）在服务器不可达时自动 `GTEST_SKIP`，不视为失败。

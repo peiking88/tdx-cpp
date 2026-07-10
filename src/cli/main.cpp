@@ -28,7 +28,6 @@ ABSL_FLAG(int32_t, kline_interval, 60, "fetch-kline 循环间隔（秒）");
 #include "tdx/quotes/sp_quotes.hpp"
 #include "tdx/quotes/std_quotes.hpp"
 #include "tdx/data/tdx_data.hpp"
-#include "tdx/batch/batch_fetch.hpp"
 #include "tdx/taos/taos_connection.hpp"
 #include "tdx/taos/taos_import.hpp"
 #include "tdx/data/scaling.hpp"
@@ -78,52 +77,6 @@ namespace
   }
 
   // bars / ex-bars / fetch-history 已回退为测试用例（tests/test_bars.cpp / test_fetch_history.cpp）。
-  // batch-fetch 保留为并发批量入口（基于 batch::BatchFetchKline）。
-  //   period: 1d/5m/1m/15m/30m/1h（位置参数，避免 absl flag 冲突）
-
-  // 并发批量拉取：tdx batch-fetch <code> [code...] [concurrency]
-  int DoBatchFetch(int argc, char **argv)
-  {
-    std::vector<std::string> codes;
-    int concurrency = 4;
-    for (int i = 2; i < argc; ++i)
-      codes.emplace_back(argv[i]);
-    if (!codes.empty())
-    {
-      const std::string &last = codes.back();
-      bool all_digit = !last.empty();
-      for (char c : last)
-        if (!std::isdigit(static_cast<unsigned char>(c)))
-          all_digit = false;
-      if (all_digit)
-      {
-        (void)absl::SimpleAtoi(last, &concurrency);  // 溢出→保留默认值
-        codes.pop_back();
-      }
-    }
-    if (concurrency < 1)
-      concurrency = 4; // 防御 atoi 失败或用户传 0
-    if (codes.empty())
-    {
-      std::cerr << "用法: tdx batch-fetch <code> [code...] [concurrency]\n";
-      return 1;
-    }
-    auto results = tdx::batch::BatchFetchKline(codes, concurrency, tdx::Period::DAILY, 0, 10);
-    int ok = 0;
-    for (const auto &r : results)
-    {
-      if (r.success)
-      {
-        ++ok;
-        std::cout << r.code << ": " << r.bars.size() << " 根 K线\n";
-      }
-      else
-        std::cout << r.code << ": 失败\n";
-    }
-    std::cout << "完成: " << ok << "/" << results.size() << " 成功（并发=" << concurrency << "）\n";
-    return 0;
-  }
-
   // 检查库中股票代码是否都有名称：tdx check-names
   int DoCheckNames()
   {
@@ -936,8 +889,6 @@ int main(int argc, char **argv)
   std::string cmd = argv[1];
   if (cmd == "server-test")
     return DoServerTest();
-  if (cmd == "batch-fetch")
-    return DoBatchFetch(argc, argv);
   if (cmd == "import")
     return DoImport(argc, argv, static_cast<int>(absl::GetFlag(FLAGS_jobs)));
   if (cmd == "fetch-quotes")
@@ -990,15 +941,6 @@ int main(int argc, char **argv)
     std::cerr << "[f10 → fetch-f10] 命令已重命名，换用 fetch-f10\n";
     return DoFetchF10(argc, argv);
   }
-  if (cmd == "pull-kline") {
-    std::cerr << "[pull-kline] 已移除，换用 tdx import（本地 vipdoc 导入历史 K 线 + 网络补缺）\n";
-    return 1;
-  }
-  if (cmd == "bars" || cmd == "ex-bars" || cmd == "fetch-history") {
-    std::cerr << "[" << cmd << "] 已回退为测试用例（tests/test_bars.cpp / test_fetch_history.cpp）\n";
-    return 1;
-  }
-
   std::cerr << "未知命令: " << cmd << "\n";
   return 1;
 }

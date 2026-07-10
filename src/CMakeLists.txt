@@ -81,5 +81,5 @@ target_link_libraries(tdx_smoke PRIVATE base fibers2)
 
 # ---- tdx_cli：命令行工具（server-test / bars / ex-bars / fetch-history / import）----
 add_executable(tdx cli/main.cpp cli/import.cpp cli/fetch_quotes.cpp)
-target_link_libraries(tdx PRIVATE tdx_data tdx_batch tdx_quotes tdx_taos tdx_shm base fibers2)
+target_link_libraries(tdx PRIVATE tdx_data tdx_quotes tdx_taos tdx_shm base fibers2)
 
