@@ -656,6 +656,10 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
             std::cerr << "[skip] " << q.code << " ts=" << q.datetime << "\n";
           continue;
         }
+        // ETF/基金（588xxx/510xxx/562xxx/15xxxx）服务器不返回时间戳，q.datetime == 0；
+        // 与 InsertQuote 的入库逻辑一致：落盘 now_sec 作最新行情时间（否则 mmap 里存 epoch 0，
+        // CST 下渲染成 08:00:00）。此时 IsQuoteValid(0)=true 已通过上方过滤。
+        if (q.datetime <= 0) q.datetime = now_ms / 1000;
         shm->Snapshot().Put(q.code, tdx::shm::to_pod(q));
         cnt.quote++;  // 仅计实际写入 mmap 的有效 quote（与同步路径 InsertQuote 语义一致）
       }

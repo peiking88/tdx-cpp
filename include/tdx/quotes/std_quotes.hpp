@@ -79,6 +79,14 @@ class StdQuotes {
  private:
   // 在 fiber 内执行一次请求（受 RetryPolicy + CircuitBreaker 保护）。
   proto::Response Call(uint16_t msg_id, const std::vector<uint8_t>& body);
+
+  // 在 proactor 线程的 fiber 内执行 fn，捕获一切异常转为默认值返回。
+  // 原因：helio WorkerFiberImpl::run_ 的 std::apply 不捕获，若 fn 抛出异常
+  // 会直通 fiber 入口 → std::terminate() → SIGABRT（rc=-6）。Call() 重试耗尽
+  // 时 throw TdxConnectionError，经 proactor_->Await 跑在 worker fiber 里即命中此路径。
+  // 异常在此处记 ERROR 后吞掉，返回 R{}（空 vector/零值），外层按 empty() 跳过，语义不变。
+  template <typename F>
+  auto SafeAwait(F&& fn) -> decltype(fn());
   std::error_code ConnectInFiber();
   void SendHeartbeat();
 

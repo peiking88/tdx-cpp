@@ -145,10 +145,25 @@ proto::Response StdQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& bod
   return resp;
 }
 
+template <typename F>
+auto StdQuotes::SafeAwait(F&& fn) -> decltype(fn()) {
+  using R = decltype(fn());
+  return proactor_->Await([&]() -> R {
+    try {
+      return std::forward<F>(fn)();
+    } catch (const std::exception& e) {
+      LOG(ERROR) << "StdQuotes: fiber 内请求异常，转空结果返回: " << e.what();
+    } catch (...) {
+      LOG(ERROR) << "StdQuotes: fiber 内请求未知异常，转空结果返回";
+    }
+    return R{};
+  });
+}
+
 std::vector<KLine> StdQuotes::Bars(Market market, std::string_view code, Period period,
                                    uint16_t start, uint16_t count, Adjust adjust) {
   auto body = proto::serialize_kline(market, code, period, 1, start, count, adjust);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgKline, body);
     return proto::deserialize_kline(resp.body.data(), resp.body.size(), period);
   });
@@ -156,7 +171,7 @@ std::vector<KLine> StdQuotes::Bars(Market market, std::string_view code, Period 
 
 std::vector<Quote> StdQuotes::Quotes(const std::vector<proto::QuoteReq>& stocks) {
   auto body = proto::serialize_quotes_detail(stocks);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgQuotesDetail, body);
     return proto::deserialize_quotes_detail(resp.body.data(), resp.body.size());
   });
@@ -165,7 +180,7 @@ std::vector<Quote> StdQuotes::Quotes(const std::vector<proto::QuoteReq>& stocks)
 std::vector<Transaction> StdQuotes::Transactions(Market market, std::string_view code,
                                                  uint16_t start, uint16_t count) {
   auto body = proto::serialize_transaction(market, code, start, count);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgTransaction, body);
     return proto::deserialize_transaction(resp.body.data(), resp.body.size());
   });
@@ -174,7 +189,7 @@ std::vector<Transaction> StdQuotes::Transactions(Market market, std::string_view
 std::vector<Stock> StdQuotes::Stocks(Market market, uint16_t start, uint16_t count) {
   auto body = proto::serialize_list(market, start, count);
   auto m = market;
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgList, body);
     auto result = proto::deserialize_list(resp.body.data(), resp.body.size());
     for (auto& s : result) s.market = static_cast<int>(m);  // 响应不含市场，按请求填
@@ -184,7 +199,7 @@ std::vector<Stock> StdQuotes::Stocks(Market market, uint16_t start, uint16_t cou
 
 uint16_t StdQuotes::StockCount(Market market) {
   auto body = proto::serialize_count(market);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgCount, body);
     return proto::deserialize_count(resp.body.data(), resp.body.size());
   });
@@ -192,7 +207,7 @@ uint16_t StdQuotes::StockCount(Market market) {
 
 std::vector<Xdxr> StdQuotes::GetXdxr(Market market, std::string_view code) {
   auto body = proto::serialize_xdxr(market, code);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgXdxr, body);
     return proto::deserialize_xdxr(resp.body.data(), resp.body.size());
   });
@@ -200,7 +215,7 @@ std::vector<Xdxr> StdQuotes::GetXdxr(Market market, std::string_view code) {
 
 Finance StdQuotes::GetFinance(Market market, std::string_view code) {
   auto body = proto::serialize_finance(market, code);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgFinance, body);
     return proto::deserialize_finance(resp.body.data(), resp.body.size());
   });
@@ -208,7 +223,7 @@ Finance StdQuotes::GetFinance(Market market, std::string_view code) {
 
 std::vector<F10Category> StdQuotes::GetF10Category(Market market, std::string_view code) {
   auto body = proto::serialize_f10_category(market, code);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgF10Category, body);
     return proto::deserialize_f10_category(resp.body.data(), resp.body.size());
   });
@@ -217,7 +232,7 @@ std::vector<F10Category> StdQuotes::GetF10Category(Market market, std::string_vi
 F10Content StdQuotes::GetF10Content(Market market, std::string_view code,
                                      std::string_view filename, uint32_t start, uint32_t length) {
   auto body = proto::serialize_f10_content(market, code, filename, start, length);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgF10Content, body);
     return proto::deserialize_f10_content(resp.body.data(), resp.body.size());
   });
@@ -234,7 +249,7 @@ std::string StdQuotes::GetF10FullText(Market market, std::string_view code,
     uint32_t want = std::min<uint32_t>(kChunk, cat.length - offset);
     auto body = proto::serialize_f10_content(market, code, cat.filename,
                                              cat.start + offset, want);
-    auto resp = proactor_->Await([&] { return Call(proto::kMsgF10Content, body); });
+    auto resp = SafeAwait([&] { return Call(proto::kMsgF10Content, body); });
     if (resp.body.size() < 12) break;
     uint16_t got = static_cast<uint16_t>(resp.body[10]) |
                    static_cast<uint16_t>(static_cast<uint16_t>(resp.body[11]) << 8);
@@ -249,7 +264,7 @@ std::string StdQuotes::GetF10FullText(Market market, std::string_view code,
 std::vector<HistoryOrder> StdQuotes::GetHistoryOrders(Market market, std::string_view code,
                                                        uint32_t date_yyyymmdd) {
   auto body = proto::serialize_history_orders(market, code, date_yyyymmdd);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgHistoryOrders, body);
     return proto::deserialize_history_orders(resp.body.data(), resp.body.size());
   });
@@ -259,7 +274,7 @@ std::vector<HistoryTransaction> StdQuotes::GetHistoryTransaction(
     Market market, std::string_view code, uint32_t date_yyyymmdd,
     uint16_t start, uint16_t count) {
   auto body = proto::serialize_history_transaction(market, code, date_yyyymmdd, start, count);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgHistoryTransaction, body);
     return proto::deserialize_history_transaction(resp.body.data(), resp.body.size());
   });
@@ -267,7 +282,7 @@ std::vector<HistoryTransaction> StdQuotes::GetHistoryTransaction(
 
 VolProfile StdQuotes::GetVolumeProfile(Market market, std::string_view code) {
   auto body = proto::serialize_volume_profile(market, code);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgVolumeProfile, body);
     return proto::deserialize_volume_profile(resp.body.data(), resp.body.size());
   });
@@ -275,7 +290,7 @@ VolProfile StdQuotes::GetVolumeProfile(Market market, std::string_view code) {
 
 IndexInfo StdQuotes::GetIndexInfo(Market market, std::string_view code) {
   auto body = proto::serialize_index_info(market, code);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgIndexInfo, body);
     return proto::deserialize_index_info(resp.body.data(), resp.body.size());
   });
@@ -283,7 +298,7 @@ IndexInfo StdQuotes::GetIndexInfo(Market market, std::string_view code) {
 
 std::vector<UnusualItem> StdQuotes::GetUnusual(Market market, uint16_t start, uint16_t count) {
   auto body = proto::serialize_unusual(market, start, count);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgUnusual, body);
     return proto::deserialize_unusual(resp.body.data(), resp.body.size());
   });
