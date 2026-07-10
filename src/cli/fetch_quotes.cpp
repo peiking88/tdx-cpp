@@ -523,19 +523,22 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
         } catch (...) {}
       }
     }
-    if (do_unu && wi == 0) {
-      try {
-        auto body = proto::serialize_unusual(Market::SH, 0, 600);
-        auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgUnusual,
-                                body.data(), body.size()));
-        auto items = proto::deserialize_unusual(resp.body.data(), resp.body.size());
-        if (!items.empty()) {
-          local.unusuals.insert(local.unusuals.end(),
-                                std::make_move_iterator(items.begin()),
-                                std::make_move_iterator(items.end()));
-        }
-      } catch (...) {}
-    }
+  }
+
+  // unusual 是市场级数据（全局拉一次），移到分片循环外——原在 for(bi) 内随批次数重复拉取
+  // （全市场场景 worker0 多批→重复 N 次网络+入库）。
+  if (do_unu && wi == 0) {
+    try {
+      auto body = proto::serialize_unusual(Market::SH, 0, 600);
+      auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgUnusual,
+                              body.data(), body.size()));
+      auto items = proto::deserialize_unusual(resp.body.data(), resp.body.size());
+      if (!items.empty()) {
+        local.unusuals.insert(local.unusuals.end(),
+                              std::make_move_iterator(items.begin()),
+                              std::make_move_iterator(items.end()));
+      }
+    } catch (...) {}
   }
 
   conn.Close();
@@ -566,11 +569,11 @@ void IngestChunk(TAOS* conn, FetchChunk& ch, int64_t now_ms, int64_t day_ts,
   if (!ch.quotes.empty()) {
     int64_t now_epoch = now_ms / 1000;
     std::vector<Quote> valid; valid.reserve(ch.quotes.size());
+    std::set<std::string> skip_seen;  // 本 chunk 去重 [skip] 打印，避免 --loop 无限增长
     for (auto& q : ch.quotes) {
       if (!IsQuoteValid(q.datetime, now_epoch)) {
         cnt.skipped++;
-        std::set<std::string> seen;  // 每轮独立，避免 --loop 无限增长
-        if (seen.insert(q.code).second)
+        if (skip_seen.insert(q.code).second)
           std::cerr << "[skip] " << q.code << " ts=" << q.datetime << "\n";
         continue;
       }
@@ -643,19 +646,19 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
   if (shm && ingest_q) {
     // 异步路径：写 mmap 快照（对分析进程可见）+ 投递整轮 chunk 到 SPSC。
     // 主线程完全不碰 TDengine，立即进入下一轮 fetch（采集节拍与入库解耦，设计 §一/§D4）。
+    std::set<std::string> skip_seen;  // 本轮去重 [skip] 打印，避免 --loop 无限增长
     for (auto& ch : chunks) {
       cnt.errors += ch.errors;
       for (auto& q : ch.quotes) {
         if (!IsQuoteValid(q.datetime, now_ms / 1000)) {
           cnt.skipped++;
-          std::set<std::string> seen;  // 每轮独立，避免 --loop 无限增长
-          if (seen.insert(q.code).second)
+          if (skip_seen.insert(q.code).second)
             std::cerr << "[skip] " << q.code << " ts=" << q.datetime << "\n";
           continue;
         }
         shm->Snapshot().Put(q.code, tdx::shm::to_pod(q));
+        cnt.quote++;  // 仅计实际写入 mmap 的有效 quote（与同步路径 InsertQuote 语义一致）
       }
-      cnt.quote += static_cast<int64_t>(ch.quotes.size());  // quote 计数（被 skip 的已在 skipped 中单独计数）
       if (!ingest_q->write(std::move(ch))) {
         cnt.dropped++;  // 队列满：丢弃整轮 chunk（盘中数据最新优先）
       }

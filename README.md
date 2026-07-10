@@ -55,7 +55,13 @@ C++17 / CMake + Ninja / helio (io_uring+fiber) / TDengine / Boost.Context / Open
 
 ## 版本
 
-当前 `0.15.1`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.15.2`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-10 v0.15.2
+
+- **fetch-quotes `[skip]` 去重失效修复**：`IsQuoteValid` 拦截非法 quote 时，去重用的 `std::set seen` 错误声明在 `if` 块内，每条非法 quote 都新建空 set → `insert().second` 恒 true → 同一 code 的 `[skip]` 日志重复刷屏（`--loop` 模式尤甚）。修复：`skip_seen` 移到 `for` 循环外（IngestChunk + RunOneRound 阶段B 两处）。`cnt.skipped` 计数本身正确，仅日志噪音。
+- **fetch-quotes unusual 重复拉取修复**：unusual（0x563 市场级数据）原在 worker0 的 `for(bi)` 分片循环内，每批拉一次——全市场场景 worker0 多批则重复拉 N 次（浪费网络 + 重复入库）。修复：移到循环外，worker0 只拉一次。
+- **fetch-quotes quote 计数语义修正**：异步（mmap）路径 `cnt.quote += ch.quotes.size()` 把被 `IsQuoteValid` 拦截的也算进，与同步路径 `InsertQuote`（仅有效数）不一致。修复：改到 `Snapshot().Put()` 之后 `cnt.quote++`，两条路径语义统一为「实际入库有效数」。
 
 ### 2026-07-10 v0.15.1
 
