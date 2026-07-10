@@ -19,8 +19,8 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `tdx import --tdx-root <path>`                                                                                                                                                                                                | 本地 vipdoc 导入 TDengine（码表驱动 + 网络回退）                                                                                                  |
 | `tdx fetch-kline <code> [code...] [periods] [count]`                                                                                                                                                                          | 当日 K 线循环刷新入库（1d/5m/1m，默认循环）                                                                                                       |
-| `tdx fetch-quotes [--loop] ...]`                                        | 实时行情采集入库。**默认采集自选股 `zxg.blk`
-                                                                          |
+| `tdx fetch-quotes [--loop] ...]`                                        | 实时行情采集入库。**默认采集自选股 `zxg.blk`**；`--mmap_path` 启用「写共享内存 + 异步入库」；`tools/mmap_viewer` 只读挂载跨进程查看实时五档。|
+| `python3 scripts/view.py`                                               | 一键启动 mmap 实时行情查看器：自动拉起 `fetch-quotes --mmap_path /dev/shm/tdx_quotes.shm`（可配 `--shm`），待 shm 段就绪后前台启动 `mmap_viewer`（3s 刷新）。|
 | `tdx fetch-names`                                                                                                                                                                                                             | 同步股票代码→名称对照表                                                                                                                        |
 | `tdx check-names`                                                                                                                                                                                                             | 检查名称表覆盖完整性                                                                                                                          |
 | `tdx cleanup`                                                                                                                                                                                                                 | 清理对照表中已失效的冗余条目                                                                                                                      |
@@ -54,7 +54,11 @@ C++17 / CMake + Ninja / helio (io\_uring+fiber) / TDengine / Boost.Context / Ope
 
 ## 版本
 
-当前 `0.15.6`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+当前 `0.15.7`。版本号位于 `CMakeLists.txt` 的 `project(tdx-cpp VERSION x.y.z)`。
+
+### 2026-07-10 v0.15.7
+
+*   **新增编排脚本 `scripts/view.py`**：一键启动盘中实时行情终端——默认自动拉起 `fetch-quotes --mmap_path /dev/shm/tdx_quotes.shm --quote_loop`（可选 `--shm` / `--blk` / `--interval` / `--jobs`），后台中继 writer stderr 到父进程（不丢选服/采集 trace），等待 shm 段首采落盘后前台启动 `tools/mmap_viewer`（3s 刷新）；任一子进程异常退出先停另一边，Ctrl-C 依次 kill viewer → writer，无孤儿。
 
 ### 2026-07-10 v0.15.6
 

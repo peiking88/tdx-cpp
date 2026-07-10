@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 依赖链 `tdxdata → mootdx → opentdx`。C++ 版合并为单库，分层同源，不再跨语言依赖。本文件是 C++ 实现的设计蓝图与协议知识库。
 
-**完成状态**：Phase 1-6 全部完成（v0.15.6）。
+**完成状态**：Phase 1-6 全部完成（v0.15.7）。
 
 **里程碑**（详见 git log / README changelog）：
 - **Phase 1-3（v0.1-0.3）**：协议层 + A股标准/扩展/SP/MAC 行情 + 数据管理核心（Calendar/Adjust/Resampler/SyncState/TdxData）
@@ -27,6 +27,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.15.4**：移除已回退命令的 CLI 分发（batch-fetch/bars/ex-bars/fetch-history/pull-kline 全部落入未知命令；tdx 链接移除 tdx_batch）+ 文档清理（README/CLAUDE 移除 batch-fetch/quotes_reader 引用）
 - **v0.15.5**：新增编排脚本 `scripts/fetch-today.py`——并行启动 fetch-kline + fetch-quotes --quote_loop，每分钟报告进度；codes 来自 zxg.blk / --codes / --codes-file，可选 --mmap
 - **v0.15.6**：修复 fetch-today.py——codes-file 支持空格/换行分隔；stderr 改 mkstemp 单一 fd + stdbuf 行缓冲（防 abort 丢 trace）+ 环形缓冲 dump；Ctrl-C 8s grace 优雅退出
+- **v0.15.7**：新增 `scripts/view.py`——一键启动 mmap 实时行情终端（自动拉起 fetch-quotes --mmap_path + 前台 tools/mmap_viewer）；修复 `tools/mmap_viewer` 必须显式 `--mmap_path` 的使用门槛
 
 **上游短板改进**（C++ 版相对 Python 上游）：①并发批量下载（`tdx_batch` helio fiber 池 + `-n`）；②断点续传（`SyncState` JSON 持久化）；③统一 TDengine 时序存储（替代上游零散存储）。
 
@@ -133,7 +134,7 @@ src/         源码
   ├─ shm/                    盘中实时共享内存（segment/snapshot）
   ├─ cli/                    CLI 入口（main.cpp / fetch_quotes.cpp / import.cpp）
   └─ smoke.cc                烟雾测试
-scripts/     辅助脚本（setup_external.sh / record_golden.py / reimport.py）
+scripts/     辅助脚本（setup_external.sh / record_golden.py / reimport.py / view.py / fetch-today.py）
 tests/       单元测试 + 集成测试 + fixtures/golden/（黄金字节流真服录制）
 external/    第三方依赖（不入 git，setup_external.sh 初始化）
 output/      程序输出（不入 git）
@@ -153,6 +154,7 @@ output/      程序输出（不入 git）
 **CLI 命令**（`src/cli/main.cpp` 分发）：
 - **采集/入库**：`server-test`（测速选服）、`import`（vipdoc 历史导入）、`fetch-quotes`（实时行情→TDengine/mmap）、`fetch-kline`（当日K线循环）、`fetch-finance`/`fetch-f10`（财务/F10 独立重导）、`truncate-quotes`（清当日盘中队列）
 - **盘中接口**：`history-orders`、`history-tx`、`vol-profile`、`index-info`、`unusual`、`board-list`、`board-quotes`、`capital-flow`
+- **盘中实时终端**：`scripts/view.py`（自动拉起 fetch-quotes --mmap_path + 前台 mmap_viewer，3s 刷新）
 - **代码名称管理**：`fetch-names`、`cleanup`、`check-names`
 - **批量**：`tdx_batch`（src/batch/，BatchFetchKline 用于并发测试，已从 CLI 移除）
 - **已移除命令**：`pull-kline`（换 `import`）；`bars`/`ex-bars`/`fetch-history`/`batch-fetch` 已从 CLI 移除（`batch-fetch` 回落为测试用例）
