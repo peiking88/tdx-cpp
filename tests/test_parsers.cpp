@@ -165,6 +165,49 @@ TEST(QuotesParser, BaseAndRelativeIncrement) {
   EXPECT_EQ(quotes[0].code, "600000");
 }
 
+// ---------- 基金 OHLC 缩放 0.001（vs 个股 0.01）：回归 510300 实时报价被放大 10× bug ----------
+// 同一份报文，个股(600000) ÷100、基金(510300) ÷1000；旧版统一 ÷100 导致基金价 10×。
+TEST(QuotesParser, FundOhlcScale001) {
+  std::vector<uint8_t> resp;
+  pu16(resp, 0);   // 头部第一个 H 丢弃
+  pu16(resp, 1);   // count
+  // <B6sH>：market=0(SH), code="510300"(沪市基金), active1=0
+  resp.push_back(0);
+  for (char ch : std::string("510300")) resp.push_back(ch);
+  pu16(resp, 0);
+  ep(resp, 1000);          // price（基准）
+  ep(resp, -10);           // pre_close 增量 → 990
+  ep(resp, 0);             // open → 1000
+  ep(resp, 20);            // high → 1020
+  ep(resp, -5);            // low → 995
+  ep(resp, 0);             // server_time
+  ep(resp, 0);             // neg_price
+  ep(resp, 1000);          // vol
+  ep(resp, 10);            // cur_vol
+  pf32(resp, 500000.0f);   // amount（float32）
+  ep(resp, 0); ep(resp, 0); ep(resp, 0); ep(resp, 0);  // s_vol b_vol s_amount open_amount
+  for (int j = 0; j < 5; ++j) {
+    ep(resp, -j);    // bid 增量 → 1000-j
+    ep(resp, j + 1); // ask 增量 → 1000+j+1
+    ep(resp, 100);   // bid_vol
+    ep(resp, 200);   // ask_vol
+  }
+  for (int i = 0; i < 10; ++i) resp.push_back(0);  // 尾部 10 字节
+
+  auto quotes = deserialize_quotes_detail(resp.data(), resp.size());
+  ASSERT_EQ(quotes.size(), 1u);
+  // 基金：OHLC/price/pre_close/bid/ask ×0.001（3 位小数）；旧 0.01 会得 10×。
+  EXPECT_DOUBLE_EQ(quotes[0].price,     1.0);     // 1000 × 0.001
+  EXPECT_DOUBLE_EQ(quotes[0].pre_close, 0.99);    // 990 × 0.001
+  EXPECT_DOUBLE_EQ(quotes[0].open,      1.0);
+  EXPECT_DOUBLE_EQ(quotes[0].high,      1.02);    // 1020 × 0.001
+  EXPECT_DOUBLE_EQ(quotes[0].low,       0.995);   // 995 × 0.001
+  EXPECT_DOUBLE_EQ(quotes[0].bid[0],    1.0);     // 1000 × 0.001
+  EXPECT_DOUBLE_EQ(quotes[0].ask[0],    1.001);   // 1001 × 0.001
+  EXPECT_DOUBLE_EQ(quotes[0].amount, 500000.0);   // amount 不缩放（NetQuotes）
+  EXPECT_EQ(quotes[0].code, "510300");
+}
+
 // ---------- 列表：固定 37B（GBK name + decimal_point）----------
 TEST(ListParser, FixedRecord) {
   std::vector<uint8_t> resp;

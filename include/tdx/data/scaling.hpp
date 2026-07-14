@@ -69,11 +69,18 @@ inline FieldScaling GetScaling(SecurityClass sc, DataSource src) {
   case DataSource::NetKlineSp:
     break;
   case DataSource::NetQuotes:
-    s.ohlc      = 0.01;   // quotationClient.py:36-39
-    s.price     = 0.01;
-    s.pre_close = 0.01;
-    s.bid_ask   = 0.01;
-    s.volume    = 100.0;  // 协议返回手，×100 → 股，与 kline 表统一
+    // 基金报价 3 位小数（对照 Vipdoc1d SHFund/SZFund: ohlc=0.001）；个股/指数 2 位 0.01。
+    // 协议 raw 对基金以 0.001 元为单位编码，沿用 0.01 会让基金 OHLC/现价放大 10×。
+    switch (sc) {
+    case SecurityClass::SHFund:
+    case SecurityClass::SZFund:
+      s.ohlc = 0.001; s.price = 0.001; s.pre_close = 0.001; s.bid_ask = 0.001;
+      break;
+    default:  // AStock / Index
+      s.ohlc = 0.01; s.price = 0.01; s.pre_close = 0.01; s.bid_ask = 0.01;  // quotationClient.py:36-39
+      break;
+    }
+    s.volume = 100.0;  // 协议返回手，×100 → 股，与 kline 表统一（所有标的一致）
     break;
   case DataSource::NetTick:
     s.price = 0.01;       // quotationClient.py:150
@@ -88,8 +95,9 @@ inline FieldScaling GetScaling(SecurityClass sc, DataSource src) {
   return s;
 }
 
-// 网络源简化版——所有标的统一编码，sc 不影响结果。
-// 仅限 Net* 源使用；Vipdoc* 源必须走双参版，否则 SHFund/SZFund 系数错误。
+// 网络源简化版——固定按 AStock 取系数（sc 不影响结果）。
+// 仅限确信无基金标的的 Net* 源使用；NetQuotes（实时报价，含基金）须走双参版，
+// 否则基金 OHLC/现价会被当 AStock 放大 10×（基金 0.001 vs 个股 0.01）。Vipdoc* 同理须双参。
 inline FieldScaling GetScaling(DataSource src) {
   return GetScaling(SecurityClass::AStock, src);
 }

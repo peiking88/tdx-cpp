@@ -54,13 +54,21 @@ add_test(NAME test_parsers COMMAND test_parsers)
 add_executable(test_bars test_bars.cpp)
 target_include_directories(test_bars PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_bars PRIVATE tdx_quotes tdx_proto_parsers tdx_proto_core gtest gtest_main base fibers2)
-add_test(NAME test_bars COMMAND test_bars)
+# 不可达时 SetUpTestSuite 用 GTEST_SKIP（不视为失败）→ 经 wrapper 把「全 SKIP」
+# 翻译成 ctest SKIPPED（SKIP_RETURN_CODE=77），避免退出码 0 导致的假绿。
+# 见 scripts/run_gtest.sh。
+add_test(NAME test_bars
+  COMMAND ${CMAKE_SOURCE_DIR}/scripts/run_gtest.sh $<TARGET_FILE:test_bars>)
+set_tests_properties(test_bars PROPERTIES SKIP_RETURN_CODE 77)
 
 # fetch-history 真网测试（原 CLI 命令回退为测试用例）
 add_executable(test_fetch_history test_fetch_history.cpp)
 target_include_directories(test_fetch_history PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_fetch_history PRIVATE tdx_data gtest gtest_main base fibers2)
-add_test(NAME test_fetch_history COMMAND test_fetch_history)
+# 同 test_bars：不可达时全 SKIP → wrapper 翻译为 ctest SKIPPED，避免假绿。
+add_test(NAME test_fetch_history
+  COMMAND ${CMAKE_SOURCE_DIR}/scripts/run_gtest.sh $<TARGET_FILE:test_fetch_history>)
+set_tests_properties(test_fetch_history PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(test_sp_codec test_sp_codec.cpp)
 target_include_directories(test_sp_codec PRIVATE ${CMAKE_SOURCE_DIR}/include)

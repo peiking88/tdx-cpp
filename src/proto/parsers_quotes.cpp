@@ -61,7 +61,9 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
     Quote q;
     q.datetime = format_time_to_epoch(server_time.value);  // realtime quote: HHMMSSmm → 当日 epoch
     int64_t base = price.value;
-    auto s = tdx::data::GetScaling(tdx::data::DataSource::NetQuotes);
+    q.code = util::trim_null(code_raw);  // 上移：供 ClassifySecurity 区分基金/个股缩放
+    auto s = tdx::data::GetScaling(
+        tdx::data::ClassifySecurity(q.code), tdx::data::DataSource::NetQuotes);
     q.price     = static_cast<double>(base) * s.price;
     q.pre_close = static_cast<double>(base + pre_close.value) * s.pre_close;
     q.open      = static_cast<double>(base + open.value) * s.ohlc;
@@ -85,7 +87,6 @@ std::vector<Quote> deserialize_quotes_detail(const uint8_t* data, std::size_t le
     if (pos + 10 > len) break;
     pos += 10;  // 尾部 <h4shH>：unknown/rise_speed/active2（暂不解析）
 
-    q.code = util::trim_null(code_raw);
     result.push_back(std::move(q));
   }
   return result;
