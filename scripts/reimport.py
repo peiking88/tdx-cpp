@@ -35,6 +35,19 @@ ZXG_DEFAULT = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk"
 STABLES = ["kline", "adjust", "finance", "f10_cat", "f10_text"]
 
 
+def IsHkCode(code):
+    # 复刻 C++ tdx::IsHkCode（include/tdx/consts.hpp）。
+    # 保守规则：显式 sh/sz/bj 前缀 → A 股；4-5 位纯数字 / 字母开头 → HK；6-8 位数字不识别。
+    if len(code) >= 8 and code[:2] in ("sh", "sz", "bj"):
+        return False
+    if not code:
+        return False
+    all_digit = all('0' <= c <= '9' for c in code)
+    if all_digit:
+        return len(code) in (4, 5)
+    return code[0].isalpha()
+
+
 def read_zxg(path):
     # 逐字复刻 C++ ReadZxgBlk：每行 7 位，首位 1=sh / 0=sz + 6 位代码。
     out = []
@@ -130,14 +143,28 @@ def main():
             codes = [ln.split()[0] for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
     else:
         codes = read_zxg(args.zxg)
-    if not codes:
-        sys.exit(f"无代码（zxg.blk={args.zxg} 为空/不可读），可用 --codes 显式指定")
+    # 按 A 股/港股分桶。finance/f10 仅支持 A 股（TDX 协议 0x10/0x2cf/0x2d0 无 HK 实现），
+    # HK 码在 fetch-finance/fetch-f10 阶段跳过（kline 也仅 vipdoc/A 股，默认无 HK）。
+    # fetch-quotes --quote_hk 才覆盖 HK 实时行情（0x248a）。
+    a_codes = []
+    hk_codes = []
+    for c in codes:
+        explicit_a = len(c) >= 8 and c[:2] in ("sh", "sz", "bj")
+        if not explicit_a and IsHkCode(c):
+            hk_codes.append(c)
+        else:
+            a_codes.append(c)
+    codes = a_codes  # kline/finance/f10 仅 A 股
 
     print(f"二进制: {TDX_BIN}")
+    print(f"代码数: {len(codes)} A股, {len(hk_codes)} 港股（HK 不参与 finance/f10 重导）"
+          + (f"   示例: {' '.join(codes[:4] + hk_codes[:2])}" if codes or hk_codes else ""))
+    if hk_codes:
+        print(f"港股跳过finance/f10: {' '.join(hk_codes[:8])}"
+              + (" ..." if len(hk_codes) > 8 else ""))
     if args.kronos:
         print("模式:   日线清库重建（kronos——个股+大盘指数日K线 + 复权因子）")
     else:
-        print(f"代码数: {len(codes)}   示例: {' '.join(codes[:6])}")
         print(f"模式:   {'DRY-RUN（不执行）' if args.dry_run else '执行（清空 5 张超级表并重导）'}")
 
     res = {}

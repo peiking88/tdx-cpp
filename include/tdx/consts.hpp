@@ -89,6 +89,7 @@ inline std::pair<Market, std::string> ParseMarketCode(std::string_view s) {
   return {Market::SH, ""};  // 无前缀：code 空表示无效
 }
 
+
 // ============ Phase 2：扩展行情 + SP/MAC 枚举 ============
 
 // 扩展市场（opentdx const.py:491-544 EX_MARKET）。值域 1-102，与标准 MARKET(0-2) 独立。
@@ -114,6 +115,78 @@ enum class ExMarket : uint8_t {
   MoneyMarket = 91, FundValuation = 93, HkDarkPool = 98,
   CodeMirror = 100, SzseIndex = 102,
 };
+
+// ============ 港股分类（按代码长度 + 前缀推断 ExMarket）============
+// 与 mootdx.quotes.validate 同哲学：不允许裸 code 推断 A/HK 归属，开发者须显式
+// 传 ExMarket（即 call site 决定走 HK 还是 A 股）。本函数仅做「HK 业务分类」：
+//   前提：调用方已确认此 code 是港股（例：fetch-quotes --quote_hk 批量用户输入、
+//         BarsAuto 中已按前缀分流）；本函数只做 code → ExMarket 分桶，不做 HK/A 股判断。
+// 规则（对齐 opentdx EX_CATEGORY / mootdx 业务 ID）：
+//   5 位数字（03690/00700 等）→ HkMainBoard=31
+//   4 位数字首位 0/8（08001 等 GEM）→ HkGem=48，其他 4 位 → HkMainBoard=31
+//   8 位数字（800000=tcp HSI）→ HkIndex=27
+//   字母开头（HSI/HSTECH 等）→ HkIndex=27
+// 其他长度/前缀不视为合法 HK 代码，返回基值 HkMainBoard（调用方不应传入）。
+inline ExMarket ClassifyHk(std::string_view code) {
+  if (code.empty()) return ExMarket::HkMainBoard;
+  bool all_digit = true;
+  for (char c : code) { if (c < '0' || c > '9') { all_digit = false; break; } }
+  if (!all_digit) return ExMarket::HkIndex;  // 字母开头（HSI/HSTECH）→ 恒指
+  switch (code.size()) {
+    case 4:
+      // GEM：首位 0/8（实际范围 30 年内仍保持 4 位创业板编码）
+      return (code[0] == '0' || code[0] == '8') ? ExMarket::HkGem : ExMarket::HkMainBoard;
+    case 5:
+      return ExMarket::HkMainBoard;
+    case 8:  // 800000/800001 等恒指系列（TDX 内部数字编码）
+      return ExMarket::HkIndex;
+    default:
+      return ExMarket::HkMainBoard;
+  }
+}
+
+// 「这个 code（可能带 sh/sz/bj 前缀）是否港股？」——供 fetch-quotes --quote_hk 批量分流用。
+// 保守规则：① 已带 sh/sz/bj 前缀 → A 股（由 ParseMarketCode 处理）；② 剥前缀后按
+// ClassifyHk 业务规则：4/5 位纯数字、字母开头视为 HK 代码。
+// 6-8 位纯数字不识别为 HK（归 A 股/配售/新股认购代码）。返回 false 表示非 HK。
+inline bool IsHkCode(std::string_view code) {
+  if (code.size() >= 8) {
+    auto pre = code.substr(0, 2);
+    if (pre == "sh" || pre == "sz" || pre == "bj") return false;  // 显式 A 股前缀
+  }
+  bool all_digit = true;
+  for (char c : code) { if (c < '0' || c > '9') { all_digit = false; break; } }
+  if (!all_digit) {
+    // 字母开头 → HK 指数（HSI/HSTECH）；其他字符（符号等）→ 非 HK
+    return (code[0] >= 'A' && code[0] <= 'Z') || (code[0] >= 'a' && code[0] <= 'z');
+  }
+  return code.size() == 4 || code.size() == 5;
+}
+
+// 显式分流：调用方声明「这批 code 是 HK」，返回各 code 归属的 ExMarket。
+// 与 IsHkCode 互补：IsHkCode 是保守自动推断（6-8 位数字不识别，避免与 A 股冲突），
+// ClassifyHkExplicit 是调用方显式指定「按 HK 业务规则分桶」——用于已知是 HK 的场景
+// （如用户显式传 --quote_hk 的 code 列表、或 BarsAuto(code, ExMarket::Hk*) 调用）。
+// 规则：
+//   5 位数字 → HkMainBoard；4 位数字首位 0/8 → HkGem，其他 4 位 → HkMainBoard；
+//   字母开头（HSI/HSTECH/800000 等在 BarsAuto 调用前已被 IsHkCode 筛掉）→ HkIndex。
+// 注意：TDX 恒指编码 800000 是 6 位数字，与 A 股长度重叠，IsHkCode 保守拒绝——
+//       调用 BarsAuto(800000) 走 A 股 StdQuotes（返回空，因 A 股无此 code）；
+//       业务上如需采 HSI 须显式 BarsAuto("HSI") 或 BarsAuto("800000", HkIndex)。
+inline ExMarket ClassifyHkExplicit(std::string_view code) {
+  if (code.empty()) return ExMarket::HkMainBoard;
+  bool all_digit = true;
+  for (char c : code) { if (c < '0' || c > '9') { all_digit = false; break; } }
+  if (!all_digit) return ExMarket::HkIndex;  // 字母开头（HSI/HSTECH）→ 恒指
+  switch (code.size()) {
+    case 4:
+      return (code[0] == '0' || code[0] == '8') ? ExMarket::HkGem : ExMarket::HkMainBoard;
+    case 5:
+      return ExMarket::HkMainBoard;
+    default:
+      return ExMarket::HkMainBoard;
+  }
+}
 
 // 扩展类别（opentdx const.py:243-255 EX_CATEGORY）
 enum class ExCategory : uint32_t {

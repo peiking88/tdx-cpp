@@ -6,10 +6,11 @@
 
 namespace tdx::util {
 
-// 校验股票代码格式（纯数字 6 位）。TDX 协议返回的代码和 vipdoc 文件名
-// 均为 6 位纯数字，作为 TDengine 子表名（如 q_600000）使用前必须校验。
+// 校验股票代码格式（纯数字 4-8 位）。A 股 6 位（600000/000001）；港股 4-5 位（03690/00700/08001）、
+// 恒指系列 8 位数字编码（800000）。作为 TDengine 子表名（q_<code>）使用前校验，防注入。
+// 字母代码（HSI/HSTECH）返回 false——此类代码需调用方剥离或映射后再入库。
 inline constexpr bool IsValidCode(std::string_view code) {
-  if (code.size() != 6) return false;
+  if (code.size() < 4 || code.size() > 8) return false;
   for (char c : code) {
     if (c < '0' || c > '9') return false;
   }

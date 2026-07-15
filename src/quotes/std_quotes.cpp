@@ -13,6 +13,8 @@
 #include "tdx/util/byte_order.hpp"
 #include "tdx/util/gbk.hpp"
 
+#include "tdx/quotes/ext_quotes.hpp"
+
 namespace tdx::quotes {
 
 StdQuotes::StdQuotes() = default;
@@ -150,6 +152,7 @@ void StdQuotes::Close() {
     pool_.reset();
   }
   proactor_ = nullptr;
+  ext_.reset();  // BarsAuto 懒建的 ExtQuotes，Close 时释放
 }
 
 proto::Response StdQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& body) {
@@ -205,6 +208,63 @@ std::vector<KLine> StdQuotes::Bars(Market market, std::string_view code, Period 
     auto resp = Call(proto::kMsgKline, body);
     return proto::deserialize_kline(resp.body.data(), resp.body.size(), period);
   });
+}
+
+namespace {
+// BarsAuto 分流：带 sh/sz/bj 前缀 → A 股（剥前缀）；其他按 IsHkCode / hk_hint 路由。
+// 返回 true 表示已按 HK 路径处理（out_market 已设置），false 表示 A 股（调用方走原 Bars）。
+bool RouteAuto(std::string_view code, std::optional<ExMarket> hk_hint,
+               Market* out_a_stock_market, std::string_view* out_a_stock_code,
+               ExMarket* out_hk_market) {
+  if (code.size() >= 8) {
+    auto pre = code.substr(0, 2);
+    if (pre == "sh" || pre == "sz" || pre == "bj") {
+      *out_a_stock_market = (pre == "sh") ? Market::SH : (pre == "sz") ? Market::SZ : Market::BJ;
+      *out_a_stock_code = code.substr(2);
+      return false;  // A 股路径
+    }
+  }
+  // 无前缀：显式 hk_hint 或 IsHkCode 识别 → HK 路径
+  if (hk_hint.has_value() || IsHkCode(code)) {
+    *out_hk_market = hk_hint.value_or(ClassifyHkExplicit(code));
+    return true;
+  }
+  // 兜底 A 股 SH（旧行为：6 位纯数字被 ParseMarketCode 拒绝为无效，此处同）
+  *out_a_stock_market = Market::SH;
+  *out_a_stock_code = code;
+  return false;
+}
+}  // namespace
+
+std::vector<KLine> StdQuotes::BarsAuto(std::string_view code, Period period,
+                                        uint16_t start, uint16_t count, Adjust adjust,
+                                        std::optional<ExMarket> hk_hint) {
+  Market a_market{};
+  std::string_view a_code{};
+  ExMarket hk_market{};
+  if (RouteAuto(code, hk_hint, &a_market, &a_code, &hk_market)) {
+    // HK 路径：懒建 ExtQuotes（独立 pool，只服务于 BarsAuto；Close 时随 StdQuotes 释放）
+    if (!ext_) ext_ = std::make_unique<ExtQuotes>();
+    if (!ext_->IsConnected()) {
+      if (auto ec = ext_.get()->Connect()) {
+        LOG(ERROR) << "BarsAuto: ExtQuotes 连接失败: " << ec.message();
+        return {};  // SafeAwait 式空结果，外层按 empty() 跳过
+      }
+    }
+    return ext_->Bars(hk_market, code, period, start, count);
+  }
+  return Bars(a_market, a_code, period, start, count, adjust);
+}
+
+std::vector<KLine> StdQuotes::BarsAuto(const std::vector<std::string>& codes, Period period,
+                                        uint16_t start, uint16_t count, Adjust adjust) {
+  std::vector<KLine> out;
+  for (const auto& c : codes) {
+    auto v = BarsAuto(std::string_view(c), period, start, count, adjust);
+    out.insert(out.end(), std::make_move_iterator(v.begin()),
+                         std::make_move_iterator(v.end()));
+  }
+  return out;
 }
 
 std::vector<Quote> StdQuotes::Quotes(const std::vector<proto::QuoteReq>& stocks) {

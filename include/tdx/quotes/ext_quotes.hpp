@@ -29,6 +29,9 @@ class ExtQuotes {
 
   // 启动：ProactorPool + ex_hosts 选服 + 连接 + 登录（0x2454）。不发心跳。
   std::error_code Connect();
+
+  // 默认扩展行情服务器列表（供 CLI/fetch-quotes 等复用，避免多处硬编码）
+  static std::vector<proto::ServerInfo> DefaultHosts();
   void Close();
   bool IsConnected() const { return connected_; }
 
@@ -47,7 +50,6 @@ class ExtQuotes {
  private:
   proto::Response Call(uint16_t msg_id, const std::vector<uint8_t>& body);
   std::error_code ConnectInFiber();
-  static std::vector<proto::ServerInfo> DefaultHosts();
 
   std::unique_ptr<::util::ProactorPool> pool_;
   ::util::fb2::ProactorBase* proactor_ = nullptr;

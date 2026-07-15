@@ -39,6 +39,7 @@
 #include "tdx/util/code_validate.hpp"
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/quotes/std_quotes.hpp"
+#include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/taos/taos_connection.hpp"
 #include "tdx/taos/taos_import.hpp"
 #include "tdx/types.hpp"
@@ -49,6 +50,7 @@
 
 #include <taos.h>
 
+ABSL_FLAG(bool, quote_hk, false, "同时采集港股（按代码分桶走扩展行情端口 7727，协议 0x248a）");
 ABSL_FLAG(std::string, quote_codes, "", "股票代码列表（逗号分隔），不指定则拉取全市场");
 ABSL_FLAG(int32_t, quote_jobs, 8, "并发 worker 数");
 ABSL_FLAG(int32_t, quote_batch, 80, "单次网络请求股票数（≤200）");
@@ -75,6 +77,11 @@ namespace {
 
 std::atomic<bool> g_stop{false};
 void OnSignal(int) { g_stop = true; }
+
+// Worker 分桶：A 股（标准行情，msg_id 0x53e）/ 港股（扩展行情，msg_id 0x248a）。
+// 同服务器的一批 code 走同一协议（A 股 0x53e / 港股 0x248a 请求格式互不兼容），不同桶分别选服、
+// 分别建连接。
+enum class WorkerMarket : uint8_t { AShare, HK };
 
 std::vector<std::string> SplitCodes(const std::string& s) {
   std::vector<std::string> out;
@@ -411,6 +418,7 @@ struct FetchChunk {
 
 void WorkerRun(::util::fb2::ProactorBase* pb,
                ::util::FiberSocketBase::endpoint_type ep,
+               WorkerMarket wm,
                const std::vector<std::string>& codes, int n, int batch_size,
                bool do_tx, bool do_tick, bool do_idx, bool do_unu,
                bool do_vol, bool do_hist,
@@ -418,10 +426,17 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
   proto::Connection conn(pb);
   if (conn.Connect(ep)) { std::lock_guard<::util::fb2::Mutex> lk(mu); chunks.back().errors++; return; }
   try {
-    auto login = proto::serialize_login();
-    auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgLogin,
-                                   login.data(), login.size());
-    conn.Call(req);
+    if (wm == WorkerMarket::HK) {
+      auto login = proto::serialize_ex_login();
+      auto req = proto::pack_request(proto::kExHead, 0, proto::kMsgExLogin,
+                                     login.data(), login.size());
+      conn.Call(req);
+    } else {
+      auto login = proto::serialize_login();
+      auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgLogin,
+                                     login.data(), login.size());
+      conn.Call(req);
+    }
   } catch (...) { std::lock_guard<::util::fb2::Mutex> lk(mu); chunks.back().errors++; return; }
 
   FetchChunk local;
@@ -429,32 +444,63 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
   for (size_t bi = static_cast<size_t>(wi); bi < codes.size(); ) {
     if (g_stop) break;
 
-    // ---- Quote (batch 0x53e) ----
-    std::vector<proto::QuoteReq> batch;
-    batch.reserve(batch_size);
+    // ---- Quote (按 wm 选协议) ----
+    std::vector<proto::QuoteReq> a_batch;  // A 股用 <B6s>
+    std::vector<std::pair<ExMarket, std::string>> hk_batch;  // HK 用 <B23s>
+    a_batch.reserve(batch_size);
+    hk_batch.reserve(batch_size);
     for (size_t k = 0; k < static_cast<size_t>(batch_size); ++k) {
       size_t ci = bi + k * static_cast<size_t>(n);
       if (ci >= codes.size()) break;
-      auto [mk, c] = ParseMarketCode(codes[ci]);
-      if (c.empty()) { std::cerr << codes[ci] << ": 缺市场前缀，跳过\n"; continue; }
-      batch.push_back({mk, c});
-    }
-    bi += batch.size() * static_cast<size_t>(n);
-    if (batch.empty()) continue;
-
-    try {
-      auto body = proto::serialize_quotes_detail(batch);
-      auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgQuotesDetail,
-                              body.data(), body.size()));
-      auto qs = proto::deserialize_quotes_detail(resp.body.data(), resp.body.size());
-      if (!qs.empty()) {
-        local.quotes.insert(local.quotes.end(),
-                            std::make_move_iterator(qs.begin()),
-                            std::make_move_iterator(qs.end()));
+      if (wm == WorkerMarket::HK) {
+        hk_batch.push_back({ClassifyHkExplicit(codes[ci]), codes[ci]});
+      } else {
+        auto [mk, c] = ParseMarketCode(codes[ci]);
+        if (c.empty()) { std::cerr << codes[ci] << ": 缺市场前缀，跳过\n"; continue; }
+        a_batch.push_back({mk, c});
       }
-    } catch (...) { local.errors++; }
+    }
+    bi += (wm == WorkerMarket::HK ? hk_batch.size() : a_batch.size()) * static_cast<size_t>(n);
+    if (a_batch.empty() && hk_batch.empty()) continue;
 
-    for (const auto& req : batch) {
+    if (wm == WorkerMarket::HK && !hk_batch.empty()) {
+      // HK: 0x248a 响应 unpack_futures 字段名不同（ExQuote），转 Quote 落库（OHLC 直接×1.0）。
+      // HK 服务器不返回五档（bid/ask=0）。
+      try {
+        auto body = proto::serialize_ex_quotes(hk_batch);
+        auto resp = conn.Call(proto::pack_request(proto::kExHead, 0, proto::kMsgExQuotes,
+                                body.data(), body.size()));
+        auto qs = proto::deserialize_ex_quotes(resp.body.data(), resp.body.size());
+        for (auto& q : qs) {
+          if (q.code.empty()) continue;
+          Quote out;
+          out.code = std::move(q.code);
+          out.datetime = q.datetime;
+          out.pre_close = q.pre_close;
+          out.open = q.open;
+          out.high = q.high;
+          out.low = q.low;
+          out.price = q.close;
+          out.volume = q.vol;
+          out.amount = q.amount;
+          local.quotes.push_back(std::move(out));
+        }
+      } catch (...) { local.errors++; }
+    } else if (!a_batch.empty()) {
+      try {
+        auto body = proto::serialize_quotes_detail(a_batch);
+        auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgQuotesDetail,
+                                body.data(), body.size()));
+        auto qs = proto::deserialize_quotes_detail(resp.body.data(), resp.body.size());
+        if (!qs.empty()) {
+          local.quotes.insert(local.quotes.end(),
+                              std::make_move_iterator(qs.begin()),
+                              std::make_move_iterator(qs.end()));
+        }
+      } catch (...) { local.errors++; }
+    }
+
+    for (const auto& req : a_batch) {
       if (g_stop) break;
       auto mkt = req.market;
       const auto& code = req.code;
@@ -500,13 +546,13 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
     // hist 是每股票数据：各 worker 采自己分片内的票（勿限 wi==0，否则只采 1/jobs）。
     // unusual 才是市场级（全局拉一次），仍限 wi==0（见下）。
     // f10/finance 已分离到独立命令 tdx f10 / tdx finance（清库重导），不在 fetch-quotes 采集。
-    if (do_hist) {
+    if (do_hist && wm == WorkerMarket::AShare) {
       time_t now_t = std::time(nullptr);
       struct tm now_tm{};
       localtime_r(&now_t, &now_tm);
       uint32_t today = static_cast<uint32_t>((now_tm.tm_year + 1900) * 10000 +
                       (now_tm.tm_mon + 1) * 100 + now_tm.tm_mday);
-      for (const auto& req : batch) {
+      for (const auto& req : a_batch) {
         try {
           auto body = proto::serialize_history_orders(req.market, req.code, today);
           auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgHistoryOrders,
@@ -526,8 +572,8 @@ void WorkerRun(::util::fb2::ProactorBase* pb,
   }
 
   // unusual 是市场级数据（全局拉一次），移到分片循环外——原在 for(bi) 内随批次数重复拉取
-  // （全市场场景 worker0 多批→重复 N 次网络+入库）。
-  if (do_unu && wi == 0) {
+  // （全市场场景 worker0 多批→重复 N 次网络+入库）。仅 A 股桶（HK 桶调用方置 do_unu=false）。
+  if (do_unu && wi == 0 && wm == WorkerMarket::AShare) {
     try {
       auto body = proto::serialize_unusual(Market::SH, 0, 600);
       auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgUnusual,
@@ -593,6 +639,7 @@ void IngestChunk(TAOS* conn, FetchChunk& ch, int64_t now_ms, int64_t day_ts,
 
 // 单轮采集：两阶段——fiber 拉取 → 主线程写 mmap 快照 / 投递异步入库（或同步入库）
 Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_size,
+                     WorkerMarket wm,
                      bool do_tx, bool do_tick, bool do_idx, bool do_unu,
                      bool do_vol, bool do_hist,
                      tdx::shm::Segment* shm,
@@ -612,9 +659,12 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
     auto* pb = pool->GetNextProactor();
 
     proto::ServerPool sp(pool.get());
-    auto best = sp.SelectBest(quotes::StdQuotes::DefaultHosts());
+    auto hosts = (wm == WorkerMarket::HK) ? quotes::ExtQuotes::DefaultHosts()
+                                          : quotes::StdQuotes::DefaultHosts();
+    auto best = sp.SelectBest(std::move(hosts));
     if (!best) { std::cerr << "没有可用服务器\n"; pool->Stop(); cnt.errors++; return cnt; }
-    std::cerr << "选服: " << best->name << " " << best->ip << ":" << best->port << "\n";
+    std::cerr << (wm == WorkerMarket::HK ? "[HK] 选服: " : "选服: ")
+              << best->name << " " << best->ip << ":" << best->port << "\n";
 
     auto addr = boost::asio::ip::make_address(best->ip);
     ::util::FiberSocketBase::endpoint_type ep(addr, best->port);
@@ -629,7 +679,7 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
       for (int wi = 0; wi < n; ++wi) {
         workers.push_back(::util::fb2::Fiber(
             ::util::fb2::Fiber::Opts{.stack_size = 128 * 1024},
-            [&, wi] { WorkerRun(pb, ep, codes, n, batch_size,
+            [&, wi] { WorkerRun(pb, ep, wm, codes, n, batch_size,
                                 do_tx, do_tick, do_idx, do_unu,
                                 do_vol, do_hist, wi, chunks, mu); }));
       }
@@ -736,6 +786,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   bool do_hist = absl::GetFlag(FLAGS_with_hist);
   bool do_brd  = absl::GetFlag(FLAGS_with_board);
   std::string mmap_path = absl::GetFlag(FLAGS_mmap_path);
+  bool do_hk = absl::GetFlag(FLAGS_quote_hk);
 
   if (do_brd) {
     std::cerr << "警告: --with_board 尚未实现，忽略。\n";
@@ -767,7 +818,17 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   }
   if (codes.empty()) { std::cerr << "没有股票代码可拉取\n"; return 1; }
 
+  // 按 A 股/港股分桶。do_hk 开 + 代码是 HK（显式 sh/sz/bj 前缀排除）→ HK 桶，否则 A 股桶。
+  std::vector<std::string> a_codes, hk_codes;
+  for (auto& c : codes) {
+    bool explicit_a = (c.size() >= 8) && (c.substr(0,2) == "sh" || c.substr(0,2) == "sz" || c.substr(0,2) == "bj");
+    if (do_hk && !explicit_a && IsHkCode(c)) hk_codes.push_back(std::move(c));
+    else a_codes.push_back(std::move(c));
+  }
+  if (a_codes.empty() && hk_codes.empty()) { std::cerr << "没有股票代码可拉取\n"; return 1; }
+
   std::cerr << "采集: quote";
+  if (do_hk && !hk_codes.empty()) std::cerr << " +hk";
   if (do_tx) std::cerr << " +tx";
   if (do_tick) std::cerr << " +tick";
   if (do_idx) std::cerr << " +idx";
@@ -777,6 +838,8 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   if (do_brd) std::cerr << " +board";
   std::cerr << "  并发: " << jobs << "  循环: " << (loop ? "开" : "关");
   if (loop) std::cerr << "  间隔:" << interval << "s";
+  if (!a_codes.empty()) std::cerr << "  A股:" << a_codes.size() << "只";
+  if (!hk_codes.empty()) std::cerr << "  HK:" << hk_codes.size() << "只";
   std::cerr << "\n\n";
 
   // 异步入库：构造共享内存段 + SPSC 队列 + IngestWorker 线程（设计文档 §6.2）
@@ -800,23 +863,45 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
   do {
     ++round;
     auto t0 = std::chrono::steady_clock::now();
-    auto cnt = RunOneRound(codes, jobs, batch_size, do_tx, do_tick, do_idx, do_unu,
-                           do_vol, do_hist, shm.get(), ingest_q.get());
-    total.quote += cnt.quote; total.tx += cnt.tx; total.tick += cnt.tick;
-    total.index += cnt.index; total.unusual += cnt.unusual;
-    total.vol += cnt.vol; total.hist += cnt.hist;
-    total.dropped += cnt.dropped; total.skipped += cnt.skipped;
-    total.errors += cnt.errors;
 
-    std::cerr << "第" << round << "轮:"
-              << " quote=" << cnt.quote << " tx=" << cnt.tx
-              << " tick=" << cnt.tick << " idx=" << cnt.index << " unu=" << cnt.unusual;
-    if (cnt.vol) std::cerr << " vol=" << cnt.vol;
-    if (cnt.hist) std::cerr << " hist=" << cnt.hist;
-    if (cnt.errors) std::cerr << " err=" << cnt.errors;
-    if (cnt.dropped) std::cerr << " dropped=" << cnt.dropped;
-    if (cnt.skipped) std::cerr << " skip=" << cnt.skipped;
-    std::cerr << "\n";
+    if (!a_codes.empty()) {
+      auto cnt = RunOneRound(a_codes, jobs, batch_size, WorkerMarket::AShare,
+                             do_tx, do_tick, do_idx, do_unu,
+                             do_vol, do_hist, shm.get(), ingest_q.get());
+      total.quote += cnt.quote; total.tx += cnt.tx; total.tick += cnt.tick;
+      total.index += cnt.index; total.unusual += cnt.unusual;
+      total.vol += cnt.vol; total.hist += cnt.hist;
+      total.dropped += cnt.dropped; total.skipped += cnt.skipped;
+      total.errors += cnt.errors;
+
+      std::cerr << "第" << round << "轮 A股:"
+                << " quote=" << cnt.quote << " tx=" << cnt.tx
+                << " tick=" << cnt.tick << " idx=" << cnt.index << " unu=" << cnt.unusual;
+      if (cnt.vol) std::cerr << " vol=" << cnt.vol;
+      if (cnt.hist) std::cerr << " hist=" << cnt.hist;
+      if (cnt.errors) std::cerr << " err=" << cnt.errors;
+      if (cnt.dropped) std::cerr << " dropped=" << cnt.dropped;
+      if (cnt.skipped) std::cerr << " skip=" << cnt.skipped;
+      std::cerr << "\n";
+    }
+
+    if (!hk_codes.empty()) {
+      // HK 桶仅采集 quote（A 股子项 tx/tick/idx/vol/unu/hist 走 A 股协议，HK 不支持）。
+      auto cnt = RunOneRound(hk_codes, jobs, batch_size, WorkerMarket::HK,
+                             false, false, false, false, false, false,
+                             shm.get(), ingest_q.get());
+      total.quote += cnt.quote;
+      total.errors += cnt.errors;
+      total.dropped += cnt.dropped;
+      total.skipped += cnt.skipped;
+
+      std::cerr << "第" << round << "轮 HK:"
+                << " quote=" << cnt.quote;
+      if (cnt.errors) std::cerr << " err=" << cnt.errors;
+      if (cnt.dropped) std::cerr << " dropped=" << cnt.dropped;
+      if (cnt.skipped) std::cerr << " skip=" << cnt.skipped;
+      std::cerr << "\n";
+    }
 
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now() - t0).count();

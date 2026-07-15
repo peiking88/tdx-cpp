@@ -21,6 +21,7 @@
 #include "tdx/types.hpp"
 
 namespace tdx::quotes {
+class ExtQuotes;  // 前置声明：BarsAuto HK 路径懒建，impl 层才 include ext_quotes.hpp
 
 class StdQuotes {
  public:
@@ -39,6 +40,18 @@ class StdQuotes {
   std::vector<KLine> Bars(Market market, std::string_view code, Period period,
                           uint16_t start = 0, uint16_t count = kKlineMaxCount,
                           Adjust adjust = Adjust::NONE);
+
+  // BarsAuto：按 code 路由。带 sh/sz/bj 前缀 → A 股（剥前缀后走原 Bars）；否则按 IsHkCode
+  // 判断：HK 代码 → 内部 ExtQuotes 懒建 + ClassifyHkExplicit 分桶；其他 → A 股 SH 兜底（保持旧行为）。
+  // 显式传 market=ExMarket::Hk* 可强制走 HK 路径（如 TDX 恒指编码 800000=6 位须显式指定）。
+  std::vector<KLine> BarsAuto(std::string_view code, Period period,
+                              uint16_t start = 0, uint16_t count = kKlineMaxCount,
+                              Adjust adjust = Adjust::NONE,
+                              std::optional<ExMarket> hk_hint = std::nullopt);
+  std::vector<KLine> BarsAuto(const std::vector<std::string>& codes, Period period,
+                              uint16_t start = 0, uint16_t count = kKlineMaxCount,
+                              Adjust adjust = Adjust::NONE);
+
   // 五档报价
   std::vector<Quote> Quotes(const std::vector<proto::QuoteReq>& stocks);
   // 逐笔成交（offset 上限 2000）
@@ -105,6 +118,7 @@ class StdQuotes {
   std::unique_ptr<proto::Connection> conn_;
   std::unique_ptr<proto::Heartbeat> heartbeat_;
   std::unique_ptr<proto::ServerPool> server_pool_;
+  std::unique_ptr<ExtQuotes> ext_;  // BarsAuto HK 路径懒建（仅 IsHkCode 触发时分配）
   proto::RetryPolicy retry_;
   proto::CircuitBreaker breaker_;
   bool connected_ = false;
