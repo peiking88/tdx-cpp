@@ -86,7 +86,12 @@ Response Connection::Call(const std::vector<uint8_t>& request) {
   }
 
   Response resp;
-  resp.header = parse_response_header(head_buf);  // 校验 prefix（D8）
+  try {
+    resp.header = parse_response_header(head_buf);  // 校验 prefix（D8）
+  } catch (...) {
+    connected_ = false;  // 协议异常标记断开，让上层感知链路已坏并触发重连
+    throw;
+  }
 
   // 3. 按 zipsize 循环 recv body（baseStockClient.py:312-317）
   std::vector<uint8_t> raw(resp.header.zip_size);
@@ -100,6 +105,7 @@ Response Connection::Call(const std::vector<uint8_t>& request) {
   if (need_unzip(resp.header)) {
     auto inflated = tdx::util::zlib_inflate(raw.data(), raw.size());
     if (inflated.empty() && !raw.empty()) {
+      connected_ = false;  // 解压失败 → 损坏帧，标记断开
       throw TdxProtocolError("zlib inflate failed");
     }
     resp.body = std::move(inflated);

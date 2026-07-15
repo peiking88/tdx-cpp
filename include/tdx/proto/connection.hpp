@@ -43,6 +43,8 @@ class Connection {
 
   // 发送请求封包 + 接收响应（封包→recv 16B 头→按 zipsize recv body→zlib 解压）。
   // 对齐 opentdx call/_send。失败抛 TdxConnectionError / TdxProtocolError。
+  // 协议级失败（服务器返回 Bad message 等）标记 connected_=false，使上层感知链路已坏，
+  // 触发重连；而非仅在 socket 级断连（Recv/Send 失败）才标记。
   Response Call(const std::vector<uint8_t>& request);
 
   bool IsConnected() const { return connected_; }

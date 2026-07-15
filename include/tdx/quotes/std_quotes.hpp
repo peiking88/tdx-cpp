@@ -2,6 +2,7 @@
 // 在 Proactor 线程/fiber 内执行连接与请求（fiber 纪律）。
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -90,6 +91,15 @@ class StdQuotes {
   std::error_code ConnectInFiber();
   void SendHeartbeat();
 
+  // 心跳连续空闲达阈值（on_timeout）回调 → 触发重连。
+  // 由 Heartbeat::OnTimer 经 MakeFiber 派发到普通 fiber，可安全做同步重连。
+  void OnHeartbeatTimeout();
+
+  // 链路恢复：Close 旧 conn/heartbeat → 重新选服/连接/登录/启心跳 → 复位熔断器。
+  // 幂等（reconnecting_ 标志防并发风暴）；所有路径经 proactor_->Await 派发到
+  // proactor 线程执行（socket/Periodic 操作须所属线程）。
+  void Reconnect();
+
   std::unique_ptr<::util::ProactorPool> pool_;
   ::util::fb2::ProactorBase* proactor_ = nullptr;
   std::unique_ptr<proto::Connection> conn_;
@@ -98,6 +108,9 @@ class StdQuotes {
   proto::RetryPolicy retry_;
   proto::CircuitBreaker breaker_;
   bool connected_ = false;
+  // 重连幂等标志：true = 已在重连中，跳过并发的心跳/超时重连请求。
+  // std::atomic 而非 fb2::Mutex：仅作布尔标志，任意线程/fiber 原子读写。
+  std::atomic<bool> reconnecting_{false};
 };
 
 }  // namespace tdx::quotes

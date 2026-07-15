@@ -120,6 +120,13 @@ target_include_directories(test_server_pool PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_server_pool PRIVATE tdx_proto_transport tdx_proto_core base fibers2 gtest)
 add_test(NAME test_server_pool COMMAND test_server_pool)
 
+# 链路恢复测试：Connection 协议异常标记断开 + 断开后重连恢复契约。
+# 全本地 loopback（不依赖真网），custom main（含 SIGFPE 抖动重试 shim）。
+add_executable(test_reconnect test_reconnect.cpp)
+target_include_directories(test_reconnect PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_reconnect PRIVATE tdx_proto_transport tdx_proto_core base fibers2 gtest)
+add_test(NAME test_reconnect COMMAND test_reconnect)
+
 # 端到端集成测试（真网通达信服务器 7709）：custom main + ProactorPool
 add_executable(test_e2e test_e2e.cpp)
 target_include_directories(test_e2e PRIVATE ${CMAKE_SOURCE_DIR}/include)

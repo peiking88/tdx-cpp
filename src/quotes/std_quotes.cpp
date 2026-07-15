@@ -6,6 +6,7 @@
 #include <boost/asio/ip/address.hpp>
 
 #include "base/logging.h"  // absl LOG（可观测性）
+#include "util/fibers/fibers.h"  // ::util::MakeFiber（心跳 dispatcher fiber → 普通 fiber 派发重连）
 
 #include "tdx/errors.hpp"
 #include "tdx/proto/frame.hpp"
@@ -76,9 +77,11 @@ std::error_code StdQuotes::ConnectInFiber() {
   }
   LOG(INFO) << "StdQuotes: 登录成功，启动心跳";
 
-  // 心跳（15s 间隔，20 次无业务断开）
+  // 心跳（15s 间隔，20 次无业务断开 → 触发重连）。
+  // on_timeout 传重连回调：连续空闲达阈值说明链路已死，主动重连恢复。
   heartbeat_ = std::make_unique<proto::Heartbeat>(
-      proactor_, [this] { SendHeartbeat(); }, [] {});
+      proactor_, [this] { SendHeartbeat(); },
+      [this] { OnHeartbeatTimeout(); });
   heartbeat_->Start();
 
   connected_ = true;
@@ -86,14 +89,49 @@ std::error_code StdQuotes::ConnectInFiber() {
 }
 
 void StdQuotes::SendHeartbeat() {
+  if (!conn_) return;  // 重连中 conn_ 已置 null，避免空指针
   auto hb = proto::serialize_heartbeat();
   auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgHeartbeat,
                                  hb.data(), hb.size());
   try {
     conn_->Call(req);
+  } catch (const std::exception& e) {
+    // OnTimer 跑在 dispatcher fiber，不可同步重连 → 派发到普通 fiber。
+    LOG(WARNING) << "StdQuotes: 心跳发送失败，触发重连: " << e.what();
+    ::util::MakeFiber([this] { Reconnect(); }).Detach();
   } catch (...) {
-    // 心跳失败忽略，由熔断器/连接状态处理
+    LOG(WARNING) << "StdQuotes: 心跳发送失败（未知异常），触发重连";
+    ::util::MakeFiber([this] { Reconnect(); }).Detach();
   }
+}
+
+void StdQuotes::OnHeartbeatTimeout() {
+  // OnTimer 已用 MakeFiber 派发到普通 fiber，可安全重连。
+  LOG(WARNING) << "StdQuotes: 心跳连续空闲达阈值，触发重连";
+  Reconnect();
+}
+
+void StdQuotes::Reconnect() {
+  if (reconnecting_.exchange(true)) return;  // ponytail: 幂等，防心跳/超时并发风暴
+  if (!proactor_) {
+    reconnecting_.store(false);
+    return;
+  }
+  // socket/Periodic 操作须所属线程：统一经 proactor_->Await 派发。
+  proactor_->Await([this] {
+    LOG(INFO) << "StdQuotes: 重连开始（Close → 重新选服/连接/登录/心跳）";
+    if (heartbeat_) { heartbeat_->Stop(); heartbeat_.reset(); }
+    if (conn_) { conn_->Close(); conn_.reset(); }
+    connected_ = false;
+    if (auto ec = ConnectInFiber()) {
+      LOG(ERROR) << "StdQuotes: 重连失败: " << ec.message();
+      reconnecting_.store(false);
+      return;
+    }
+    breaker_.RecordSuccess();  // 重连成功立刻复位，不等 HALF_OPEN 探测
+    reconnecting_.store(false);
+    LOG(INFO) << "StdQuotes: 重连成功，熔断器已复位";
+  });
 }
 
 void StdQuotes::Close() {
