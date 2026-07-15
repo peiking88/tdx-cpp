@@ -110,6 +110,11 @@ def main():
     ap.add_argument("--codes-file", help="代码文件，每行一个（# 开头注释）")
     ap.add_argument("--zxg", default=os.environ.get("TDX_ZXG_BLK", ZXG_DEFAULT))
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不执行")
+    ap.add_argument("--all-market", action="store_true",
+                    help="kline 导入走全市场（vipdoc 全量，仅影响 kline 阶段）")
+    ap.add_argument("--kronos", action="store_true",
+                    help="日线清库重建：清库后仅导入个股+大盘指数日K线"
+                         "（自动 --all-market --daily-only --kronos，跳过 finance/f10）")
     ap.add_argument("--skip-kline", action="store_true")
     ap.add_argument("--skip-finance", action="store_true")
     ap.add_argument("--skip-f10", action="store_true")
@@ -128,9 +133,12 @@ def main():
     if not codes:
         sys.exit(f"无代码（zxg.blk={args.zxg} 为空/不可读），可用 --codes 显式指定")
 
-    print(f"代码数: {len(codes)}   示例: {' '.join(codes[:6])}")
     print(f"二进制: {TDX_BIN}")
-    print(f"模式:   {'DRY-RUN（不执行）' if args.dry_run else '执行（清空 5 张超级表并重导）'}")
+    if args.kronos:
+        print("模式:   日线清库重建（kronos——个股+大盘指数日K线 + 复权因子）")
+    else:
+        print(f"代码数: {len(codes)}   示例: {' '.join(codes[:6])}")
+        print(f"模式:   {'DRY-RUN（不执行）' if args.dry_run else '执行（清空 5 张超级表并重导）'}")
 
     res = {}
 
@@ -151,12 +159,22 @@ def main():
         else:
             failed.append(key)
 
-    if not args.skip_kline:
-        phase("kline", "kline import", [TDX_BIN, "import", "--full-reset"])
-    if not args.skip_finance:
-        phase("finance", "finance", [TDX_BIN, "fetch-finance"] + codes)
-    if not args.skip_f10:
-        phase("f10", "f10", [TDX_BIN, "fetch-f10"] + codes)
+    if args.kronos:
+        # 日线清库重建：个股+大盘指数日K线（含复权因子），跳过 finance/f10（按 code 操作，与本模式无关）。
+        # --kronos 暗含 --all-market --daily-only；复权因子保持开启（不传 --no-adjust）。
+        if not args.skip_kline:
+            phase("kline", "kline import (kronos)",
+                  [TDX_BIN, "import", "--full-reset", "--all-market", "--daily-only", "--kronos"])
+    else:
+        if not args.skip_kline:
+            import_cmd = [TDX_BIN, "import", "--full-reset"]
+            if args.all_market:
+                import_cmd.append("--all-market")
+            phase("kline", "kline import", import_cmd)
+        if not args.skip_finance:
+            phase("finance", "finance", [TDX_BIN, "fetch-finance"] + codes)
+        if not args.skip_f10:
+            phase("f10", "f10", [TDX_BIN, "fetch-f10"] + codes)
 
     # 5. 行数 + 汇总
     counts = {} if args.dry_run else {s: taos_count(s) for s in ("kline", "finance", "f10_cat", "f10_text")}

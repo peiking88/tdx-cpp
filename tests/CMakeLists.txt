@@ -103,6 +103,12 @@ add_executable(test_sync4 test_sync4.cpp)
 target_include_directories(test_sync4 PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_sync4 PRIVATE tdx_data base fibers2 gtest)
 add_test(NAME test_sync4 COMMAND test_sync4)
+
+# import 标的过滤（IsAStock / IsKronosTarget）：纯头文件、离线
+add_executable(test_import_filter test_import_filter.cpp)
+target_include_directories(test_import_filter PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_import_filter PRIVATE tdx_taos gtest gtest_main)
+add_test(NAME test_import_filter COMMAND test_import_filter)
 # 需要 transport 的测试：core + transport + fibers2（含 ProactorPool 编排）
 add_executable(test_retry test_retry.cpp)
 target_include_directories(test_retry PRIVATE ${CMAKE_SOURCE_DIR}/include)

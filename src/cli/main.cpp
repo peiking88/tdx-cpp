@@ -869,7 +869,8 @@ int main(int argc, char **argv)
   {
     std::string a = argv[i];
     bool manual = a == "--full-reset" || a == "--no-clear-intraday" ||
-                  a == "--all-market" || a == "--zxg-blk";
+                  a == "--all-market" || a == "--zxg-blk" ||
+                  a == "--daily-only" || a == "--kronos";
     if (manual)
     {
       if (a == "--zxg-blk" && i + 1 < argc) ++i;  // 跳过它的路径值

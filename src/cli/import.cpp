@@ -23,6 +23,8 @@ struct ImportConfig {
   bool clear_intraday = true;  // 清当日盘中数据（增量留历史）
   bool full_reset = false;     // 首次迁移：DROP 整表全清
   bool all_market = false;     // 导入全市场（默认仅导入自选股 zxg.blk）
+  bool daily_only = false;     // 只导入日 K 线（1d），跳过 1m/5m + 复权因子
+  bool kronos = false;         // 仅个股+大盘指数（排除 ETF/LOF/板块指数）
   std::vector<std::string> codes;
   tdx::taos::TaosConfig taos = tdx::taos::TaosConfig::FromEnv();
 };
@@ -40,6 +42,8 @@ ImportConfig ParseArgs(int argc, char** argv) {
     if (a == "--no-clear-intraday") { cfg.clear_intraday = false; continue; }
     if (a == "--full-reset") { cfg.full_reset = true; cfg.clear_intraday = false; continue; }
     if (a == "--all-market") { cfg.all_market = true; continue; }
+    if (a == "--daily-only") { cfg.daily_only = true; continue; }
+    if (a == "--kronos") { cfg.kronos = true; continue; }
     if (a == "--zxg-blk") { if (i + 1 < argc) cfg.zxg_blk = argv[++i]; continue; }
     if (a == "taos") cfg.engine = "taos";
     else if (a == "duckdb") {
@@ -53,6 +57,8 @@ ImportConfig ParseArgs(int argc, char** argv) {
                 << "  --all-market    导入全市场（默认仅导入自选股）\n"
                 << "  --zxg-blk PATH  自选股文件路径\n"
                 << "  --full-reset    首次迁移：DROP 整表全清后 vipdoc 全量重建\n"
+                << "  --daily-only    只导入日 K 线（1d），跳过 1m/5m（复权因子由 --no-adjust 控制）\n"
+                << "  --kronos        仅导入个股+大盘指数（排除 ETF/LOF/板块指数）；常与 --daily-only 联用\n"
                 << "  --no-clear-intraday  不清当日（保留 fetch-kline 写的盘中数据）\n\n"
                 << "说明: 历史增量从 vipdoc 导入，默认只清当日盘中（fetch-kline 循环刷新）。"
                 << "首次迁移历史脏数据用 --full-reset。"
@@ -97,6 +103,8 @@ int DoImport(int argc, char** argv, int jobs) {
   tcfg.clear_intraday  = cfg.clear_intraday;
   tcfg.full_reset      = cfg.full_reset;
   tcfg.all_market      = cfg.all_market;
+  tcfg.daily_only      = cfg.daily_only;
+  tcfg.kronos          = cfg.kronos;
   tcfg.jobs            = jobs;
   tcfg.codes           = cfg.codes;
   auto result = tdx::taos::DoImportTaos(tcfg);

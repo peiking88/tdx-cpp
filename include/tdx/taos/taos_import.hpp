@@ -20,6 +20,8 @@ struct ImportTaosConfig {
   bool clear_intraday = true;  // 清当日 1d/1m/5m 盘中数据（增量留历史）
   bool full_reset = false;     // 首次迁移：DROP 整表全清，vipdoc 全量重建
   bool all_market = false;     // 导入全市场（默认仅导入自选股 zxg.blk）
+  bool daily_only = false;     // 只导入日 K 线（1d），跳过 1m/5m + 复权因子
+  bool kronos = false;         // 仅个股+大盘指数（排除 ETF/LOF/板块指数）
   int  jobs = 1;  // 0 = auto (hardware_concurrency)
   std::vector<std::string> codes;
 };
@@ -35,14 +37,18 @@ struct ImportResult {
 // 主入口：扫描 vipdoc → 多线程导入 TDengine
 ImportResult DoImportTaos(const ImportTaosConfig& cfg);
 
-// 独立同步股票代码→名称对照表（可脱离 import 单独调用）
-int SyncStockNames(TAOS* conn);
+// 独立同步股票代码→名称对照表（可脱离 import 单独调用）。
+// kronos 模式仅保留个股+大盘指数，排除 ETF/LOF/板块指数。
+int SyncStockNames(TAOS* conn, bool kronos = false);
 
 // 独立清理非 A 股及退市标的子表（可脱离 import 单独调用）
 int CleanupStaleCodes(TAOS* conn);
 
 // 股票代码过滤：保留 A 股 + 指数 + ETF/LOF 基金，排除债券/B 股/港股通
 bool IsAStock(const std::string& code);
+
+// 仅个股 + 大盘指数（排除 ETF/LOF/板块指数），供 --kronos 使用。
+bool IsKronosTarget(const std::string& code);
 
 // 从网络拉取日线写入 TDengine（用于本地 vipdoc 无 .day 文件的代码，如 589xxx ETF）。
 // 返回成功导入行数。

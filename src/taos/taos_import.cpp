@@ -51,12 +51,14 @@ inline constexpr int kBatchSize = 1000;
 // 前置声明（IsAStock/NeedsAdjust 定义在文件末尾）
 namespace tdx::taos {
 bool IsAStock(const std::string& code);
+bool IsKronosTarget(const std::string& code);
 bool NeedsAdjust(const std::string& code, Market market);
 }
 
 namespace {
 
 using tdx::taos::IsAStock;
+using tdx::taos::IsKronosTarget;
 using tdx::taos::NeedsAdjust;
 
 // 读取通达信自选股 zxg.blk：纯文本 CRLF，每行 7 位（首位 1=沪 sh / 0=深 sz + 6 位代码）。
@@ -238,16 +240,18 @@ struct KlineWorker {
     for (const auto& [code, market] : subset) {
       std::string mp = MktPrefix(market);
 
-      if (!tdx::taos::IsAStock(code)) {
+      // 标的过滤：kronos 模式仅保留个股+大盘指数（排除 ETF/LOF/板块），否则 IsAStock。
+      auto filter_fn = cfg.kronos ? &IsKronosTarget : &IsAStock;
+      if (!filter_fn(code)) {
         if (!tdx::util::IsValidCode(code)) continue;  // 非法代码格式，跳过
-        // 删该 (code, market) 子表 + stock_name 记录
+        // 删该 (code, market) 的 K 线/复权子表。
+        // 注：不同步删 stock_name 记录——kronos 模式由 SyncStockNames 源头过滤（stock_name 自始无此行），
+        //   非 kronos 时 stock_name 本就不存在 IsAStock 外的代码，故此分支在正常路径下不走。
+        //   若未来其他场景触发，DELETE 列条件在 TDengine 非法（只允许时间窗），靠 CleanupStaleCodes 兜底清理。
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_1d");
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_1m");
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS k_" + mp + code + "_5m");
         ExecAffected(conn.native(), "DROP TABLE IF EXISTS a_" + mp + code);
-        ExecAffected(conn.native(),
-                     "DELETE FROM stock_name WHERE code='" + EscapeSql(code)
-                         + "' AND market='" + mp + "'");
         filtered_out.push_back(mp + code);
         continue;
       }
@@ -268,8 +272,10 @@ struct KlineWorker {
         if (r > 0) { kline_rows += r; ok_any = true; }
       };
       imp("lday", "day", "1d");
-      imp("minline", "lc1", "1m");
-      imp("fzline", "lc5", "5m");
+      if (!cfg.daily_only) {  // daily_only 跳过 1m/5m（含 kronos 典型用法）
+        imp("minline", "lc1", "1m");
+        imp("fzline", "lc5", "5m");
+      }
       if (ok_any) ++codes_ok;
     }
   }
@@ -406,9 +412,11 @@ static NetImportResult BatchNetImport(
 
             // 拉取 K 线（仅 missing 代码——missing 存带前缀 sh/sz/bj+code）
             if (missing.count(MktPrefix(market) + code)) {
-              for (auto [period, tag] : {std::pair{Period::DAILY, "1d"},
-                                         {Period::MIN_1, "1m"},
-                                         {Period::MIN_5, "5m"}}) {
+              // daily_only 只补 1d（kronos 典型用法），否则补全周期 1d/1m/5m。
+              std::vector<std::pair<Period, const char*>> periods;
+              if (cfg.daily_only) periods = {{Period::DAILY, "1d"}};
+              else periods = {{Period::DAILY, "1d"}, {Period::MIN_1, "1m"}, {Period::MIN_5, "5m"}};
+              for (auto [period, tag] : periods) {
                 std::vector<KLine>* dst = (tag[0] == '1' && tag[1] == 'd') ? &item.bars_1d
                                         : (tag[0] == '1' && tag[1] == 'm') ? &item.bars_1m
                                         : &item.bars_5m;
@@ -429,7 +437,7 @@ static NetImportResult BatchNetImport(
               }
             }
 
-            // 拉取复权因子（仅个股，指数/ETF/LOF 跳过）
+            // 拉取复权因子（仅个股，指数/ETF/LOF 跳过；daily_only 不影响复权——kronos 要求复权完整）
             if (!no_adjust && NeedsAdjust(code, market)) {
               try {
                 auto body = proto::serialize_xdxr(market, code);
@@ -606,7 +614,9 @@ int CleanupStaleCodes(TAOS* conn) {
 
 // 全量拉取沪深京 A 股名称写入 TDengine stock_name 表。
 // 先写入临时表 stock_name_tmp → 网络成功则原子替换，失败则清临时表保留旧 stock_name。
-int SyncStockNames(TAOS* conn) {
+// kronos 模式仅保留个股+大盘指数（排除 ETF/LOF/板块），避免 filter-out 分支触发
+//   TDengine 非法 DELETE（DELETE 只允许时间窗、不允许列条件，加 ts 窗仍不可组合）。
+int SyncStockNames(TAOS* conn, bool kronos /* = false */) {
   std::cerr << "股票名称: 同步中..." << std::flush;
 
   ExecSQL(conn, "DROP TABLE IF EXISTS stock_name_tmp");
@@ -633,7 +643,8 @@ int SyncStockNames(TAOS* conn) {
       sql << "INSERT INTO stock_name_tmp VALUES";
       size_t batch_cnt = 0;
       for (size_t i = 0; i < stocks.size(); ++i) {
-        if (!IsAStock(stocks[i].code)) continue;
+        // kronos 模式用 IsKronosTarget 排除 ETF/LOF/板块，否则 IsAStock。
+        if (kronos ? !IsKronosTarget(stocks[i].code) : !IsAStock(stocks[i].code)) continue;
         if (!tdx::util::IsValidCode(stocks[i].code)) continue;
         if (batch_cnt > 0) sql << ' ';
         sql << "(" << ts_seq++ << ", '" << EscapeSql(stocks[i].code) << "', '"
@@ -692,8 +703,10 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
   EnsureKlineTables(conn.native());
 
   // === 第一步：网络拉取全量码表入库 ===
+  // kronos 模式：SyncStockNames 用 IsKronosTarget，stock_name 只含个股+大盘，
+  //   使 filter-out 分支的 DELETE 始终不被触发（DELETE 列条件在 TDengine 非法）。
   std::cerr << "=== 第一步：同步全量码表 ===" << std::endl;
-  result.stock_names = SyncStockNames(conn.native());
+  result.stock_names = SyncStockNames(conn.native(), cfg.kronos);
   if (result.stock_names == 0) {
     // 离线回退：用库中已有 stock_name 继续
     TAOS_RES* chk = ::taos_query(conn.native(),
@@ -869,6 +882,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     std::set<std::string> missing_set(missing_codes.begin(), missing_codes.end());
     std::vector<std::string> adjust_codes;
     size_t adjust_skip = 0;
+    // 复权因子独立于 daily_only：kronos 要求个股复权完整，大盘指数 NeedsAdjust=false 自然跳过。
     for (const auto& p : all_codes) {
       if (!NeedsAdjust(p.first, p.second)) { ++adjust_skip; continue; }
       adjust_codes.push_back(MktPrefix(p.second) + p.first);
@@ -987,6 +1001,19 @@ bool NeedsAdjust(const std::string& code, Market market) {
   if (c0 == '1' && c1 == '5' && code[2] == '9') return false;  // 159xxx 深市 ETF
   if (c0 == '1' && c1 == '6') return false;   // 16xxxx 深市 LOF
   return IsAStock(code);                       // 其余 A 股需要复权
+}
+
+// 仅个股 + 大盘指数（排除 ETF/LOF/板块指数），供 --kronos 使用。
+// ponytail: 大盘指数 000xxx(SH)/399xxx(SZ)/99xxxx(SH) 走 IsAStock 原分支保留；
+// 剔除 5x/159xxx ETF、16xxxx LOF、88xxxx 板块指数。
+bool IsKronosTarget(const std::string& code) {
+  if (code.size() < 6) return false;
+  char c0 = code[0], c1 = code[1];
+  if (c0 == '5') return false;                          // 5xxxxx ETF
+  if (c0 == '1' && c1 == '5' && code[2] == '9') return false;  // 159xxx 深市 ETF
+  if (c0 == '1' && c1 == '6') return false;             // 16xxxx 深市 LOF
+  if (c0 == '8' && c1 == '8') return false;             // 88xxxx 板块指数
+  return IsAStock(code);                                // 个股 + 大盘指数保留
 }
 
 // 保留 A 股 + 指数 + ETF + 基金，排除债券(1x/2x)、B 股(9x)、港股通(7x)
