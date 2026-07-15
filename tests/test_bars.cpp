@@ -124,6 +124,29 @@ TEST_F(BarsTest, ExtDailyBarsContent) {
   }
 }
 
+// BarsAuto 分流：hk+code 形式应走 HK 路径（剥前缀后纯数字 03690 调 ExtQuotes），
+// 验证 blk 解析出的 hk03690 能拉到实际 K 线（美团-W，5 位数字 = HkMainBoard）。
+//
+// 注：扩展行情服务器对单 IP 有限流，同一 test suite 内多个 ExtQuotes 实例顺序连接
+// 时后续实例易被限流返回空。故本测试用 BarsAuto 自带的 ext_ 实例（与 suite 内
+// g_eq 同 IP 但独立连接），空结果按限流跳过处理。
+TEST_F(BarsTest, BarsAutoHkCode) {
+  constexpr int kCount = 10;
+  auto bars = g_sq->BarsAuto("hk03690", Period::DAILY, 0, kCount);
+  if (bars.empty()) GTEST_SKIP() << "HK 03690 返回空（扩展行情限流/不可达），跳过";
+  EXPECT_GE(bars.size(), static_cast<size_t>(1));
+  EXPECT_LE(bars.size(), static_cast<size_t>(kCount));
+  for (const auto& b : bars) {
+    EXPECT_GT(b.open, 0.0);
+    EXPECT_GT(b.close, 0.0);
+    EXPECT_GT(b.high, 0.0);
+    EXPECT_GT(b.low, 0.0);
+    EXPECT_GE(b.high, b.low);
+  }
+  std::printf("BarsAutoHkCode: hk03690 OK, %zu bars, last close=%.3f\n",
+              bars.size(), bars.back().close);
+}
+
 int main(int argc, char** argv) {
   MainInitGuard guard(&argc, &argv);
   ::testing::InitGoogleTest(&argc, argv);

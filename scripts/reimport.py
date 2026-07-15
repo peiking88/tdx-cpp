@@ -49,7 +49,9 @@ def IsHkCode(code):
 
 
 def read_zxg(path):
-    # 逐字复刻 C++ ReadZxgBlk：每行 7 位，首位 1=sh / 0=sz + 6 位代码。
+    # 逐字复刻 C++ ReadZxgBlk：每行 7 位。
+    #   1=sh / 0=sz + 6 位代码（A 股）
+    #   2/3 + '#' + HK 代码（如 31#03690 → hk03690 = 美团 -W）
     out = []
     try:
         with open(path, encoding="ascii", errors="ignore") as f:
@@ -58,9 +60,13 @@ def read_zxg(path):
                 if len(line) < 7:
                     continue
                 m = line[0]
-                if m not in ("0", "1"):
-                    continue
-                out.append(("sh" if m == "1" else "sz") + line[1:7])
+                if m in ("0", "1"):
+                    out.append(("sh" if m == "1" else "sz") + line[1:7])
+                elif m in ("2", "3") and "#" in line:
+                    i = line.index("#")
+                    hk = line[i + 1:]
+                    if hk.isdigit() and 4 <= len(hk) <= 5:
+                        out.append("hk" + hk)
     except FileNotFoundError:
         pass
     return out

@@ -13,6 +13,7 @@ enum class Market : uint16_t {
   SZ = 0,  // 深圳
   SH = 1,  // 上海
   BJ = 2,  // 北证
+  HK = 3,  // 港股（扩展行情，协议 0x23ff/0x248a）
 };
 
 // K 线周期（opentdx const.py:281-294 PERIOD，逐字移植数值）。

@@ -227,6 +227,8 @@ bool RouteAuto(std::string_view code, std::optional<ExMarket> hk_hint,
   // 无前缀：显式 hk_hint 或 IsHkCode 识别 → HK 路径
   if (hk_hint.has_value() || IsHkCode(code)) {
     *out_hk_market = hk_hint.value_or(ClassifyHkExplicit(code));
+    // HK 协议字段是 9s/23s GBK 纯数字代码（如 00700）；hk+code 前缀需剥除，
+    // 由 BarsAuto() 按 routing 结果决定对外传 code 还是 code.substr(2)。
     return true;
   }
   // 兜底 A 股 SH（旧行为：6 位纯数字被 ParseMarketCode 拒绝为无效，此处同）
@@ -251,7 +253,12 @@ std::vector<KLine> StdQuotes::BarsAuto(std::string_view code, Period period,
         return {};  // SafeAwait 式空结果，外层按 empty() 跳过
       }
     }
-    return ext_->Bars(hk_market, code, period, start, count);
+    // HK 协议字段是 9s/23s GBK 纯数字代码（如 00700）；hk+code 前缀需剥除，
+    // 与 upstream opentdx EX_MARKET.HK_* 调用约定一致。
+    std::string_view hk_code = code;
+    if (hk_code.size() >= 3 && hk_code.substr(0, 2) == "hk")
+      hk_code.remove_prefix(2);
+    return ext_->Bars(hk_market, hk_code, period, start, count);
   }
   return Bars(a_market, a_code, period, start, count, adjust);
 }

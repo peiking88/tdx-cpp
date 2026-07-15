@@ -32,6 +32,7 @@ std::string VipdocReader::MarketDir(Market m) {
     case Market::SH: return "sh";
     case Market::SZ: return "sz";
     case Market::BJ: return "bj";
+    case Market::HK: return "hk";
   }
   return "sh";
 }

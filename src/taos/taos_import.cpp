@@ -33,9 +33,11 @@
 #include "tdx/proto/connection.hpp"
 #include "tdx/proto/frame.hpp"
 #include "tdx/proto/parsers.hpp"
+#include "tdx/proto/ex_parsers.hpp"
 #include "tdx/proto/server_pool.hpp"
 #include "tdx/proto/vipdoc_reader.hpp"
 #include "tdx/quotes/std_quotes.hpp"
+#include "tdx/quotes/ext_quotes.hpp"
 #include "tdx/taos/taos_connection.hpp"
 #include "tdx/types.hpp"
 #include "tdx/util/time_util.hpp"
@@ -61,7 +63,9 @@ using tdx::taos::IsAStock;
 using tdx::taos::IsKronosTarget;
 using tdx::taos::NeedsAdjust;
 
-// 读取通达信自选股 zxg.blk：纯文本 CRLF，每行 7 位（首位 1=沪 sh / 0=深 sz + 6 位代码）。
+// 读取通达信自选股 zxg.blk：纯文本 CRLF，每行 7 位。
+//   1=沪 sh / 0=深 sz + 6 位代码（A 股）
+//   2/3 + '#' + HK 代码（如 31#03690 → hk03690 = 美团 -W）
 // 与 fetch_quotes.cpp::ReadZxgBlk 逻辑一致，作为导入默认代码源。
 std::vector<std::string> ReadZxgBlk(const std::string& path) {
   std::vector<std::string> out;
@@ -77,8 +81,14 @@ std::vector<std::string> ReadZxgBlk(const std::string& path) {
       line.pop_back();
     if (line.size() < 7) continue;
     char m = line[0];
-    if (m != '0' && m != '1') continue;
-    out.push_back((m == '1' ? "sh" : "sz") + line.substr(1, 6));
+    if (m == '0' || m == '1') {
+      out.push_back((m == '1' ? "sh" : "sz") + line.substr(1, 6));
+    } else if ((m == '2' || m == '3') && line.find('#') != std::string::npos) {
+      auto i = line.find('#');
+      auto hk = line.substr(i + 1);
+      if (!hk.empty() && std::all_of(hk.begin(), hk.end(), ::isdigit) && hk.size() >= 4 && hk.size() <= 5)
+        out.push_back("hk" + hk);
+    }
   }
   return out;
 }
@@ -117,13 +127,17 @@ int64_t ExecAffected(TAOS* conn, const std::string& sql) {
 // 查询子表最新 ts（毫秒），表不存在或无数据返回 0
 int64_t LastTimestamp(TAOS* conn, const std::string& tbname) {
   // 校验子表名格式，防止 SQL 注入。
-  // 现行格式 k_{sh|sz|bj}xxxxxx_{cycle}（如 k_sh000001_5m）、a_{sh|sz|bj}xxxxxx：
-  // 前缀_ 后紧跟 2 位 market，再后才是 6 位 code（旧格式 k_xxxxxx_1d 已随清库废弃）。
+  // 现行格式 k_{sh|sz|bj|hk}code_{cycle}（如 k_sh000001_5m、k_hk03690_5m）、
+  // a_{sh|sz|bj|hk}code：前缀_ 后紧跟 2 位 market，再后才是 code（4-6 位数字，
+  // HK 代码 03690 为 5 位）。旧格式 k_xxxxxx_1d 已随清库废弃。
   auto code_start = tbname.find('_');
   if (code_start == std::string::npos) return 0;
-  size_t code_pos = code_start + 1 + 2;  // 跳过 2 位 market 前缀（sh/sz/bj）
-  if (code_pos + 6 > tbname.size()) return 0;
-  std::string_view code(tbname.data() + code_pos, 6);
+  size_t code_pos = code_start + 1 + 2;  // 跳过 2 位 market 前缀（sh/sz/bj/hk）
+  // code 在下一个 '_'（_ cycle）或字符串末尾结束
+  size_t next_us = tbname.find('_', code_pos);
+  size_t code_len = (next_us == std::string::npos) ? std::string::npos : next_us - code_pos;
+  if (code_len == std::string::npos || code_pos + code_len > tbname.size()) return 0;
+  std::string_view code(tbname.data() + code_pos, code_len);
   if (!tdx::util::IsValidCode(code)) return 0;
 
   std::string sql = "SELECT MAX(ts) FROM " + tbname;
@@ -358,9 +372,10 @@ static NetImportResult BatchNetImport(
     const std::set<std::string>& missing,          // 需拉 K 线的代码（带前缀 sh/sz/bj）
     const std::vector<std::string>& all_codes,     // 所有代码（带前缀，至少需拉复权）
     int n_fibers,
-    bool no_adjust) {
+    bool no_adjust,
+    const std::vector<std::string>& hk_codes = {}) {  // 港股代码（hk+code，走扩展行情）
   NetImportResult r;
-  if (all_codes.empty()) return r;
+  if (all_codes.empty() && hk_codes.empty()) return r;
   if (n_fibers < 1) n_fibers = 1;
 
   using mutex_type = ::util::fb2::Mutex;
@@ -368,40 +383,75 @@ static NetImportResult BatchNetImport(
 
   // 线程安全的结果收集容器（fiber 写入，主线程读取）
   std::vector<NetFetchItem> fetch_results;
-  fetch_results.reserve(all_codes.size());
+  fetch_results.reserve(all_codes.size() + hk_codes.size());
 
   // --- 阶段 A：fiber 网络拉取（只用 proto::Connection，不触 TDengine） ---
+  // 每个 fiber 持有独立的 A 股/HK 双连接，避免 ProactorPool/Await 跨池违规。
   {
     std::unique_ptr<::util::ProactorPool> pool(::util::fb2::Pool::IOUring(64));
     pool->Run();
     auto* pb = pool->GetNextProactor();
 
-    proto::ServerPool sp(pool.get());
-    auto best = sp.SelectBest(quotes::StdQuotes::DefaultHosts());
-    if (!best) { pool->Stop(); return r; }
-
-    auto addr = boost::asio::ip::make_address(best->ip);
-    ::util::FiberSocketBase::endpoint_type ep(addr, best->port);
+    // A 股选服（默认仅当有 A 股代码才选；否则置空 ep，workers 跳过）
+    std::optional<::util::FiberSocketBase::endpoint_type> a_ep;
+    if (!all_codes.empty()) {
+      proto::ServerPool sp(pool.get());
+      auto best = sp.SelectBest(quotes::StdQuotes::DefaultHosts());
+      if (!best) { pool->Stop(); return r; }
+      auto addr = boost::asio::ip::make_address(best->ip);
+      a_ep = ::util::FiberSocketBase::endpoint_type(addr, best->port);
+    }
 
     pb->Await([&] {
       std::vector<::util::fb2::Fiber> workers;
       workers.reserve(n_fibers);
       for (int wi = 0; wi < n_fibers; ++wi) {
         workers.push_back(::util::MakeFiber([&, wi] {
-          proto::Connection conn(pb);
-          if (conn.Connect(ep)) return;
-          try {
-            auto login = proto::serialize_login();
-            auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgLogin,
-                                           login.data(), login.size());
-            conn.Call(req);
-          } catch (...) {
-            std::fprintf(stderr, "BatchNetImport: fiber %d 登录失败\n", wi);
-            return;
+          // A 股连接（per-fiber，避免跨池）
+          std::unique_ptr<proto::Connection> a_conn;
+          if (a_ep) {
+            a_conn = std::make_unique<proto::Connection>(pb);
+            if (a_conn->Connect(*a_ep)) a_conn.reset();
+            else {
+              try {
+                auto login = proto::serialize_login();
+                auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgLogin,
+                                               login.data(), login.size());
+                a_conn->Call(req);
+              } catch (...) {
+                std::fprintf(stderr, "BatchNetImport: A 股 fiber %d 登录失败\n", wi);
+                a_conn.reset();
+              }
+            }
+          }
+
+          // HK 连接（per-fiber，扩展行情协议独立）
+          std::unique_ptr<proto::Connection> hk_conn;
+          if (!hk_codes.empty()) {
+            hk_conn = std::make_unique<proto::Connection>(pb);
+            proto::ServerPool hk_sp(pool.get());
+            auto hk_best = hk_sp.SelectBest(quotes::ExtQuotes::DefaultHosts());
+            if (hk_best) {
+              auto hk_addr = boost::asio::ip::make_address(hk_best->ip);
+              ::util::FiberSocketBase::endpoint_type hk_ep(hk_addr, hk_best->port);
+              if (hk_conn->Connect(hk_ep)) hk_conn.reset();
+              else {
+                try {
+                  auto login = proto::serialize_ex_login();
+                  auto req = proto::pack_request(proto::kExHead, 0, proto::kMsgExLogin,
+                                                 login.data(), login.size());
+                  hk_conn->Call(req);
+                } catch (...) {
+                  std::fprintf(stderr, "BatchNetImport: HK fiber %d 登录失败\n", wi);
+                  hk_conn.reset();
+                }
+              }
+            } else hk_conn.reset();
           }
 
           std::vector<NetFetchItem> local_items;
 
+          // —— A 股代码分支 ——
           for (size_t i = static_cast<size_t>(wi); i < all_codes.size();
                i += static_cast<size_t>(n_fibers)) {
             auto [market, code] = ParseMarketCode(all_codes[i]);
@@ -411,7 +461,7 @@ static NetImportResult BatchNetImport(
             item.market = market;
 
             // 拉取 K 线（仅 missing 代码——missing 存带前缀 sh/sz/bj+code）
-            if (missing.count(MktPrefix(market) + code)) {
+            if (a_conn && missing.count(MktPrefix(market) + code)) {
               // daily_only 只补 1d（kronos 典型用法），否则补全周期 1d/1m/5m。
               std::vector<std::pair<Period, const char*>> periods;
               if (cfg.daily_only) periods = {{Period::DAILY, "1d"}};
@@ -423,7 +473,7 @@ static NetImportResult BatchNetImport(
                 for (uint16_t off = 0; off < kKlineMaxCount; off += 800) {
                   try {
                     auto body = proto::serialize_kline(market, code, period, 1, off, 800, Adjust::NONE);
-                    auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgKline,
+                    auto resp = a_conn->Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgKline,
                                            body.data(), body.size()));
                     auto bars = proto::deserialize_kline(resp.body.data(), resp.body.size(), period);
                     if (bars.empty()) break;
@@ -438,10 +488,10 @@ static NetImportResult BatchNetImport(
             }
 
             // 拉取复权因子（仅个股，指数/ETF/LOF 跳过；daily_only 不影响复权——kronos 要求复权完整）
-            if (!no_adjust && NeedsAdjust(code, market)) {
+            if (a_conn && !no_adjust && NeedsAdjust(code, market)) {
               try {
                 auto body = proto::serialize_xdxr(market, code);
-                auto resp = conn.Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgXdxr,
+                auto resp = a_conn->Call(proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgXdxr,
                                        body.data(), body.size()));
                 item.xdxr = proto::deserialize_xdxr(resp.body.data(), resp.body.size());
               } catch (const std::exception&) {
@@ -451,7 +501,59 @@ static NetImportResult BatchNetImport(
 
             local_items.push_back(std::move(item));
           }
-          conn.Close();
+
+          // —— HK 代码分支（hk+code，走扩展行情 0x23ff） ——
+          for (size_t i = static_cast<size_t>(wi); i < hk_codes.size();
+               i += static_cast<size_t>(n_fibers)) {
+            const auto& raw = hk_codes[i];
+            // 剥 hk 前缀 → 纯数字 HK 代码
+            std::string_view hk_code = raw;
+            if (hk_code.size() >= 3 && hk_code.substr(0, 2) == "hk") hk_code.remove_prefix(2);
+            if (hk_code.empty()) continue;
+            NetFetchItem item;
+            item.code = std::string(hk_code);
+            item.market = Market::HK;
+
+            if (hk_conn) {
+              ExMarket exm = ClassifyHkExplicit(hk_code);
+              // HK 拉 1d/1m/5m（三周期独立；1m 用扩展行情 MIN_1 编码）。
+              struct HkPeriod { Period p; const char* tag; std::vector<KLine> NetFetchItem::* dst; };
+              std::vector<HkPeriod> periods;
+              if (cfg.daily_only) {
+                periods = {{Period::DAILY, "1d", &NetFetchItem::bars_1d}};
+              } else {
+                periods = {
+                  {Period::DAILY, "1d", &NetFetchItem::bars_1d},
+                  {Period::MIN_1, "1m", &NetFetchItem::bars_1m},
+                  {Period::MIN_5, "5m", &NetFetchItem::bars_5m},
+                };
+              }
+              for (const auto& hp : periods) {
+                std::vector<KLine>* dst = &(item.*(hp.dst));
+                for (uint16_t off = 0; off < kKlineMaxCount; off += 800) {
+                  try {
+                    auto body = proto::serialize_ex_kline(exm, hk_code, hp.p, 1, off, 800);
+                    auto resp = hk_conn->Call(proto::pack_request(proto::kExHead, 0, proto::kMsgExKline,
+                                           body.data(), body.size()));
+                    auto bars = proto::deserialize_ex_kline(resp.body.data(), resp.body.size(), hp.p);
+                    std::fprintf(stderr, "[HK] %.*s %s off=%u -> %zu bars (body=%zuB)\n",
+                                 (int)hk_code.size(), hk_code.data(), hp.tag, off, bars.size(), resp.body.size());
+                    if (bars.empty()) break;
+                    dst->reserve(dst->size() + bars.size());
+                    dst->insert(dst->end(),
+                                 std::make_move_iterator(bars.begin()),
+                                 std::make_move_iterator(bars.end()));
+                    if (bars.size() < 800) break;
+                  } catch (const std::exception&) { break; }
+                }
+              }
+            }
+
+            local_items.push_back(std::move(item));
+          }
+
+          if (a_conn) a_conn->Close();
+          if (hk_conn) hk_conn->Close();
 
           std::lock_guard<mutex_type> lk(mu);
           for (auto& li : local_items)
@@ -486,14 +588,17 @@ static NetImportResult BatchNetImport(
     if (kline_ok) ++r.kline_ok;
 
     // 写复权因子（公用增量写入）；网络无数据则回退到库中已有。
-    int64_t adj_n = WriteAdjustToDB(tconn.native(), item.xdxr, market, code);
-    if (adj_n > 0) {
-      r.adj_events += adj_n; ++r.adj_ok;
-    } else if (has_kline) {
-      // 网络无复权数据，回退到 DB
-      auto fallback = ReadAdjustFromDB(tconn.native(), market, code);
-      int64_t n = WriteAdjustToDB(tconn.native(), fallback, market, code);
-      if (n > 0) { r.adj_events += n; ++r.adj_ok; }
+    // HK 代码无复权因子协议支持，跳过。
+    if (market != Market::HK) {
+      int64_t adj_n = WriteAdjustToDB(tconn.native(), item.xdxr, market, code);
+      if (adj_n > 0) {
+        r.adj_events += adj_n; ++r.adj_ok;
+      } else if (has_kline) {
+        // 网络无复权数据，回退到 DB
+        auto fallback = ReadAdjustFromDB(tconn.native(), market, code);
+        int64_t n = WriteAdjustToDB(tconn.native(), fallback, market, code);
+        if (n > 0) { r.adj_events += n; ++r.adj_ok; }
+      }
     }
   }
 
@@ -588,8 +693,12 @@ int CleanupStaleCodes(TAOS* conn) {
       if (!row[0]) continue;
       std::string code = tdx::taos::ReadVarChar(row[0]);
       std::string mkt = row[1] ? tdx::taos::ReadVarChar(row[1]) : "";
-      // 仅清理不通过 IsAStock 的标的（债券/B股/港股通），保留服务器未返回的合法 A 股（如 589xxx ETF）
-      if (!valid.count({code, mkt}) && !IsAStock(code)) stale.insert({code, mkt});
+      // 仅清理不通过 IsAStock 的标的（债券/B股/港股通），保留：
+      //   - stock_name 中的合法 A 股（含 589xxx ETF 等服务器漏返回的代码）
+      //   - 合法 hk+code（港股代码不在 stock_name 中，但 import --codes hk+code 应被保留）
+      if (!valid.count({code, mkt}) && !IsAStock(code) &&
+          !(mkt == "hk" && tdx::util::IsValidCode(code)))
+        stale.insert({code, mkt});
     }
   }
   ::taos_free_result(res);
@@ -740,6 +849,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
           Market m = Market::SH;
           if (mkt == "sz") m = Market::SZ;
           else if (mkt == "bj") m = Market::BJ;
+          else if (mkt == "hk") m = Market::HK;
           all_codes.emplace_back(std::move(code), m);
         }
       }
@@ -751,20 +861,44 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
 
   // 解析用户指定的代码列表（兼容前缀 sh/sz/bj 与裸 code）：
   // 从带前缀形式提取裸 code，放入 want set 与 stock_name 的裸 code 对齐。
+  // 注：hk+code 前缀保留（stock_name 里 HK 代码存裸数字，但 blk 解析出的 hk+code
+  //     不在 stock_name 中，由下方单独收集 hk_codes 走网络拉取）。
   auto bare_codes = [](const std::vector<std::string>& in) {
     std::set<std::string> out;
     for (const auto& s : in) {
       if (s.size() == 8 && (s[0] == 's' || s[0] == 'b')) out.insert(s.substr(2));
+      else if (s.size() >= 3 && s.substr(0, 2) == "hk") out.insert(s.substr(2));
       else out.insert(s);
     }
     return out;
   };
 
+  // 单独收集 blk 中解析出的 HK 代码（hk+code 形式），供 BatchNetImport HK 分支使用。
+  std::vector<std::string> hk_codes;
+  {
+    auto collect_hk = [&](const std::vector<std::string>& blk) {
+      for (const auto& c : blk) {
+        if (c.size() >= 3 && c.substr(0, 2) == "hk") {
+          std::string_view hv = std::string_view(c).substr(2);
+          if (std::all_of(hv.begin(), hv.end(), ::isdigit) && hv.size() >= 4 && hv.size() <= 5)
+            hk_codes.push_back(c);
+        }
+      }
+    };
+    if (!cfg.codes.empty()) {
+      collect_hk(cfg.codes);
+    } else if (!cfg.all_market) {
+      std::string zxg = cfg.zxg_blk;
+      if (const char* e = std::getenv("TDX_ZXG_BLK"); e && *e) zxg = e;
+      collect_hk(ReadZxgBlk(zxg));
+    }
+  }
+
   if (!cfg.codes.empty()) {
     std::set<std::string> want = bare_codes(cfg.codes);
     std::vector<std::pair<std::string, Market>> t;
     for (auto& p : all_codes) if (want.count(p.first)) t.push_back(std::move(p));
-    if (t.empty()) { std::cerr << "指定代码均不在码表中。\n"; return result; }
+    if (t.empty() && hk_codes.empty()) { std::cerr << "指定代码均不在码表中。\n"; return result; }
     all_codes = std::move(t);
     result.codes_total = static_cast<int>(all_codes.size());
   } else if (!cfg.all_market) {
@@ -781,7 +915,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
         all_codes = std::move(t);
         result.codes_total = static_cast<int>(all_codes.size());
         std::cerr << "自选股过滤: " << result.codes_total << " 只（" << zxg << "）\n";
-      } else {
+      } else if (hk_codes.empty()) {
         std::cerr << "自选股 " << zxg_codes.size()
                   << " 只均不在码表中，回退全市场\n";
       }
@@ -893,10 +1027,12 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
     for (const auto& code : adjust_codes) net_set.insert(code);
     std::vector<std::string> net_codes(net_set.begin(), net_set.end());
 
-    int n_fibers = std::min(n_threads, static_cast<int>(net_codes.size()));
+    int net_total = static_cast<int>(net_codes.size() + hk_codes.size());
+    int n_fibers = std::min(n_threads, net_total);
     if (n_fibers < 1) n_fibers = 1;
 
     std::cerr << "=== 第三步：网络拉取（" << net_codes.size()
+              << " A 股 + " << hk_codes.size() << " 港股 = " << net_total
               << " 只 / " << n_fibers << " fiber";
     if (!missing_codes.empty())
       std::cerr << ", K线缺 " << missing_codes.size() << " 只";
@@ -904,7 +1040,7 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
       std::cerr << ", 无复权 " << adjust_skip << " 只";
     std::cerr << "）===" << std::endl;
 
-    auto nr = BatchNetImport(worker_cfg, missing_set, net_codes, n_fibers, cfg.no_adjust);
+    auto nr = BatchNetImport(worker_cfg, missing_set, net_codes, n_fibers, cfg.no_adjust, hk_codes);
     result.codes_ok += nr.kline_ok;
     result.kline_rows += nr.kline_rows;
     result.adjust_events += nr.adj_events;

@@ -131,7 +131,9 @@ std::vector<std::string> FetchAllCodes() {
   return all;
 }
 
-// 读取通达信自选股 zxg.blk：纯文本 CRLF，每行 7 位（首位 1=沪 sh / 0=深 sz + 6 位代码）。
+// 读取通达信自选股 zxg.blk：纯文本 CRLF，每行 7 位。
+//   1=沪 sh / 0=深 sz + 6 位代码（A 股）
+//   2/3 + '#' + HK 代码（如 31#03690 → hk03690 = 美团 -W）
 std::vector<std::string> ReadZxgBlk(const std::string& path) {
   std::vector<std::string> out;
   std::ifstream f(path);
@@ -143,8 +145,14 @@ std::vector<std::string> ReadZxgBlk(const std::string& path) {
       line.pop_back();
     if (line.size() < 7) continue;          // 非代码行（空行/注释）跳过
     char m = line[0];
-    if (m != '0' && m != '1') continue;     // 首位须为市场标志（1=沪/0=深）
-    out.push_back((m == '1' ? "sh" : "sz") + line.substr(1, 6));
+    if (m == '0' || m == '1') {
+      out.push_back((m == '1' ? "sh" : "sz") + line.substr(1, 6));
+    } else if ((m == '2' || m == '3') && line.find('#') != std::string::npos) {
+      auto i = line.find('#');
+      auto hk = line.substr(i + 1);
+      if (!hk.empty() && std::all_of(hk.begin(), hk.end(), ::isdigit) && hk.size() >= 4 && hk.size() <= 5)
+        out.push_back("hk" + hk);
+    }
   }
   return out;
 }
