@@ -750,16 +750,10 @@ namespace
       std::cerr << "用法: tdx board-quotes <board_id>（板块ID，见 board-list 输出）\n";
       return 1;
     }
-    std::string code = argv[2];
-    if (code.find_first_not_of("0123456789") != std::string::npos)
+    std::string code = argv[2];  // 板块字符串（见 board-list：881328/000686/399372/HK0283 等）
+    if (code.empty())
     {
-      std::cerr << "board_id 须为正整数（来自 board-list），而非股票/指数代码\n";
-      return 1;
-    }
-    int board_code = 0;
-    if (!absl::SimpleAtoi(code, &board_code) || board_code <= 0)
-    {
-      std::cerr << "board_id 解析失败或非正数\n";
+      std::cerr << "board_id 为空\n";
       return 1;
     }
     quotes::SPQuotes sp;
@@ -768,14 +762,34 @@ namespace
       std::cerr << "SP连接失败: " << ec.message() << "\n";
       return 1;
     }
-    auto body = proto::serialize_sp_board_members(board_code, SortType::Code, 0, 80, SortOrder::None, {});
+    // board_symbol 须经 exchange_board_code 转服务器内部 board_code（如 881328→21328）；
+    // 请求带位图字段（PresetBasic），否则服务器不返回字段值。
+    auto body = proto::serialize_sp_board_members(
+        static_cast<int>(proto::exchange_board_code(code)), SortType::Code, 0, 80,
+        SortOrder::None, proto::PresetBasic());
     auto resp = sp.Call(proto::kMsgSpBoardMembers, body);
     if (resp.body.empty())
     {
       std::cerr << "无数据\n";
       return 0;
     }
-    std::cout << "板块 " << code << " 成员报价请求已发送 (resp " << resp.body.size() << "B)\n";
+    auto rows = proto::deserialize_symbol_quotes(resp.body.data(), resp.body.size());
+    std::cout << "板块 " << code << " 成员 (" << rows.size() << " 只):\n";
+    auto getf = [](const proto::SymbolQuoteRow &r, const char *name) -> double {
+      for (const auto &[n, v] : r.fields)
+        if (n == name) return v;
+      return 0.0;
+    };
+    for (size_t i = 0; i < std::min(rows.size(), size_t(20)); ++i)
+    {
+      const auto &r = rows[i];
+      double close = getf(r, "close"), pre = getf(r, "pre_close"), vol = getf(r, "vol");
+      double chg = pre > 0 ? (close - pre) / pre * 100.0 : 0.0;
+      printf("  %s %s %.2f %.2f%% vol=%.0f\n",
+             r.code.c_str(), r.name.c_str(), close, chg, vol);
+    }
+    if (rows.size() > 20)
+      std::cout << "  ... 共 " << rows.size() << " 只\n";
     return 0;
   }
 
@@ -813,6 +827,227 @@ namespace
     return 0;
   }
 
+  // ============ 扩展行情（7727，期货/港美股）CLI：暴露 ExtQuotes 已实现的 5 方法 ============
+  // 港股为主：code 经 ClassifyHkExplicit 自动分桶到 ExMarket（主板/GEM/指数）。
+
+  // epoch seconds → "MM-DD HH:MM"（CLI 主线程，localtime_r 安全，非 fiber 内）
+  std::string FmtDateTime(int64_t epoch) {
+    if (epoch <= 0) return "-";
+    time_t t = static_cast<time_t>(epoch);
+    struct tm tm{};
+    localtime_r(&t, &tm);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02d-%02d %02d:%02d",
+                  tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+    return std::string(buf);
+  }
+
+  Period ParsePeriodStr(const std::string &s) {
+    if (s == "5m") return Period::MIN_5;
+    if (s == "1m") return Period::MIN_1;
+    if (s == "15m") return Period::MIN_15;
+    if (s == "30m") return Period::MIN_30;
+    if (s == "1h") return Period::HOUR_1;
+    return Period::DAILY;
+  }
+
+  int TodayYmd() {
+    time_t t = std::time(nullptr);
+    struct tm tm{};
+    localtime_r(&t, &tm);
+    return (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday;
+  }
+
+  char BuySellCh(BuySell bs) {
+    switch (bs) {
+      case BuySell::Buy:  return 'B';
+      case BuySell::Sell: return 'S';
+      default:            return 'N';
+    }
+  }
+
+  // ---- 扩展 K线 0x23ff ----
+  int DoExBars(int argc, char **argv) {
+    if (argc < 3) {
+      std::cerr << "用法: tdx ex-bars <code> [period=1d] [count=100]（code 如 00700 港股）\n";
+      return 1;
+    }
+    std::string code = argv[2];
+    std::string ps = argc > 3 ? argv[3] : "1d";
+    uint16_t count = 100;
+    if (argc > 4) { int c = 0; if (absl::SimpleAtoi(argv[4], &c) && c > 0 && c <= 800) count = static_cast<uint16_t>(c); }
+    quotes::ExtQuotes ex;
+    if (auto ec = ex.Connect()) { std::cerr << "扩展行情连接失败: " << ec.message() << "\n"; return 1; }
+    auto bars = ex.Bars(ClassifyHkExplicit(code), code, ParsePeriodStr(ps), 0, count);
+    std::cout << code << " " << ps << " (" << bars.size() << " 根):\n";
+    for (size_t i = 0; i < std::min(bars.size(), size_t(20)); ++i) {
+      const auto &b = bars[i];
+      printf("  %s O:%.2f H:%.2f L:%.2f C:%.2f V:%.0f A:%.2f\n",
+             FmtDateTime(b.datetime).c_str(), b.open, b.high, b.low, b.close, b.volume, b.amount);
+    }
+    if (bars.size() > 20) std::cout << "  ... 共 " << bars.size() << " 根\n";
+    return 0;
+  }
+
+  // ---- 扩展报价 0x248a ----
+  int DoExQuotes(int argc, char **argv) {
+    if (argc < 3) {
+      std::cerr << "用法: tdx ex-quotes <code> [code...]（港股代码，如 00700 09988）\n";
+      return 1;
+    }
+    std::vector<std::pair<ExMarket, std::string>> codes;
+    for (int i = 2; i < argc; ++i) codes.emplace_back(ClassifyHkExplicit(argv[i]), argv[i]);
+    quotes::ExtQuotes ex;
+    if (auto ec = ex.Connect()) { std::cerr << "扩展行情连接失败: " << ec.message() << "\n"; return 1; }
+    auto qs = ex.Quotes(codes);
+    std::cout << "扩展报价 (" << qs.size() << "):\n";
+    for (const auto &q : qs) {
+      double chg = q.pre_close > 0 ? (q.close - q.pre_close) / q.pre_close * 100.0 : 0.0;
+      printf("  %s pre:%.2f O:%.2f H:%.2f L:%.2f C:%.2f %.2f%% V:%.0f A:%.2f\n",
+             q.code.c_str(), q.pre_close, q.open, q.high, q.low, q.close, chg, q.vol, q.amount);
+    }
+    return 0;
+  }
+
+  // ---- 扩展商品/证券列表 0x23f5 ----
+  int DoExStocks(int argc, char **argv) {
+    uint32_t start = 0;
+    uint16_t count = 1600;
+    if (argc > 2) { int s = 0; if (absl::SimpleAtoi(argv[2], &s) && s >= 0) start = static_cast<uint32_t>(s); }
+    if (argc > 3) { int c = 0; if (absl::SimpleAtoi(argv[3], &c) && c > 0 && c <= 1600) count = static_cast<uint16_t>(c); }
+    quotes::ExtQuotes ex;
+    if (auto ec = ex.Connect()) { std::cerr << "扩展行情连接失败: " << ec.message() << "\n"; return 1; }
+    auto items = ex.Stocks(start, count);
+    std::cout << "扩展列表 (" << items.size() << " 条):\n";
+    for (size_t i = 0; i < std::min(items.size(), size_t(30)); ++i) {
+      const auto &it = items[i];
+      printf("  mkt=%d cat=%d %s %s\n", it.market, it.category, it.code.c_str(), it.name.c_str());
+    }
+    if (items.size() > 30) std::cout << "  ... 共 " << items.size() << " 条\n";
+    return 0;
+  }
+
+  // ---- 扩展类别列表 0x23f4 ----
+  int DoExCategory(int /*argc*/, char ** /*argv*/) {
+    quotes::ExtQuotes ex;
+    if (auto ec = ex.Connect()) { std::cerr << "扩展行情连接失败: " << ec.message() << "\n"; return 1; }
+    auto cats = ex.CategoryList();
+    std::cout << "扩展类别 (" << cats.size() << "):\n";
+    for (const auto &c : cats)
+      printf("  type=%d code=%d %s (%s)\n", c.goods_type, c.code, c.name.c_str(), c.abbr.c_str());
+    return 0;
+  }
+
+  // ---- 扩展历史成交 0x2412 ----
+  int DoExHistoryTx(int argc, char **argv) {
+    if (argc < 3) {
+      std::cerr << "用法: tdx ex-history-tx <code> [ymd=今天]（港股代码）\n";
+      return 1;
+    }
+    std::string code = argv[2];
+    int ymd = TodayYmd();
+    if (argc > 3) { int y = 0; if (absl::SimpleAtoi(argv[3], &y) && y > 20000101) ymd = y; }
+    quotes::ExtQuotes ex;
+    if (auto ec = ex.Connect()) { std::cerr << "扩展行情连接失败: " << ec.message() << "\n"; return 1; }
+    auto txns = ex.HistoryTransactions(ClassifyHkExplicit(code), code, ymd);
+    std::cout << code << " 历史成交 " << ymd << " (" << txns.size() << " 笔):\n";
+    for (size_t i = 0; i < std::min(txns.size(), size_t(30)); ++i) {
+      const auto &t = txns[i];
+      printf("  %s %.2f x%lld %c\n", FmtDateTime(t.datetime).c_str(), t.price,
+             static_cast<long long>(t.volume), BuySellCh(t.buy_sell));
+    }
+    if (txns.size() > 30) std::cout << "  ... 共 " << txns.size() << " 笔\n";
+    return 0;
+  }
+
+  // ============ SP 补齐（0x122B 单标的报价 / 0x122E 板块K线 / 0x123D 集合竞价）============
+
+  // ---- SP 单标的报价 0x122B（位图驱动，复用 deserialize_symbol_quotes）----
+  int DoSpSymbolQuotes(int argc, char **argv) {
+    if (argc < 3) {
+      std::cerr << "用法: tdx sp-quotes <sh|sz|bj><code> [...]（A 股代码）\n";
+      return 1;
+    }
+    std::vector<std::pair<uint16_t, std::string>> codes;
+    for (int i = 2; i < argc; ++i) {
+      auto [mkt, c] = tdx::ParseMarketCode(argv[i]);
+      if (c.empty()) { std::cerr << argv[i] << ": 缺市场前缀（sh/sz/bj）\n"; return 1; }
+      codes.emplace_back(static_cast<uint16_t>(mkt), c);
+    }
+    quotes::SPQuotes sp;
+    if (auto ec = sp.Connect()) { std::cerr << "SP连接失败: " << ec.message() << "\n"; return 1; }
+    auto body = proto::serialize_sp_symbol_quotes(codes, proto::PresetBasic());
+    auto resp = sp.Call(proto::kMsgSpSymbolQuotes, body);
+    if (resp.body.empty()) { std::cerr << "无数据\n"; return 0; }
+    auto rows = proto::deserialize_symbol_quotes(resp.body.data(), resp.body.size());
+    std::cout << "SP 单标的报价 (" << rows.size() << "):\n";
+    auto getf = [](const proto::SymbolQuoteRow &r, const char *name) -> double {
+      for (const auto &[n, v] : r.fields)
+        if (n == name) return v;
+      return 0.0;
+    };
+    for (const auto &r : rows) {
+      double close = getf(r, "close"), pre = getf(r, "pre_close"), vol = getf(r, "vol");
+      double chg = pre > 0 ? (close - pre) / pre * 100.0 : 0.0;
+      printf("  %s %s %.2f %.2f%% vol=%.0f\n", r.code.c_str(), r.name.c_str(), close, chg, vol);
+    }
+    return 0;
+  }
+
+  // ---- SP 板块K线 0x122E ----
+  int DoSpSymbolBar(int argc, char **argv) {
+    if (argc < 3) {
+      std::cerr << "用法: tdx sp-bar <board_code> [period=1d] [count=100]（board_code 见 board-list）\n";
+      return 1;
+    }
+    std::string code = argv[2];
+    std::string ps = argc > 3 ? argv[3] : "1d";
+    uint16_t count = 100;
+    if (argc > 4) { int c = 0; if (absl::SimpleAtoi(argv[4], &c) && c > 0 && c <= 800) count = static_cast<uint16_t>(c); }
+    quotes::SPQuotes sp;
+    if (auto ec = sp.Connect()) { std::cerr << "SP连接失败: " << ec.message() << "\n"; return 1; }
+    // 板块指数（88xxxx）属 MARKET.SH（opentdx demo: 880310 market=MARKET.SH）
+    auto body = proto::serialize_sp_symbol_bar(static_cast<uint16_t>(Market::SH), code,
+                                                ParsePeriodStr(ps), 0, count);
+    auto resp = sp.Call(proto::kMsgSpSymbolBar, body);
+    if (resp.body.empty()) { std::cerr << "无数据\n"; return 0; }
+    auto bars = proto::deserialize_sp_symbol_bar(resp.body.data(), resp.body.size(), ParsePeriodStr(ps));
+    std::cout << code << " " << ps << " (" << bars.size() << " 根):\n";
+    for (size_t i = 0; i < std::min(bars.size(), size_t(20)); ++i) {
+      const auto &b = bars[i];
+      printf("  %s O:%.2f H:%.2f L:%.2f C:%.2f V:%.0f\n",
+             FmtDateTime(b.datetime).c_str(), b.open, b.high, b.low, b.close, b.volume);
+    }
+    if (bars.size() > 20) std::cout << "  ... 共 " << bars.size() << " 根\n";
+    return 0;
+  }
+
+  // ---- SP 集合竞价 0x123D（个股，datetime 为当日秒数转 HH:MM；仅盘中 9:15-9:25 有数据）----
+  int DoSpAuction(int argc, char **argv) {
+    if (argc < 3) {
+      std::cerr << "用法: tdx sp-auction <sh|sz><code> [start=0] [count=100]（个股集合竞价）\n";
+      return 1;
+    }
+    auto [mkt, code] = tdx::ParseMarketCode(argv[2]);
+    if (code.empty()) { std::cerr << "缺市场前缀（sh/sz）\n"; return 1; }
+    uint32_t start = 0, count = 100;
+    if (argc > 3) { int s = 0; if (absl::SimpleAtoi(argv[3], &s) && s >= 0) start = static_cast<uint32_t>(s); }
+    if (argc > 4) { int c = 0; if (absl::SimpleAtoi(argv[4], &c) && c > 0) count = static_cast<uint32_t>(c); }
+    quotes::SPQuotes sp;
+    if (auto ec = sp.Connect()) { std::cerr << "SP连接失败: " << ec.message() << "\n"; return 1; }
+    auto body = proto::serialize_sp_auction(static_cast<uint16_t>(mkt), code, start, count);
+    auto resp = sp.Call(proto::kMsgSpAuction, body);
+    if (resp.body.empty()) { std::cerr << "无数据\n"; return 0; }
+    auto items = proto::deserialize_sp_auction(resp.body.data(), resp.body.size());
+    std::cout << code << " 集合竞价 (" << items.size() << " 条):\n";
+    for (size_t i = 0; i < std::min(items.size(), size_t(30)); ++i) {
+      const auto &a = items[i];
+      int h = static_cast<int>(a.datetime / 3600 % 24), m = static_cast<int>(a.datetime % 3600 / 60);
+      printf("  %02d:%02d %.2f 已撮:%d 未撮:%d\n", h, m, a.price, a.matched, a.unmatched);
+    }
+    return 0;
+  }
+
 } // namespace
 
 // import 子命令（定义在 cli/import.cpp，不在 namespace 内）
@@ -843,7 +1078,15 @@ static void PrintUsage()
             << "  tdx unusual [market=1]           主力异动\n"
             << "  tdx board-list [type=1]          板块列表\n"
             << "  tdx board-quotes <board_id>      板块成员报价（board_id 来自 board-list）\n"
-            << "  tdx capital-flow <code>          资金流向\n";
+            << "  tdx capital-flow <code>          资金流向\n"
+            << "  tdx ex-bars <code> [period] [count]  扩展行情K线（港股 00700 等）\n"
+            << "  tdx ex-quotes <code> [...]       扩展报价（港股）\n"
+            << "  tdx ex-stocks [start] [count]    扩展商品/证券列表\n"
+            << "  tdx ex-category                  扩展类别列表\n"
+            << "  tdx ex-history-tx <code> [ymd]   扩展历史成交（港股）\n"
+            << "  tdx sp-quotes <sh|sz><code> [...] 单标的报价（SP 0x122B）\n"
+            << "  tdx sp-bar <board_code> [period] 板块K线（SP 0x122E）\n"
+            << "  tdx sp-auction <sh|sz><code>     个股集合竞价（SP 0x123D，盘中 9:15-9:25）\n";
 }
 
 int main(int argc, char **argv)
@@ -924,6 +1167,14 @@ int main(int argc, char **argv)
     return DoBoardQuotes(argc, argv);
   if (cmd == "capital-flow")
     return DoCapitalFlow(argc, argv);
+  if (cmd == "ex-bars")       return DoExBars(argc, argv);
+  if (cmd == "ex-quotes")     return DoExQuotes(argc, argv);
+  if (cmd == "ex-stocks")     return DoExStocks(argc, argv);
+  if (cmd == "ex-category")   return DoExCategory(argc, argv);
+  if (cmd == "ex-history-tx") return DoExHistoryTx(argc, argv);
+  if (cmd == "sp-quotes")     return DoSpSymbolQuotes(argc, argv);
+  if (cmd == "sp-bar")        return DoSpSymbolBar(argc, argv);
+  if (cmd == "sp-auction")    return DoSpAuction(argc, argv);
 
   // ---- 向后兼容别名（v0.15.0 重命名，下个大版本可移除） ----
   if (cmd == "sync-names") {

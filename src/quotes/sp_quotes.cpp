@@ -7,6 +7,8 @@
 
 #include "base/logging.h"
 
+#include "util/fibers/fibers.h"  // ::util::MakeFiber（心跳失败派发重连到普通 fiber）
+
 #include "tdx/errors.hpp"
 #include "tdx/proto/frame.hpp"
 #include "tdx/proto/parsers.hpp"  // 标准登录 serialize_login
@@ -42,7 +44,7 @@ std::error_code SPQuotes::ConnectInFiber() {
   }
   LOG(INFO) << "SPQuotes: 选服 " << best->ip << ":" << best->port;
 
-  conn_ = std::make_unique<proto::Connection>(proactor_);
+  conn_ = std::make_shared<proto::Connection>(proactor_);
   boost::system::error_code addr_ec;
   auto addr = boost::asio::ip::make_address(best->ip, addr_ec);
   if (addr_ec) return std::make_error_code(std::errc::bad_address);
@@ -64,7 +66,7 @@ std::error_code SPQuotes::ConnectInFiber() {
 
   // SP 复用标准心跳（15s）
   heartbeat_ = std::make_unique<proto::Heartbeat>(
-      proactor_, [this] { SendHeartbeat(); }, [] {});
+      proactor_, [this] { SendHeartbeat(); }, [this] { OnHeartbeatTimeout(); });
   heartbeat_->Start();
   LOG(INFO) << "SPQuotes: 登录成功，SP 模式就绪";
   connected_ = true;
@@ -72,12 +74,18 @@ std::error_code SPQuotes::ConnectInFiber() {
 }
 
 void SPQuotes::SendHeartbeat() {
+  auto c = conn_;  // shared_ptr 快照
+  if (!c) return;
   auto hb = proto::serialize_heartbeat();
   auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgHeartbeat,
                                  hb.data(), hb.size());
   try {
-    conn_->Call(req);
+    c->Call(req);
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "SPQuotes: 心跳发送失败，触发重连: " << e.what();
+    ::util::MakeFiber([this] { Reconnect(); }).Detach();
   } catch (...) {
+    ::util::MakeFiber([this] { Reconnect(); }).Detach();
   }
 }
 
@@ -98,6 +106,33 @@ void SPQuotes::Close() {
   proactor_ = nullptr;
 }
 
+void SPQuotes::OnHeartbeatTimeout() {
+  // Heartbeat::OnTimer 已用 MakeFiber 派发到普通 fiber，可安全做同步重连。
+  LOG(WARNING) << "SPQuotes: 心跳连续空闲达阈值，触发重连";
+  Reconnect();
+}
+
+void SPQuotes::Reconnect() {
+  // 幂等（reconnecting_ 防并发风暴）；所有路径经 proactor_->Await 派发到 proactor 线程。
+  if (reconnecting_.exchange(true)) return;
+  if (!proactor_) { reconnecting_.store(false); return; }
+  proactor_->Await([this] {
+    LOG(INFO) << "SPQuotes: 重连开始（Close → 重新选服/连接/登录/心跳）";
+    if (heartbeat_) { heartbeat_->Stop(); heartbeat_.reset(); }
+    if (conn_) { conn_->Close(); conn_.reset(); }
+    connected_ = false;
+    if (auto ec = ConnectInFiber()) {
+      LOG(ERROR) << "SPQuotes: 重连失败: " << ec.message();
+      breaker_.RecordFailure();
+      reconnecting_.store(false);
+      return;
+    }
+    breaker_.RecordSuccess();
+    reconnecting_.store(false);
+    LOG(INFO) << "SPQuotes: 重连成功";
+  });
+}
+
 proto::Response SPQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& body) {
   // conn_->Call 的 socket 操作要求在 proactor 线程（DCHECK InMyThread）。
   // Call 可从主线程（CLI/测试）调用，须派发到 proactor 线程。
@@ -106,9 +141,11 @@ proto::Response SPQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& body
   auto req = proto::pack_request(proto::kHeadNoZip, 0, msg_id, body.data(), body.size());
   proto::Response resp;
   std::error_code ec = retry_.Execute([&]() -> std::error_code {
+    auto c = conn_;  // shared_ptr 快照
+    if (!c) return std::make_error_code(std::errc::connection_reset);
     try {
       resp = proactor_->Await([&] {
-        return conn_->Call(req);
+        return c->Call(req);
       });
       return {};
     } catch (const TdxConnectionError&) {

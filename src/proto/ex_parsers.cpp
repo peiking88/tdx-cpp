@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include "tdx/proto/codec.hpp"  // to_datetime
+#include "tdx/proto/sp_codec.hpp"  // combine_to_datetime（ex 历史成交 date+time→epoch）
 #include "tdx/util/byte_order.hpp"
 #include "tdx/util/gbk.hpp"
 #include "tdx/util/time_util.hpp"
@@ -297,6 +298,7 @@ std::vector<Transaction> deserialize_ex_history_txn(const uint8_t* data, std::si
   std::vector<Transaction> result;
   if (len < 58) return result;
   uint16_t count = util::rd_u16(data + 56);
+  uint32_t date_ymd = util::rd_u32(data + 40);  // head date @40（opentdx <B39sI...>）
   for (uint16_t i = 0; i < count; ++i) {
     std::size_t off = 58 + static_cast<std::size_t>(i) * 16;
     if (off + 16 > len) break;
@@ -305,7 +307,8 @@ std::vector<Transaction> deserialize_ex_history_txn(const uint8_t* data, std::si
     uint32_t vol = util::rd_u32(data + off + 6);
     uint16_t buy_sell = util::rd_u16(data + off + 14);
     Transaction t;
-    t.datetime = (minutes / 60 % 24) * 3600 + (minutes % 60) * 60;
+    // opentdx 仅给 time(minutes)，此处用 head date 组合成真 epoch（统一 datetime=epoch 语义）
+    t.datetime = combine_to_datetime(date_ymd, static_cast<int>(minutes) * 60, false);
     t.price = static_cast<double>(price);
     t.volume = static_cast<double>(vol);
     t.buy_sell = buy_sell == 0 ? BuySell::Buy

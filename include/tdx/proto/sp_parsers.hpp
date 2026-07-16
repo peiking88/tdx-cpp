@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "tdx/consts.hpp"
 #include "tdx/proto/bitmap.hpp"
+#include "tdx/proto/sp_codec.hpp"  // exchange_board_code（board_symbol→board_code）
 #include "tdx/types.hpp"
 
 namespace tdx::proto {
@@ -40,6 +42,12 @@ std::vector<uint8_t> serialize_sp_board_members(int board_code, SortType sort_ty
                                                 uint16_t start, uint16_t page_size,
                                                 SortOrder sort_order,
                                                 const std::vector<FieldBit>& fields);
+
+// ---- 单标的报价 0x122B（位图驱动，响应复用 deserialize_symbol_quotes 解析）----
+// 请求 = 20B 位图 + <H>count + N×<H22s>(market, code_gbk)。market 为 MARKET/EX_MARKET 数值。
+std::vector<uint8_t> serialize_sp_symbol_quotes(
+    const std::vector<std::pair<uint16_t, std::string>>& codes,
+    const std::vector<FieldBit>& fields);
 
 // ---- SP K线 0x122E（请求 22s code；响应 33B 头 + 36B/根 <II7f>）----
 std::vector<uint8_t> serialize_sp_symbol_bar(uint16_t market, std::string_view code,

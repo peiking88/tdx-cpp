@@ -3,6 +3,7 @@
 // 登录复用标准 0x0d，心跳复用 0x04。
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <system_error>
 #include <vector>
@@ -39,16 +40,22 @@ class SPQuotes {
  private:
   std::error_code ConnectInFiber();
   void SendHeartbeat();
+  // 心跳连续空闲达阈值 / 发送失败 → 触发重连（对齐 StdQuotes）。
+  void OnHeartbeatTimeout();
+  void Reconnect();
   static std::vector<proto::ServerInfo> DefaultMacHosts();
 
   std::unique_ptr<::util::ProactorPool> pool_;
   ::util::fb2::ProactorBase* proactor_ = nullptr;
-  std::unique_ptr<proto::Connection> conn_;
+  // shared_ptr：Reconnect 换 conn_ 时在途请求/心跳快照保活旧 Connection（防 UAF）
+  std::shared_ptr<proto::Connection> conn_;
   std::unique_ptr<proto::Heartbeat> heartbeat_;
   std::unique_ptr<proto::ServerPool> server_pool_;
   proto::RetryPolicy retry_;
   proto::CircuitBreaker breaker_;
   bool connected_ = false;
+  // 重连幂等标志（atomic：仅布尔，任意 fiber 原子读写）
+  std::atomic<bool> reconnecting_{false};
 };
 
 }  // namespace tdx::quotes

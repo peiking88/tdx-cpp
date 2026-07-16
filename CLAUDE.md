@@ -33,6 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.16.2**：①修复基金实时报价 OHLC 缩放——`scaling.hpp` NetQuotes 区分基金（0.001）vs 个股/指数（0.01），`deserialize_quotes_detail` 改双参 `GetScaling(ClassifySecurity(code), NetQuotes)`（原统一 0.01 导致基金价放大 10×）+ 回归测试 `FundOhlcScale001`；②修复 ctest 假绿——`test_bars`/`test_fetch_history` 服务器不可达时 SetUpTestSuite 全 `GTEST_SKIP`，但 gtest 退出码仍为 0 被 ctest 误报 Passed（零用例执行的假绿）；新增 `scripts/run_gtest.sh` wrapper（`GTEST_OUTPUT` 环境变量落 XML 解析，全 SKIP→退出码 77；命令行 flag 会被 absl custom main 拒绝故用环境变量）+ `SKIP_RETURN_CODE 77`，不可达时正确标 SKIPPED
 - **v0.17**：港股分类（`IsHkCode`/`ClassifyHk`/`ClassifyHkExplicit`，`consts.hpp`）+ fetch-quotes `--quote_hk` 双市场（A 股 `0x53e` / 港股 `0x248a` 分桶选服）+ `BarsAuto` 自动分流（懒建 `ExtQuotes`：带 sh/sz/bj 前缀走 A 股 / HK 走扩展行情 `0x23ff`）
 - **v0.20.0**：①**港股不入库策略**——港股仅在 `fetch-quotes` 采集 + mmap 实时快照，**不入 TDengine**（`fetch_quotes.cpp` 阶段B `wm==HK` 守卫跳过 `InsertQuote`/入库队列，无 `--mmap_path` 时 stderr 警告丢弃）；理由：港股无复权因子、无涨跌停限制、数据量少。②**熔断器指数退避**——`CircuitBreaker` HALF_OPEN 探测失败时恢复窗 `base×2^min(n,5)`（封顶 32×），防午休长断网重连风暴；`Reconnect()` 失败喂熔断器。③**force push 取代 v0.19.0**——废弃 v0.18/0.19 的 HK kline 网络入库方向（`taos_import` HK 分支），本地主线以 0.20.0 重置，`0.18.0`/`0.19.0` tag 变 orphan
+- **v0.21.0**：①**协议层 UAF 崩溃修复**——`Connection::Call` 加 per-instance `fb2::Mutex`（串行化心跳/请求并发写同一 socket，防协议错位）；`Close()` 不再 `socket_.reset()`（保活给挂起 Recv，由析构释放）；`StdQuotes::conn_` 改 `shared_ptr`（Reconnect 换 conn_ 时在途请求快照保活）。修盘前 fetch-kline 崩溃（`0xabababab` 释放内存中毒）。②**Ext/SP CLI 暴露 + 重连**——新增 `ex-bars`/`ex-quotes`/`ex-stocks`/`ex-category`/`ex-history-tx`（扩展行情，港股为主）+ `sp-quotes`/`sp-bar`/`sp-auction`（SP 补齐）；ExtQuotes 加请求失败驱动重连（ex 不发心跳）、SPQuotes 加心跳触发重连（原 on_timeout 空转 / SendHeartbeat 静默），均 `shared_ptr conn_` + `reconnecting_` 幂等 + breaker 复位；ExtQuotes 5 方法包 `SafeAwait`（防 WorkerFiber terminate）。③**board-quotes 补全**——`exchange_board_code`（881328→21328）+ `PresetBasic` 位图 + `deserialize_symbol_quotes` 解析成员明细；补 `serialize_sp_symbol_quotes`(0x122B)；修 `deserialize_ex_history_txn` datetime（date+time 组合 epoch）
 
 **上游短板改进**（C++ 版相对 Python 上游）：①并发批量下载（`tdx_batch` helio fiber 池 + `-n`）；②断点续传（`SyncState` JSON 持久化）；③统一 TDengine 时序存储（替代上游零散存储）。
 
@@ -158,11 +159,12 @@ output/      程序输出（不入 git）
 
 **CLI 命令**（`src/cli/main.cpp` 分发）：
 - **采集/入库**：`server-test`（测速选服）、`import`（vipdoc 历史导入）、`fetch-quotes`（实时行情→TDengine/mmap）、`fetch-kline`（当日K线循环）、`fetch-finance`/`fetch-f10`（财务/F10 独立重导）、`truncate-quotes`（清当日盘中队列）
-- **盘中接口**：`history-orders`、`history-tx`、`vol-profile`、`index-info`、`unusual`、`board-list`、`board-quotes`、`capital-flow`
+- **盘中接口**：`history-orders`、`history-tx`、`vol-profile`、`index-info`、`unusual`、`board-list`、`board-quotes`、`capital-flow`、`sp-quotes`、`sp-bar`、`sp-auction`
+- **扩展行情（7727 港股/期货）**：`ex-bars`、`ex-quotes`、`ex-stocks`、`ex-category`、`ex-history-tx`
 - **盘中实时终端**：`scripts/fetch-today.py --mmap`（内嵌 Python ShmViewer 全屏 TUI，读 shm seqlock 快照 + ANSI 行情表；stderr dup2 落到 fetch_today.log）
 - **代码名称管理**：`fetch-names`、`cleanup`、`check-names`
 - **批量**：`tdx_batch`（src/batch/，BatchFetchKline 用于并发测试，已从 CLI 移除）
-- **已移除命令**：`pull-kline`（换 `import`）；`bars`/`ex-bars`/`fetch-history`/`batch-fetch` 已从 CLI 移除（`batch-fetch` 回落为测试用例）
+- **已移除命令**：`pull-kline`（换 `import`）；`bars`/`fetch-history`/`batch-fetch` 已从 CLI 移除（`batch-fetch` 回落为测试用例）。`ex-bars` v0.21 回归（扩展行情）
 
 ## helio fiber 编码纪律（关键约束）
 

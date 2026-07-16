@@ -7,6 +7,8 @@
 
 #include "base/logging.h"
 
+#include "util/fibers/fibers.h"  // ::util::MakeFiber（请求失败派发重连到普通 fiber）
+
 #include "tdx/errors.hpp"
 #include "tdx/proto/frame.hpp"
 
@@ -46,7 +48,7 @@ std::error_code ExtQuotes::ConnectInFiber() {
   }
   LOG(INFO) << "ExtQuotes: 选服 " << best->ip << ":" << best->port;
 
-  conn_ = std::make_unique<proto::Connection>(proactor_);
+  conn_ = std::make_shared<proto::Connection>(proactor_);
   boost::system::error_code addr_ec;
   auto addr = boost::asio::ip::make_address(best->ip, addr_ec);
   if (addr_ec) return std::make_error_code(std::errc::bad_address);
@@ -86,14 +88,36 @@ void ExtQuotes::Close() {
   proactor_ = nullptr;
 }
 
+void ExtQuotes::Reconnect() {
+  // ex 协议不发心跳：仅靠请求失败（Call 重试耗尽）驱动重连。幂等（reconnecting_）。
+  if (reconnecting_.exchange(true)) return;
+  if (!proactor_) { reconnecting_.store(false); return; }
+  proactor_->Await([this] {
+    LOG(INFO) << "ExtQuotes: 重连开始（Close → 重新选服/连接/登录）";
+    if (conn_) { conn_->Close(); conn_.reset(); }
+    connected_ = false;
+    if (auto ec = ConnectInFiber()) {
+      LOG(ERROR) << "ExtQuotes: 重连失败: " << ec.message();
+      breaker_.RecordFailure();
+      reconnecting_.store(false);
+      return;
+    }
+    breaker_.RecordSuccess();
+    reconnecting_.store(false);
+    LOG(INFO) << "ExtQuotes: 重连成功";
+  });
+}
+
 proto::Response ExtQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& body) {
   // head=1（扩展行情）。受 RetryPolicy + CircuitBreaker 保护。
   if (!breaker_.AllowRequest()) throw TdxConnectionError("circuit breaker open");
   auto req = proto::pack_request(proto::kExHead, 0, msg_id, body.data(), body.size());
   proto::Response resp;
   std::error_code ec = retry_.Execute([&]() -> std::error_code {
+    auto c = conn_;  // shared_ptr 快照：Reconnect 期间换 conn_ 不影响在途调用
+    if (!c) return std::make_error_code(std::errc::connection_reset);
     try {
-      resp = conn_->Call(req);
+      resp = c->Call(req);
       return {};
     } catch (const TdxConnectionError&) {
       return std::make_error_code(std::errc::connection_reset);
@@ -103,6 +127,8 @@ proto::Response ExtQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& bod
   });
   if (ec) {
     breaker_.RecordFailure();
+    // ex 协议不发心跳，靠请求失败驱动重连
+    ::util::MakeFiber([this] { Reconnect(); }).Detach();
     throw TdxConnectionError("ex call failed: " + ec.message());
   }
   breaker_.RecordSuccess();
@@ -112,7 +138,7 @@ proto::Response ExtQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& bod
 std::vector<KLine> ExtQuotes::Bars(ExMarket market, std::string_view code, Period period,
                                    uint16_t start, uint16_t count) {
   auto body = proto::serialize_ex_kline(market, code, period, 1, start, count);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgExKline, body);
     return proto::deserialize_ex_kline(resp.body.data(), resp.body.size(), period);
   });
@@ -120,7 +146,7 @@ std::vector<KLine> ExtQuotes::Bars(ExMarket market, std::string_view code, Perio
 
 std::vector<ExQuote> ExtQuotes::Quotes(const std::vector<std::pair<ExMarket, std::string>>& codes) {
   auto body = proto::serialize_ex_quotes(codes);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgExQuotes, body);
     return proto::deserialize_ex_quotes(resp.body.data(), resp.body.size());
   });
@@ -128,14 +154,14 @@ std::vector<ExQuote> ExtQuotes::Quotes(const std::vector<std::pair<ExMarket, std
 
 std::vector<proto::ExListItem> ExtQuotes::Stocks(uint32_t start, uint16_t count) {
   auto body = proto::serialize_ex_list(start, count);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgExList, body);
     return proto::deserialize_ex_list(resp.body.data(), resp.body.size());
   });
 }
 
 std::vector<proto::ExCategory> ExtQuotes::CategoryList() {
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgExCategoryList, {});
     return proto::deserialize_ex_category_list(resp.body.data(), resp.body.size());
   });
@@ -143,9 +169,24 @@ std::vector<proto::ExCategory> ExtQuotes::CategoryList() {
 
 std::vector<Transaction> ExtQuotes::HistoryTransactions(ExMarket market, std::string_view code, int ymd) {
   auto body = proto::serialize_ex_history_txn(market, code, ymd);
-  return proactor_->Await([&] {
+  return SafeAwait([&] {
     auto resp = Call(proto::kMsgExHistoryTxn, body);
     return proto::deserialize_ex_history_txn(resp.body.data(), resp.body.size());
+  });
+}
+
+template <typename F>
+auto ExtQuotes::SafeAwait(F&& fn) -> decltype(fn()) {
+  using R = decltype(fn());
+  return proactor_->Await([&]() -> R {
+    try {
+      return std::forward<F>(fn)();
+    } catch (const std::exception& e) {
+      LOG(ERROR) << "ExtQuotes: fiber 内请求异常，转空结果返回: " << e.what();
+    } catch (...) {
+      LOG(ERROR) << "ExtQuotes: fiber 内请求未知异常，转空结果返回";
+    }
+    return R{};
   });
 }
 

@@ -115,7 +115,9 @@ class StdQuotes {
 
   std::unique_ptr<::util::ProactorPool> pool_;
   ::util::fb2::ProactorBase* proactor_ = nullptr;
-  std::unique_ptr<proto::Connection> conn_;
+  // shared_ptr：Reconnect 换 conn_ 时，在途请求/心跳持有的快照仍保活旧 Connection，
+  // 其 socket 已 Close → Recv 报 connection_reset，不致 use-after-free（v0.21 修复）。
+  std::shared_ptr<proto::Connection> conn_;
   std::unique_ptr<proto::Heartbeat> heartbeat_;
   std::unique_ptr<proto::ServerPool> server_pool_;
   std::unique_ptr<ExtQuotes> ext_;  // BarsAuto HK 路径懒建（仅 IsHkCode 触发时分配）

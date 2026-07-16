@@ -15,6 +15,7 @@
 
 #include "util/fiber_socket_base.h"
 #include "util/fibers/proactor_base.h"
+#include "util/fibers/synchronization.h"  // fb2::Mutex：串行化并发 Call（请求 fiber vs 心跳 fiber）
 
 #include "tdx/proto/frame.hpp"
 
@@ -26,7 +27,9 @@ struct Response {
   std::vector<uint8_t> body;  // 解压后
 };
 
-// 通达信 TCP 连接。非线程安全——每实例绑定一个 Proactor/fiber。
+// 通达信 TCP 连接。绑定一个 Proactor；Call 可被同 Proactor 上多个 fiber 并发调用
+// （请求 fiber + 心跳 fiber），由 call_mu_ 串行化整段 Send+Recv，避免协议错位。
+// Connect/Close 为单 fiber 建立/拆除，不并发。
 class Connection {
  public:
   using Socket = ::util::FiberSocketBase;
@@ -45,6 +48,8 @@ class Connection {
   // 对齐 opentdx call/_send。失败抛 TdxConnectionError / TdxProtocolError。
   // 协议级失败（服务器返回 Bad message 等）标记 connected_=false，使上层感知链路已坏，
   // 触发重连；而非仅在 socket 级断连（Recv/Send 失败）才标记。
+  // call_mu_ 串行化：同一 Connection 上的并发 Call 逐个完成完整往返，
+  // 心跳帧不会插入业务请求的 Send/Recv 中段造成错位。
   Response Call(const std::vector<uint8_t>& request);
 
   bool IsConnected() const { return connected_; }
@@ -52,6 +57,9 @@ class Connection {
   // 裸 socket 访问（Heartbeat 等复用）
   Socket* socket() { return socket_.get(); }
 
+  // 中止链路：Shutdown+Close fd，使任何挂起在 Recv/Send 的 fiber 尽快被唤醒报错。
+  // 注意：不 reset socket_——若另有 fiber 持本对象（shared_ptr）正挂在 Recv，
+  // socket_ 须保活至其返回；socket_ 由析构释放。避免 use-after-free（v0.21 修复）。
   void Close();
 
  private:
@@ -62,6 +70,9 @@ class Connection {
 
   ::util::fb2::ProactorBase* proactor_;
   std::unique_ptr<Socket> socket_;
+  // 串行化 Call：保证同一 socket 上一次只一个 Send+Recv 往返。
+  // fiber 语义：持锁 fiber 在 Recv 挂起时锁仍保持，其他 Call fiber 协作等待。
+  mutable ::util::fb2::Mutex call_mu_;
   bool connected_ = false;
 };
 

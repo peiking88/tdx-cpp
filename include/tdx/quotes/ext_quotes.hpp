@@ -2,6 +2,7 @@
 // 与 StdQuotes 的关键差异：head=1、不发心跳、ex_hosts、登录 msg_id 0x2454（80B hex）。
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <system_error>
 #include <utility>
@@ -49,15 +50,27 @@ class ExtQuotes {
 
  private:
   proto::Response Call(uint16_t msg_id, const std::vector<uint8_t>& body);
+  // 请求失败驱动重连（ex 协议不发心跳，靠 Call 检测到连接断时触发，幂等）。
+  void Reconnect();
+  // 在 proactor 线程 fiber 内执行 fn，捕获一切异常转空结果返回。
+  // 同 StdQuotes::SafeAwait（v0.16.0）：Call 重试耗尽 throw TdxConnectionError，
+  // 经 proactor_->Await 跑在 WorkerFiber 里——helio WorkerFiberImpl::run_ 的 std::apply
+  // 不捕获异常，会直通 fiber 入口 → std::terminate/SIGABRT。此处记 ERROR 后吞掉，
+  // 返回 R{}（空 vector），外层按 empty() 跳过，语义不变。
+  template <typename F>
+  auto SafeAwait(F&& fn) -> decltype(fn());
   std::error_code ConnectInFiber();
 
   std::unique_ptr<::util::ProactorPool> pool_;
   ::util::fb2::ProactorBase* proactor_ = nullptr;
-  std::unique_ptr<proto::Connection> conn_;
+  // shared_ptr：Reconnect 换 conn_ 时，在途请求快照保活旧 Connection（防 UAF）
+  std::shared_ptr<proto::Connection> conn_;
   std::unique_ptr<proto::ServerPool> server_pool_;
   proto::RetryPolicy retry_;
   proto::CircuitBreaker breaker_;
   bool connected_ = false;
+  // 重连幂等标志（atomic：仅布尔，任意 fiber 原子读写）
+  std::atomic<bool> reconnecting_{false};
 };
 
 }  // namespace tdx::quotes

@@ -54,7 +54,7 @@ std::error_code StdQuotes::ConnectInFiber() {
   }
   LOG(INFO) << "StdQuotes: 选服完成 " << best->name << " " << best->ip << ":" << best->port;
 
-  conn_ = std::make_unique<proto::Connection>(proactor_);
+  conn_ = std::make_shared<proto::Connection>(proactor_);
   boost::system::error_code addr_ec;
   auto addr = boost::asio::ip::make_address(best->ip, addr_ec);
   if (addr_ec) return std::make_error_code(std::errc::bad_address);
@@ -91,12 +91,14 @@ std::error_code StdQuotes::ConnectInFiber() {
 }
 
 void StdQuotes::SendHeartbeat() {
-  if (!conn_) return;  // 重连中 conn_ 已置 null，避免空指针
+  // 快照 shared_ptr：重连中 conn_ 可能正被换，快照保活当前连接，避免空指针/UAF。
+  auto c = conn_;
+  if (!c) return;  // 重连中 conn_ 已置 null，避免空指针
   auto hb = proto::serialize_heartbeat();
   auto req = proto::pack_request(proto::kHeadNoZip, 0, proto::kMsgHeartbeat,
                                  hb.data(), hb.size());
   try {
-    conn_->Call(req);
+    c->Call(req);
   } catch (const std::exception& e) {
     // OnTimer 跑在 dispatcher fiber，不可同步重连 → 派发到普通 fiber。
     LOG(WARNING) << "StdQuotes: 心跳发送失败，触发重连: " << e.what();
@@ -166,8 +168,12 @@ proto::Response StdQuotes::Call(uint16_t msg_id, const std::vector<uint8_t>& bod
 
   proto::Response resp;
   std::error_code ec = retry_.Execute([&]() -> std::error_code {
+    // 每次重试重新快照 conn_：退避 sleep（Execute 内、本 lambda 外）期间 Reconnect 可能
+    // 已换新 conn_，重试须用新连接；shared_ptr 快照保活，Reconnect reset 不影响在途调用。
+    auto c = conn_;
+    if (!c) return std::make_error_code(std::errc::connection_reset);
     try {
-      resp = conn_->Call(req);
+      resp = c->Call(req);
       return {};
     } catch (const TdxConnectionError&) {
       return std::make_error_code(std::errc::connection_reset);

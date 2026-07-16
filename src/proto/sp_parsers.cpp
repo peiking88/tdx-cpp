@@ -75,6 +75,23 @@ std::vector<uint8_t> serialize_sp_board_members(int board_code, SortType sort_ty
   return body;
 }
 
+// ============================ 单标的报价 0x122B ============================
+
+std::vector<uint8_t> serialize_sp_symbol_quotes(
+    const std::vector<std::pair<uint16_t, std::string>>& codes,
+    const std::vector<FieldBit>& fields) {
+  // 20B 位图 + <H>count + N×<H22s>(market, code_gbk)。响应用 deserialize_symbol_quotes。
+  std::vector<uint8_t> body;
+  auto bitmap = build_bitmap(fields);
+  body.insert(body.end(), bitmap.begin(), bitmap.end());
+  push_u16(body, static_cast<uint16_t>(codes.size()));
+  for (const auto& [market, code] : codes) {
+    push_u16(body, market);
+    push_code(body, code, 22);
+  }
+  return body;
+}
+
 // ============================ SP K线 0x122E ============================
 
 std::vector<uint8_t> serialize_sp_symbol_bar(uint16_t market, std::string_view code,

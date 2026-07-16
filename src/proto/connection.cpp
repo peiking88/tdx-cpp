@@ -26,12 +26,15 @@ std::error_code Connection::Connect(const Endpoint& ep) {
 }
 
 void Connection::Close() {
+  // Shutdown+Close fd，使挂起在 Recv/Send 的 fiber 被唤醒报 connection_reset。
+  // 不 reset socket_：上层 StdQuotes 持 shared_ptr，Reconnect 换 conn_ 后旧 conn 可能
+  // 仍有在途 Call 持引用挂在 Recv——socket_ 须保活至该 Call 返回，由析构释放。
+  // 旧实现此处 socket_.reset() 会立即销毁 socket，与挂起 Recv 竞争 → use-after-free。
   if (socket_) {
     std::error_code ec = socket_->Shutdown(SHUT_RDWR);  // echo_server.cc:551
     (void)ec;
     ec = socket_->Close();  // echo_server.cc:553
     (void)ec;
-    socket_.reset();
   }
   connected_ = false;
 }
@@ -72,6 +75,10 @@ std::error_code Connection::RecvExact(uint8_t* buf, std::size_t n) {
 }
 
 Response Connection::Call(const std::vector<uint8_t>& request) {
+  // call_mu_ 串行化整段 Send+Recv：并发 Call（请求 vs 心跳）逐个完成完整往返，
+  // 避免心跳帧插入业务请求的 Send/Recv 中段造成协议错位。持锁 fiber 在 Recv 挂起时
+  // 锁保持，其他 fiber 协作等待——这是 fb2::Mutex 的设计语义。
+  std::lock_guard<::util::fb2::Mutex> lk(call_mu_);
   if (!connected_) throw TdxConnectionError("not connected");
 
   // 1. 发送整个封包（对齐 opentdx client.send(data)）
