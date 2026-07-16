@@ -3,7 +3,7 @@
 # 异步 IO 采用 helio（io_uring + fiber），逐字移植 opentdx 协议层。
 cmake_minimum_required(VERSION 3.16)
 
-project(tdx-cpp VERSION 0.17.1 LANGUAGES C CXX)
+project(tdx-cpp VERSION 0.20.0 LANGUAGES C CXX)
 
 # ---- C++ 标准（helio 要求 C++17）----
 set(CMAKE_CXX_STANDARD 17)

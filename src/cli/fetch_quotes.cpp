@@ -713,7 +713,8 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
         shm->Snapshot().Put(q.code, tdx::shm::to_pod(q));
         cnt.quote++;  // 仅计实际写入 mmap 的有效 quote（与同步路径 InsertQuote 语义一致）
       }
-      if (!ingest_q->write(std::move(ch))) {
+      // 港股不入库（仅 mmap 实时快照供 viewer）：不投递入库队列，跳过 TDengine 写入。
+      if (wm != WorkerMarket::HK && !ingest_q->write(std::move(ch))) {
         cnt.dropped++;  // 队列满：丢弃整轮 chunk（盘中数据最新优先）
       }
     }
@@ -722,7 +723,11 @@ Counters RunOneRound(const std::vector<std::string>& codes, int jobs, int batch_
     return cnt;
   }
 
-  // 同步路径（mmap_path 空）：主线程建连 + 逐 chunk 入库（原行为，向后兼容）
+  // 同步路径（mmap_path 空）：港股不入库，无 mmap 时采集即弃。
+  if (wm == WorkerMarket::HK) {
+    std::cerr << "[HK] 港股不入库，需 --mmap_path 才能看盘（本次报价丢弃）\n";
+    return cnt;
+  }
   tdx::taos::TaosConfig tcfg = tdx::taos::TaosConfig::FromEnv();
   tdx::taos::TaosConnection tconn(tcfg);
   if (!tconn) { cnt.errors++; return cnt; }
