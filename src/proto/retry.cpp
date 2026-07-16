@@ -21,7 +21,13 @@ bool CircuitBreaker::AllowRequest() {
   std::lock_guard<util::fb2::Mutex> lk(mu_);
   if (state_ == State::kOpen) {
     auto now = std::chrono::steady_clock::now();
-    if (now - open_time_ >= recovery_timeout_) {
+    // ponytail: 连续 HALF_OPEN 探测失败时指数拉长恢复窗，避免周期重试风暴。
+    //   recovery_failures_ 计连续探测失败次数（HALF_OPEN→OPEN），与 failure_count_ 解耦：
+    //   后者仅在 CLOSED 入口清零，首次熔断后仍为 threshold，不能直接当退避基数。
+    //   封顶 2^5=32×（约 32min @60s base）。
+    int exponent = std::min(recovery_failures_, 5);
+    auto backoff = recovery_timeout_ * (1 << exponent);
+    if (now - open_time_ >= backoff) {
       Transition(State::kHalfOpen);  // 到恢复时间，放一个试探请求
       return true;
     }
@@ -33,6 +39,7 @@ bool CircuitBreaker::AllowRequest() {
 void CircuitBreaker::RecordSuccess() {
   std::lock_guard<util::fb2::Mutex> lk(mu_);
   failure_count_ = 0;
+  recovery_failures_ = 0;  // 成功 → 退避基数复位
   if (state_ != State::kClosed) Transition(State::kClosed);
 }
 
@@ -40,8 +47,10 @@ void CircuitBreaker::RecordFailure() {
   std::lock_guard<util::fb2::Mutex> lk(mu_);
   if (failure_count_ < failure_threshold_ * 10) ++failure_count_;  // 防止 kOpen 下无限增长
   if (state_ == State::kHalfOpen) {
-    Transition(State::kOpen);  // 试探失败，重新熔断
+    ++recovery_failures_;  // 试探失败 → 下次恢复窗翻倍
+    Transition(State::kOpen);  // 重新熔断
   } else if (state_ == State::kClosed && failure_count_ >= failure_threshold_) {
+    recovery_failures_ = 0;  // 首次熔断 → 退避基数 1×（不惩罚首次）
     Transition(State::kOpen);  // 连续达阈值，熔断
   }
 }

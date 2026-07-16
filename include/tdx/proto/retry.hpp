@@ -69,6 +69,7 @@ class CircuitBreaker {
   mutable ::util::fb2::Mutex mu_;
   State state_ = State::kClosed;
   int failure_count_ = 0;
+  int recovery_failures_ = 0;  // 连续 HALF_OPEN 探测失败次数（退避指数基数）
   int failure_threshold_;
   std::chrono::seconds recovery_timeout_;
   std::chrono::steady_clock::time_point open_time_{};  // 进入 OPEN 的时刻

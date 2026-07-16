@@ -78,6 +78,22 @@ TEST_F(RetryTest, CircuitBreakerHalfOpenFailureReopens) {
   });
 }
 
+// 连续 HALF_OPEN 探测失败应指数拉长恢复窗（防午休长断网重连风暴）：
+//   首次熔断后 1×base（1s）放行；探测失败后再等 1×base 仍应被拒（已升至 2×=2s）。
+TEST_F(RetryTest, CircuitBreakerBackoffGrowsAfterProbeFailures) {
+  RunInFiber([&] {
+    CircuitBreaker cb(1, std::chrono::seconds(1));
+    cb.RecordFailure();                          // 首次熔断，recovery_failures_=0
+    util::ThisFiber::SleepFor(std::chrono::milliseconds(1100));
+    EXPECT_TRUE(cb.AllowRequest());              // 1×base 到期 → HALF_OPEN
+    cb.RecordFailure();                          // 探测失败 → recovery_failures_=1，2×base
+    util::ThisFiber::SleepFor(std::chrono::milliseconds(1100));
+    EXPECT_FALSE(cb.AllowRequest());             // 2×base=2s 未到，仍拒绝
+    util::ThisFiber::SleepFor(std::chrono::milliseconds(1100));
+    EXPECT_TRUE(cb.AllowRequest());              // 累计 2.2s ≥ 2s → HALF_OPEN
+  });
+}
+
 TEST_F(RetryTest, RetryPolicyStopsOnSuccess) {
   RunInFiber([&] {
     int calls = 0;

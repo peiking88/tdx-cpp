@@ -127,6 +127,7 @@ void StdQuotes::Reconnect() {
     connected_ = false;
     if (auto ec = ConnectInFiber()) {
       LOG(ERROR) << "StdQuotes: 重连失败: " << ec.message();
+      breaker_.RecordFailure();  // 失败喂给熔断器 → HALF_OPEN 反复失败时拉长恢复窗/升级 OPEN
       reconnecting_.store(false);
       return;
     }
