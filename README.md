@@ -10,3 +10,9 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ctest --test-dir build -j$(nproc) --output-on-failure
 ```
+
+## 辅助脚本
+
+```bash
+python3 scripts/smmd.py --zxg   # SMMD 股市操纵检测（K-Means++ 聚类 + 启发式欺诈分类）
+```
