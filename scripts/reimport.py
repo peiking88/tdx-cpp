@@ -85,6 +85,24 @@ def taos_count(stable):
     return -1  # 表不存在或查询失败
 
 
+def read_all_market_codes():
+    # 从 stock_name 表枚举全市场 A 股代码——与 import --all-market 同源（taos_import.cpp:732）。
+    # stock_name 在 import 阶段由 SyncStockNames 填充，且不在清表范围（STABLES 不含），
+    # 故 --all-market 时可直接复用，无需再跑 fetch-names。返回带前缀列表 ['sh600000', ...]。
+    r = subprocess.run([TAOS, "-s", f"USE {DB}; SELECT code, market FROM stock_name"],
+                       capture_output=True, text=True)
+    codes = []
+    for ln in r.stdout.splitlines():
+        parts = ln.split("|")
+        if len(parts) >= 2:
+            code = parts[0].strip()
+            market = parts[1].strip()
+            # 跳过表头行（code="code"）与非数字行：真实 code 为 6 位纯数字。
+            if code.isdigit() and market:
+                codes.append(market + code)
+    return codes
+
+
 def timed(fn):
     t0 = time.perf_counter()
     fn()
@@ -124,7 +142,7 @@ def main():
     ap.add_argument("--zxg", default=os.environ.get("TDX_ZXG_BLK", ZXG_DEFAULT))
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不执行")
     ap.add_argument("--all-market", action="store_true",
-                    help="kline 导入走全市场（vipdoc 全量，仅影响 kline 阶段）")
+                    help="全市场重导：kline 走 vipdoc 全量 + finance/f10 从 stock_name 枚举全量 A 股")
     ap.add_argument("--kronos", action="store_true",
                     help="日线清库重建：清库后仅导入个股+大盘指数日K线"
                          "（自动 --all-market --daily-only --kronos，跳过 finance/f10）")
@@ -141,6 +159,8 @@ def main():
     elif args.codes_file:
         with open(args.codes_file) as f:
             codes = [ln.split()[0] for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+    elif args.all_market:
+        codes = read_all_market_codes()
     else:
         codes = read_zxg(args.zxg)
     # 按 A 股/港股分桶。finance/f10 仅支持 A 股（TDX 协议 0x10/0x2cf/0x2d0 无 HK 实现），
