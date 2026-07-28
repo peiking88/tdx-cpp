@@ -30,7 +30,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.15.7**：新增 `scripts/view.py`——一键启动 mmap 实时行情终端（自动拉起 fetch-quotes --mmap_path + 前台 tools/mmap_viewer，3s 刷新）
 - **v0.15.8**：修复 `scripts/view.py` 日志落盘（stderr 改 `view.log`，避免污染前台 viewer）；修复 `tools/mmap_viewer` 报价表列宽；清理 `README.md` 中与 CLAUDE.md 重复的 CLI/导入/技术栈块
 - **v0.16.0**：StdQuotes 异常安全（`SafeAwait` 模板包 `proactor_->Await`，修复 helio WorkerFiber `std::apply` 不捕获异常导致重试耗尽时 std::terminate/SIGABRT；14 处 Await 全替换）+ fetch-quotes ETF 基金时间戳修复（服务器不返回时用 now_sec 兜底，避免 shm 渲染 08:00:00）+ fetch-today.py 大重构（并行 `--kline-jobs` round-robin 切片 + 内嵌 `ReadShm` seqlock 快照只读 + `ShmViewer` 全屏 TUI + `tailboard` 紧凑行情表，双模式由 `--mmap` 切换；stderr dup2 落到 `fetch_today.log`）+ 删除 `scripts/view.py`（合入 fetch-today --mmap）
-- **v0.16.2**：①修复基金实时报价 OHLC 缩放——`scaling.hpp` NetQuotes 区分基金（0.001）vs 个股/指数（0.01），`deserialize_quotes_detail` 改双参 `GetScaling(ClassifySecurity(code), NetQuotes)`（原统一 0.01 导致基金价放大 10×）+ 回归测试 `FundOhlcScale001`；②修复 ctest 假绿——`test_bars`/`test_fetch_history` 服务器不可达时 SetUpTestSuite 全 `GTEST_SKIP`，但 gtest 退出码仍为 0 被 ctest 误报 Passed（零用例执行的假绿）；新增 `scripts/run_gtest.sh` wrapper（`GTEST_OUTPUT` 环境变量落 XML 解析，全 SKIP→退出码 77；命令行 flag 会被 absl custom main 拒绝故用环境变量）+ `SKIP_RETURN_CODE 77`，不可达时正确标 SKIPPED
+- **v0.16.2**：①修复基金实时报价 OHLC 缩放——`scaling.hpp` NetQuotes 区分基金（0.001）vs 个股/指数（0.01），`deserialize_quotes_detail` 改双参 `GetScaling(ClassifySecurity(code), NetQuotes)`（原统一 0.01 导致基金价放大 10×）+ 回归测试 `FundOhlcScale001`；②修复 ctest 假绿——`test_bars`/`test_fetch_history` 服务器不可达时 SetUpTestSuite 全 `GTEST_SKIP`，但 gtest 退出码仍为 0 被 ctest 误报 Passed（零用例执行的假绿）；新增 `tests/scripts/run_gtest.sh` wrapper（`GTEST_OUTPUT` 环境变量落 XML 解析，全 SKIP→退出码 77；命令行 flag 会被 absl custom main 拒绝故用环境变量）+ `SKIP_RETURN_CODE 77`，不可达时正确标 SKIPPED
 - **v0.17**：港股分类（`IsHkCode`/`ClassifyHk`/`ClassifyHkExplicit`，`consts.hpp`）+ fetch-quotes `--quote_hk` 双市场（A 股 `0x53e` / 港股 `0x248a` 分桶选服）+ `BarsAuto` 自动分流（懒建 `ExtQuotes`：带 sh/sz/bj 前缀走 A 股 / HK 走扩展行情 `0x23ff`）
 - **v0.20.0**：①**港股不入库策略**——港股仅在 `fetch-quotes` 采集 + mmap 实时快照，**不入 TDengine**（`fetch_quotes.cpp` 阶段B `wm==HK` 守卫跳过 `InsertQuote`/入库队列，无 `--mmap_path` 时 stderr 警告丢弃）；理由：港股无复权因子、无涨跌停限制、数据量少。②**熔断器指数退避**——`CircuitBreaker` HALF_OPEN 探测失败时恢复窗 `base×2^min(n,5)`（封顶 32×），防午休长断网重连风暴；`Reconnect()` 失败喂熔断器。③**force push 取代 v0.19.0**——废弃 v0.18/0.19 的 HK kline 网络入库方向（`taos_import` HK 分支），本地主线以 0.20.0 重置，`0.18.0`/`0.19.0` tag 变 orphan
 - **v0.21.0**：①**协议层 UAF 崩溃修复**——`Connection::Call` 加 per-instance `fb2::Mutex`（串行化心跳/请求并发写同一 socket，防协议错位）；`Close()` 不再 `socket_.reset()`（保活给挂起 Recv，由析构释放）；`StdQuotes::conn_` 改 `shared_ptr`（Reconnect 换 conn_ 时在途请求快照保活）。修盘前 fetch-kline 崩溃（`0xabababab` 释放内存中毒）。②**Ext/SP CLI 暴露 + 重连**——新增 `ex-bars`/`ex-quotes`/`ex-stocks`/`ex-category`/`ex-history-tx`（扩展行情，港股为主）+ `sp-quotes`/`sp-bar`/`sp-auction`（SP 补齐）；ExtQuotes 加请求失败驱动重连（ex 不发心跳）、SPQuotes 加心跳触发重连（原 on_timeout 空转 / SendHeartbeat 静默），均 `shared_ptr conn_` + `reconnecting_` 幂等 + breaker 复位；ExtQuotes 5 方法包 `SafeAwait`（防 WorkerFiber terminate）。③**board-quotes 补全**——`exchange_board_code`（881328→21328）+ `PresetBasic` 位图 + `deserialize_symbol_quotes` 解析成员明细；补 `serialize_sp_symbol_quotes`(0x122B)；修 `deserialize_ex_history_txn` datetime（date+time 组合 epoch）
@@ -140,8 +140,8 @@ src/         源码
   ├─ shm/                    盘中实时共享内存（segment/snapshot）
   ├─ cli/                    CLI 入口（main.cpp / fetch_quotes.cpp / import.cpp）
   └─ smoke.cc                烟雾测试
-scripts/     辅助脚本（setup_external.sh / record_golden.py / reimport.py / fetch-today.py）
-tests/       单元测试 + 集成测试 + fixtures/golden/（黄金字节流真服录制）
+scripts/     辅助脚本（setup_external.sh / reimport.py / fetch-today.py）
+tests/       单元测试 + 集成测试 + fixtures/golden/ + scripts/（record_golden.py 录制黄金字节流 / run_gtest.sh ctest wrapper）
 external/    第三方依赖（不入 git，setup_external.sh 初始化）
 output/      程序输出（不入 git）
 ```

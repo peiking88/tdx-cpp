@@ -5,7 +5,7 @@
 #       进程仍退出 0，ctest 会把整个套件标为 Passed（假绿：实际零用例执行）。
 #       见 tests/test_bars.cpp / test_fetch_history.cpp 的 SetUpTestSuite。
 #
-# 判据（基于 gtest --gtest_output=xml 的 XML，schema 见 scripts/run_gtest.sh 注释）：
+# 判据（基于 gtest --gtest_output=xml 的 XML，schema 见 tests/scripts/run_gtest.sh 注释）：
 #   顶层 <testsuites> 有 tests/failures（无 skipped）；子 <testsuite> 有 skipped="N"。
 #
 # 退出码（配合 ctest PROPERTIES SKIP_RETURN_CODE=77）：

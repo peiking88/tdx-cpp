@@ -1,5 +1,5 @@
 // 黄金字节流测试：加载真服录制的 .bin，C++ 解析须成功且字段合理。
-// fixtures 由 scripts/record_golden.py 录制（连真服抓响应 body）。
+// fixtures 由 tests/scripts/record_golden.py 录制（连真服抓响应 body）。
 // 严格逐字段对齐 opentdx expected.json 需 JSON 库，留待后续；此处先验证
 // C++ 解析器能正确消化真实字节流（解析出合理数量的非零记录）。
 #include <gtest/gtest.h>
