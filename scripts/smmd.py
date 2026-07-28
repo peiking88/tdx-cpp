@@ -375,7 +375,7 @@ def main():
     ap = argparse.ArgumentParser(description="SMMD — 股市操纵检测")
     ap.add_argument("--codes", nargs="*", help="指定代码, 如 sh600000 sz000001")
     ap.add_argument("--zxg", action="store_true", help="用自选股 zxg.blk")
-    ap.add_argument("--all-mainboard", action="store_true", help="全主板")
+    ap.add_argument("--all", action="store_true", help="全主板")
     ap.add_argument("--days", type=int, default=365 * 10, help="回溯天数")
     ap.add_argument("--k", type=int, default=5, help="聚类数")
     ap.add_argument("--limit", type=int, help="最多分析多少只 (调试用)")
@@ -391,7 +391,7 @@ def main():
         pool = [parse_code(c) for c in args.codes]
     elif args.zxg:
         pool = [parse_code(c) for c in zxg_codes()]
-    elif args.all_mainboard:
+    elif args.all:
         pool = all_mainboard_codes(conn)
     else:
         pool = [parse_code(c) for c in zxg_codes()]

@@ -1104,7 +1104,7 @@ int main(int argc, char **argv)
 
   // helio MainInitGuard 内的 absl::ParseCommandLine 会拒绝未注册的 '--' flag（报
   // "Unknown command line flag" 直接退出）。import 子命令的 --full-reset /
-  // --no-clear-intraday / --all-market / --zxg-blk 是手动解析（import.cpp::ParseArgs）
+  // --no-clear-intraday / --all / --zxg-blk 是手动解析（import.cpp::ParseArgs）
   // 的非 absl flag，故先把它们从 argv 剥离，让 absl 只解析已注册的 --jobs 等；
   // MainInitGuard 后保留原 argc/argv，交由各子命令自行解析（argv[0] 程序名不变）。
   std::vector<char *> absl_argv{argv[0]};
@@ -1112,7 +1112,7 @@ int main(int argc, char **argv)
   {
     std::string a = argv[i];
     bool manual = a == "--full-reset" || a == "--no-clear-intraday" ||
-                  a == "--all-market" || a == "--zxg-blk" ||
+                  a == "--all" || a == "--zxg-blk" ||
                   a == "--daily-only" || a == "--kronos";
     if (manual)
     {

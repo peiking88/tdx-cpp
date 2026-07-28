@@ -235,7 +235,7 @@ ctest --test-dir build -R <test_name> -V   # 单个用例
 | 本地 vipdoc | `tdx import` | 1d/1m/5m | 历史（今日之前） |
 | 网络 | `tdx fetch-kline` | 1d/5m/1m | 当日盘中 |
 
-- `tdx import` 默认仅导自选股 `zxg.blk`（与 `fetch-quotes` 一致），加 `--all-market` 导全市场
+- `tdx import` 默认仅导自选股 `zxg.blk`（与 `fetch-quotes` 一致），加 `--all` 导全市场
 - 导入时自动 DROP+重建 1d/1m/5m 子表，清除网络旧数据（含解析错位产生的 23:55/16:39 脏 bar）
 - Parser 层 D7 校验：分钟 bar 须在 9:30–11:30 或 13:00–15:00，否则丢弃
 - `fetch-kline` 仅保留当日 bar + 交易时段校验 + OHLC 正数/high≥low

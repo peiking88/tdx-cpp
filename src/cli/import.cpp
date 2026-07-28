@@ -41,7 +41,7 @@ ImportConfig ParseArgs(int argc, char** argv) {
     if (a.rfind("--jobs=", 0) == 0) continue;
     if (a == "--no-clear-intraday") { cfg.clear_intraday = false; continue; }
     if (a == "--full-reset") { cfg.full_reset = true; cfg.clear_intraday = false; continue; }
-    if (a == "--all-market") { cfg.all_market = true; continue; }
+    if (a == "--all") { cfg.all_market = true; continue; }
     if (a == "--daily-only") { cfg.daily_only = true; continue; }
     if (a == "--kronos") { cfg.kronos = true; continue; }
     if (a == "--zxg-blk") { if (i + 1 < argc) cfg.zxg_blk = argv[++i]; continue; }
@@ -54,7 +54,7 @@ ImportConfig ParseArgs(int argc, char** argv) {
       std::cout << "用法: tdx import [taos] [codes...]\n\n"
                 << "  taos            存储引擎（默认）\n"
                 << "  codes...        股票代码（默认仅导入自选股 zxg.blk）\n"
-                << "  --all-market    导入全市场（默认仅导入自选股）\n"
+                << "  --all           导入全市场（默认仅导入自选股）\n"
                 << "  --zxg-blk PATH  自选股文件路径\n"
                 << "  --full-reset    首次迁移：DROP 整表全清后 vipdoc 全量重建\n"
                 << "  --daily-only    只导入日 K 线（1d），跳过 1m/5m（复权因子由 --no-adjust 控制）\n"
@@ -62,7 +62,7 @@ ImportConfig ParseArgs(int argc, char** argv) {
                 << "  --no-clear-intraday  不清当日（保留 fetch-kline 写的盘中数据）\n\n"
                 << "说明: 历史增量从 vipdoc 导入，默认只清当日盘中（fetch-kline 循环刷新）。"
                 << "首次迁移历史脏数据用 --full-reset。"
-                << "默认仅导自选股（与 fetch-quotes 一致），--all-market 导全市场。\n\n"
+                << "默认仅导自选股（与 fetch-quotes 一致），--all 导全市场。\n\n"
                 << "环境变量:\n"
                 << "  TDX_ZXG_BLK      自选股文件路径（覆盖 --zxg-blk）\n\n"
                 << "其他环境变量:\n"

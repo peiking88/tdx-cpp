@@ -324,7 +324,7 @@ def main():
     ap = argparse.ArgumentParser(description="板块龙头选股 (技术指标漏斗)")
     ap.add_argument("--codes", nargs="*", help="指定代码")
     ap.add_argument("--zxg", action="store_true", help="自选股")
-    ap.add_argument("--all-mainboard", action="store_true", help="全主板")
+    ap.add_argument("--all", action="store_true", help="全主板")
     ap.add_argument("--top", type=int, default=20, help="输出 top N")
     ap.add_argument("--min-score", type=float, default=40, help="最低评分")
     ap.add_argument("--rps", type=float, default=80, help="RPS 最低分位 (默认 80)")
@@ -341,7 +341,7 @@ def main():
         pool = [parse_code(c) for c in args.codes]
     elif args.zxg:
         pool = [parse_code(c) for c in zxg_codes()]
-    elif args.all_mainboard:
+    elif args.all:
         pool = all_mainboard_codes(conn)
     else:
         pool = [parse_code(c) for c in zxg_codes()]
