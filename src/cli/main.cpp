@@ -54,7 +54,11 @@ namespace
 
   int DoServerTest()
   {
-    std::unique_ptr<::util::ProactorPool> pool(::util::fb2::Pool::IOUring(64));
+    // HELIO_USE_EPOLL=1 时用 epoll 池（不占 locked memory），避免 io_uring 在低 memlock
+  // 环境下多进程并发 SIGSEGV。默认 io_uring。
+  std::unique_ptr<::util::ProactorPool> pool(
+      std::getenv("HELIO_USE_EPOLL") ? ::util::fb2::Pool::Epoll(0)
+                                     : ::util::fb2::Pool::IOUring(64));
     pool->Run();
     auto *pb = pool->GetNextProactor();
     auto hosts = quotes::StdQuotes::DefaultHosts(); // ponytail: 复用，消除重复

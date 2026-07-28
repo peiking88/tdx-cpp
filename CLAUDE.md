@@ -25,6 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.15**：心跳 dispatcher 崩溃修复（blocker，`OnTimer` 包 `MakeFiber`）+ fetch-kline 日志去重/非交易日早退 + fetch-quotes 三处修复
 - **v0.15.3**：文档整理——CLAUDE.md 全面重组（补 shm 模块/命令/心跳教训，里程碑压缩）+ README.md 删垃圾 diff 块/修过时 flag
 - **v0.15.4**：移除已回退命令的 CLI 分发（batch-fetch/bars/ex-bars/fetch-history/pull-kline 全部落入未知命令；tdx 链接移除 tdx_batch）+ 文档清理（README/CLAUDE 移除 batch-fetch/quotes_reader 引用）
+- **v0.25.0**：fetch-today 全市场采集——新增 `--all` 参数（从 `stock_name` 表枚举全量 A 股，~16245 只）；修复 `FetchAllCodes()` 服务器裸代码无前缀导致 0 条行情；helio 池支持 `HELIO_USE_EPOLL=1` 切 epoll 后端（低 memlock 环境 io_uring 多进程 SIGSEGV）；kline 分片 ≤500 只/≤6 并发 + 主循环仅 quotes writer 退出才中断
 - **v0.15.5**：新增编排脚本 `scripts/fetch-today.py`——并行启动 fetch-kline + fetch-quotes --quote_loop，每分钟报告进度；codes 来自 zxg.blk / --codes / --codes-file，可选 --mmap
 - **v0.15.6**：修复 fetch-today.py——codes-file 支持空格/换行分隔；stderr 改 mkstemp 单一 fd + stdbuf 行缓冲（防 abort 丢 trace）+ 环形缓冲 dump；Ctrl-C 8s grace 优雅退出
 - **v0.15.7**：新增 `scripts/view.py`——一键启动 mmap 实时行情终端（自动拉起 fetch-quotes --mmap_path + 前台 tools/mmap_viewer，3s 刷新）

@@ -124,7 +124,13 @@ std::vector<std::string> FetchAllCodes() {
     uint16_t total = sq.StockCount(market);
     for (uint16_t start = 0; start < total; start += 1600) {
       auto stocks = sq.Stocks(market, start, std::min<uint16_t>(1600, total - start));
-      for (auto& s : stocks) if (IsQuoteTarget(s.code)) all.push_back(s.code);
+      for (auto& s : stocks) {
+        if (!IsQuoteTarget(s.code)) continue;
+        // 服务器返回裸 6 位代码，按 s.market（请求时填入）补前缀。
+        const char* pre = s.market == static_cast<int>(Market::SH) ? "sh"
+                        : (s.market == static_cast<int>(Market::BJ) ? "bj" : "sz");
+        all.push_back(std::string(pre) + s.code);
+      }
     }
   }
   sq.Close();

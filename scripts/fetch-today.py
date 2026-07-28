@@ -48,6 +48,8 @@ import time
 
 DEFAULT_ZXG = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk"
 DEFAULT_SHM = "/dev/shm/tdx_quotes.shm"
+TAOS = os.environ.get("TAOS", "taos")
+TAOS_DB = os.environ.get("TDX_TAOS_DB", "tdx")
 
 # ---- shm 二进制布局（与 include/tdx/shm/{segment,snapshot,payload}.hpp 严格一致） ----
 HDR_OFF_MAGIC = 0             # 'TDXSHM\0\0'
@@ -78,6 +80,24 @@ def read_zxg(path):
     except FileNotFoundError:
         pass
     return codes
+
+
+def read_all_market_codes():
+    """从 stock_name 表枚举全市场 A 股代码——与 import --all 同源。"""
+    try:
+        r = subprocess.run(
+            [TAOS, "-s", f"USE {TAOS_DB}; SELECT code, market FROM stock_name"],
+            capture_output=True, text=True)
+        codes = []
+        for ln in r.stdout.splitlines():
+            parts = ln.split("|")
+            if len(parts) >= 2:
+                c, m = parts[0].strip(), parts[1].strip()
+                if len(c) == 6 and m in ("sh", "sz", "bj"):
+                    codes.append(f"{m}{c}")
+        return codes
+    except Exception:
+        return []
 
 
 def round_robin(items, n):
@@ -342,6 +362,8 @@ def main():
         description="编排 N×fetch-kline + fetch-quotes(shm+TDengine)；屏幕行情，日志入 stderr")
     ap.add_argument("--codes", nargs="*", default=None)
     ap.add_argument("--codes-file", default=None)
+    ap.add_argument("--all", action="store_true",
+                    help="全市场：从 stock_name 表枚举全量 A 股代码")
     ap.add_argument("--bin", default=os.environ.get("TDX_BIN", "build/bin/tdx"))
     ap.add_argument("--zxg", default=os.environ.get("TDX_ZXG_BLK", DEFAULT_ZXG))
     ap.add_argument("--mmap", nargs="?", const="",
@@ -365,6 +387,8 @@ def main():
     elif args.codes_file:
         with open(args.codes_file) as f:
             codes = f.read().split()
+    elif args.all:
+        codes = read_all_market_codes()
     else:
         codes = read_zxg(args.zxg)
     if not codes:
@@ -385,9 +409,22 @@ def main():
         sys.stderr.write(f"找不到 tdx 二进制: {args.bin}\n")
         return 1
 
+    # io_uring 每进程占 locked memory，低 memlock 环境（如 8MB ulimit -l）下多进程
+    # 并发会 SIGSEGV；默认切到 epoll 避免。用户可设 HELIO_USE_IOURING=1 恢复。
+    if not os.environ.get("HELIO_USE_IOURING") and not os.environ.get("HELIO_USE_EPOLL"):
+        os.environ["HELIO_USE_EPOLL"] = "1"
+
     kline_jobs = max(1, int(args.kline_jobs))
     quote_jobs = max(1, int(args.quote_jobs))
 
+    # fetch-kline 分片：每片上限 KLINE_SHARD_MAX 只，避免命令行过长（E2BIG）；
+    # 总并发上限 KLINE_JOBS_CAP（io_uring 每进程占 locked memory，8MB memlock 下
+    # 跑太多 tdx 进程会 SIGSEGV）。
+    KLINE_SHARD_MAX = 500
+    KLINE_JOBS_CAP = 6
+    if len(codes) > KLINE_SHARD_MAX * kline_jobs:
+        kline_jobs = (len(codes) + KLINE_SHARD_MAX - 1) // KLINE_SHARD_MAX
+    kline_jobs = min(kline_jobs, KLINE_JOBS_CAP)
     kline_shards = round_robin(codes, kline_jobs)
     kline_monitors = [ProcMonitor(f"kline#{i}", [args.bin, "fetch-kline"] + shard)
                       for i, shard in enumerate(kline_shards)]
@@ -396,11 +433,15 @@ def main():
     viewer_codes = [c[2:] if c[:2] in ("sh", "sz", "bj") else c for c in codes]
     viewer_codes = [c for c in viewer_codes if len(c) == 6]
 
-    # fetch-quotes：1 写者 + 内部 --quote_jobs 路 fiber；写 shm + 异步 ingest TDengine
-    quotes_cmd = ([args.bin, "fetch-quotes", "--quote_loop"]
-                  + ["--quote_codes=" + ",".join(codes),
-                     "--quote_jobs", str(quote_jobs),
-                     "--mmap_path", shm])
+    # fetch-quotes：1 写者 + 内部 --quote_jobs 路 fiber；写 shm + 异步 ingest TDengine。
+    # --all 模式用 --all_market（原生全市场网络拉取），避免拼 16000+ 代码命令行过长。
+    quotes_cmd = [args.bin, "fetch-quotes", "--quote_loop",
+                  "--quote_jobs", str(quote_jobs),
+                  "--mmap_path", shm]
+    if args.all:
+        quotes_cmd.append("--all_market")
+    else:
+        quotes_cmd.insert(3, "--quote_codes=" + ",".join(codes))
     quotes_monitors = [ProcMonitor("quotes", quotes_cmd)]
     monitors = kline_monitors + quotes_monitors
     stop = threading.Event()
@@ -465,8 +506,10 @@ def main():
         if viewer_mode:
             ShmViewer(shm, viewer_codes, interval=args.interval).run()
         else:
+            # 仅当 quotes writer（关键进程）退出时才中断；kline 分片允许独立退出。
             while not stop.wait(0.5):
-                if any(m.proc is not None and m.proc.poll() is not None for m in monitors):
+                if quotes_monitor.proc is not None and quotes_monitor.proc.poll() is not None:
+                    sys.stderr.write("quotes writer 已退出，停止\n")
                     break
         cleanup()
         return 0
