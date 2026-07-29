@@ -141,8 +141,11 @@ int64_t LastTimestamp(TAOS* conn, const std::string& tbname) {
 
 // 清除当日（CST 00:00 起）1d/1m/5m 盘中数据，为增量导入腾位置。
 // 常态：保留历史 vipdoc 数据，只清当日（sync-kline 循环刷新会重写）。
-// 返回清除行数，出错返回 -1（按周期继续，不中断）。
-int64_t ClearTodayIntraday(TAOS* conn, Market market, const std::string& code) {
+// existing 为 kline 子表名集合（由 SELECT DISTINCT TBNAME FROM kline 一次查出），
+// 不在集合中的子表（新代码尚无数据）→ 跳过，不视为失败，不打印噪音。
+// 返回清除行数；DELETE 真失败返回 -1（按代码继续，不中断）。
+int64_t ClearTodayIntraday(TAOS* conn, Market market, const std::string& code,
+                            const std::set<std::string>& existing) {
   int64_t today_ms = tdx::util::TodayMidnightEpoch() * 1000LL;
   std::string mkt = MktPrefix(market);
   int64_t total = 0;
@@ -154,6 +157,7 @@ int64_t ClearTodayIntraday(TAOS* conn, Market market, const std::string& code) {
     if (code_pos + 6 > tb.size()) continue;
     std::string_view cv(tb.data() + code_pos, 6);
     if (!tdx::util::IsValidCode(cv)) continue;
+    if (!existing.count(tb)) continue;  // 新代码无子表 → 无需清除
 
     std::string sql = "DELETE FROM " + tb + " WHERE ts >= " +
                       std::to_string(today_ms);
@@ -805,10 +809,23 @@ ImportResult DoImportTaos(const ImportTaosConfig& cfg) {
       std::cerr << "DROP: " << dropped << " 只\n";
     } else {
       std::cerr << "=== 第零步：清除当日 1d/1m/5m 盘中数据（增量留历史）===" << std::endl;
+      // 一次查出所有 kline 子表名，ClearTodayIntraday 据此跳过不存在的子表，
+      // 避免 48k 次 "DELETE FROM 不存在的表" 噪音（新代码本无数据可清）。
+      std::set<std::string> existing_tables;
+      {
+        TAOS_RES* res = ::taos_query(conn.native(), "SELECT DISTINCT TBNAME FROM kline");
+        if (res && ::taos_errno(res) == 0) {
+          TAOS_ROW row;
+          while ((row = ::taos_fetch_row(res))) {
+            if (row[0]) existing_tables.insert(tdx::taos::ReadVarChar(row[0]));
+          }
+        }
+        ::taos_free_result(res);
+      }
       int64_t cleared = 0;
       int cleared_codes = 0;
       for (const auto& [code, market] : all_codes) {
-        int64_t n = ClearTodayIntraday(conn.native(), market, code);
+        int64_t n = ClearTodayIntraday(conn.native(), market, code, existing_tables);
         if (n < 0) { std::cerr << "清除 " << code << " 失败，继续\n"; continue; }
         if (n > 0) ++cleared_codes;
         cleared += n;

@@ -15,4 +15,5 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 
 ```bash
 python3 scripts/smmd.py --zxg   # SMMD 股市操纵检测（K-Means++ 聚类 + 启发式欺诈分类）
+python3 scripts/makeup.py       # 全市场增量补导（读 stock_name → vipdoc + 网络增量入库）
 ```
