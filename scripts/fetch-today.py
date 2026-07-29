@@ -37,6 +37,7 @@ import atexit
 import collections
 import mmap
 import os
+import re
 import shutil
 import signal
 import struct
@@ -283,6 +284,21 @@ class ReadShm:
         return None
 
 
+def _has_today(pod):
+    """pod 的 datetime（epoch sec）是否落在当日。None / 0 / 解析失败视为无数据。"""
+    if pod is None:
+        return False
+    dt = pod[0]
+    if dt <= 0:
+        return False
+    try:
+        q = time.localtime(dt)
+        n = time.localtime()
+        return (q.tm_year, q.tm_mon, q.tm_mday) == (n.tm_year, n.tm_mon, n.tm_mday)
+    except (OSError, OverflowError, ValueError):
+        return False
+
+
 def _row_from_pod(code, pod):
     ts_str = "--:--:--"
     if pod is None:
@@ -321,9 +337,46 @@ def tailboard_render(shm, viewer_codes):
     if not rd.open():
         return "[行情] 尚未就绪（writer 未落盘或正在选服...）", False
     try:
+        # 仅保留当日有数据的标的（pod 存在且 datetime 落在今日）；无数据不占行。
+        # ponytail: 单遍 _lookup，--all 16k 标的下避免重复哈希探测。
+        fresh = []
+        for c in viewer_codes:
+            pod = rd._lookup(c)
+            if pod is not None and _has_today(pod):
+                fresh.append((c, pod))
+        if not fresh:
+            return f"[行情] {len(viewer_codes)} 只标的尚无当日数据（writer 正在采集或今日非交易日）", True
         rows = TAILBOARD_HDR + "\n" + ("-" * 98) + "\n"
-        rows += "\n".join(_row_from_pod(c, rd._lookup(c)) for c in viewer_codes)
+        rows += "\n".join(_row_from_pod(c, pod) for c, pod in fresh)
         return rows, True
+    finally:
+        rd.close()
+
+
+# 解析 fetch-quotes stderr 的轮次行："第N轮 A股: quote=X ..." / "第N轮 HK: quote=X"
+_ROUND_RE = re.compile(r"第(\d+)轮\s+(A股|HK):\s+quote=(\d+)")
+
+
+def parse_round_lastline(last_line):
+    """从 ProcMonitor.last_line 解析 (轮次, 市场, 写mmap数)；不匹配返回 None。"""
+    m = _ROUND_RE.search(last_line or "")
+    if not m:
+        return None
+    return int(m.group(1)), m.group(2), int(m.group(3))
+
+
+def count_fresh_shm(shm, viewer_codes):
+    """轻量统计 shm 当日有数据的标的数（不构建字符串）。"""
+    rd = ReadShm(shm)
+    if not rd.open():
+        return None
+    try:
+        n = 0
+        for c in viewer_codes:
+            pod = rd._lookup(c)
+            if pod is not None and _has_today(pod):
+                n += 1
+        return n
     finally:
         rd.close()
 
@@ -456,6 +509,28 @@ def main():
         f"kline-jobs={kline_jobs} | quote-jobs={quote_jobs} | viewer={viewer_mode} | "
         f"报告间隔 {args.interval}s | 日志={log_path} ===\n")
 
+    # 全量模式轮次计时：检测轮次号变化，计算实际轮耗时（含采集+等待）。
+    _round_state = {"n": 0, "t0": time.time()}
+
+    def _stats_line(ts):
+        """全量模式专用：从 quotes stderr + shm 扫描生成单行统计。"""
+        qline, _ = quotes_monitors[0].status()
+        r = parse_round_lastline(qline)
+        if r:
+            n, mkt, wrote = r
+            if n != _round_state["n"]:
+                _round_state["n"], _round_state["t0"] = n, time.time()
+        else:
+            n, mkt, wrote = _round_state["n"], "?", 0
+        fresh = count_fresh_shm(shm, viewer_codes)
+        if fresh is None:
+            nodata = "?"
+        else:
+            nodata = len(viewer_codes) - fresh
+        elapsed = int(time.time() - _round_state["t0"])
+        return (f"[{ts}] 第{n}轮{mkt} | 更新/写mmap {wrote} 只"
+                f" | 无数据 {nodata} 只 | 耗时 {elapsed}s")
+
     def report_loop():
         while not stop.wait(args.interval):
             ts = time.strftime("%H:%M:%S")
@@ -464,8 +539,13 @@ def main():
                 line, dead = m.status()
                 lines.append(f"  [{m.name}]{'[退出]' if dead else ''} {line}")
             sys.stderr.write(f"\n[{ts}] --- 进度 ---\n" + "\n".join(lines) + "\n")
-            # stdout 仅行情表；viewer 模式已由全屏 TUI 占用 stdout，不再重复打印
+            # stdout 仅行情/统计；viewer 模式已由全屏 TUI 占用 stdout，不再重复打印
             if viewer_mode:
+                continue
+            if args.all:
+                # 全量模式：仅单行统计（覆盖式），避免 16k 行行情表刷屏。
+                sys.stdout.write("\r\033[K" + _stats_line(ts))
+                sys.stdout.flush()
                 continue
             board, _ = tailboard_render(shm, viewer_codes)
             sys.stdout.write("\033[2J\033[H" + board + "\n")
