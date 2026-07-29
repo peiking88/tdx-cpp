@@ -120,6 +120,7 @@ class ProcMonitor:
         self.cmd = list(cmd)
         self.proc = None
         self.last_line = ""
+        self.round_line = ""  # 最近一条匹配 _ROUND_RE 的轮次行（不被等待消息覆盖）
         self.lock = threading.Lock()
         self._deque = collections.deque(maxlen=500)  # [(timestamp, line), ...]
         self._err_path = None
@@ -146,6 +147,8 @@ class ProcMonitor:
                             item = (time.strftime("%H:%M:%S"), line)
                             with self.lock:
                                 self.last_line = line
+                                if _ROUND_RE.search(line):
+                                    self.round_line = line
                                 self._deque.append(item)
                     elif self.proc.poll() is not None:
                         break
@@ -406,7 +409,7 @@ class ShmViewer:
                 sys.stdout.flush()
                 time.sleep(self.interval)
         except (KeyboardInterrupt, BrokenPipeError):
-            pass
+            raise  # 上抛，让信号 handler 的 sys.exit 接管
         return True
 
 
@@ -487,12 +490,12 @@ def main():
     viewer_codes = [c for c in viewer_codes if len(c) == 6]
 
     # fetch-quotes：1 写者 + 内部 --quote_jobs 路 fiber；写 shm + 异步 ingest TDengine。
-    # --all 模式用 --all_market（原生全市场网络拉取），避免拼 16000+ 代码命令行过长。
+    # --all 模式用 --all（原生全市场网络拉取），避免拼 16000+ 代码命令行过长。
     quotes_cmd = [args.bin, "fetch-quotes", "--quote_loop",
                   "--quote_jobs", str(quote_jobs),
                   "--mmap_path", shm]
     if args.all:
-        quotes_cmd.append("--all_market")
+        quotes_cmd.append("--all")
     else:
         quotes_cmd.insert(3, "--quote_codes=" + ",".join(codes))
     quotes_monitors = [ProcMonitor("quotes", quotes_cmd)]
@@ -515,21 +518,29 @@ def main():
     def _stats_line(ts):
         """全量模式专用：从 quotes stderr + shm 扫描生成单行统计。"""
         qline, _ = quotes_monitors[0].status()
-        r = parse_round_lastline(qline)
+        # 优先用 round_line（轮次报告行）；last_line 可能被紧随其后的"等待 Ns ..."覆盖。
+        r = parse_round_lastline(quotes_monitors[0].round_line or qline)
         if r:
             n, mkt, wrote = r
             if n != _round_state["n"]:
+                # 新轮次：先算本轮耗时（now - 上一轮 t0），再重置 t0。
+                # 若先重置 t0 再算 elapsed，now - now 恒为 0。
+                elapsed = int(time.time() - _round_state["t0"])
                 _round_state["n"], _round_state["t0"] = n, time.time()
+            else:
+                elapsed = int(time.time() - _round_state["t0"])
         else:
             n, mkt, wrote = _round_state["n"], "?", 0
+            elapsed = int(time.time() - _round_state["t0"])
         fresh = count_fresh_shm(shm, viewer_codes)
         if fresh is None:
+            mmap_str = "?"
             nodata = "?"
         else:
+            mmap_str = str(fresh)
             nodata = len(viewer_codes) - fresh
-        elapsed = int(time.time() - _round_state["t0"])
-        return (f"[{ts}] 第{n}轮{mkt} | 更新/写mmap {wrote} 只"
-                f" | 无数据 {nodata} 只 | 耗时 {elapsed}s")
+        return (f"[{ts}] 第{n}轮{mkt} | 写库 {wrote} 只"
+                f" | 写mmap {mmap_str} 只 | 无数据 {nodata} 只 | 耗时 {elapsed}s")
 
     def report_loop():
         while not stop.wait(args.interval):
@@ -582,6 +593,17 @@ def main():
         return 1
     sys.stderr.write(f"shm 就绪（{os.path.getsize(shm)} B），{'拉起全屏 TUI' if viewer_mode else '开始行情'}\n")
 
+    # 闭市后自动退出（A 股 15:00；留 30min 缓冲处理尾盘行情，15:30 退）。
+    # 仅 --all 全量模式启用：自选股监控模式可能有意持续运行，不强制退。
+    MARKOUT_CLOSE_H, MARKOUT_CLOSE_M = 15, 30
+
+    def _market_closed():
+        if not args.all:
+            return False
+        n = time.localtime()
+        return (n.tm_hour > MARKOUT_CLOSE_H or
+                (n.tm_hour == MARKOUT_CLOSE_H and n.tm_min >= MARKOUT_CLOSE_M))
+
     try:
         if viewer_mode:
             ShmViewer(shm, viewer_codes, interval=args.interval).run()
@@ -590,6 +612,9 @@ def main():
             while not stop.wait(0.5):
                 if quotes_monitor.proc is not None and quotes_monitor.proc.poll() is not None:
                     sys.stderr.write("quotes writer 已退出，停止\n")
+                    break
+                if _market_closed():
+                    sys.stderr.write("已闭市（15:30），自动退出\n")
                     break
         cleanup()
         return 0

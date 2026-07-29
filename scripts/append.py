@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# makeup.py：读取 stock_name → 以 stock_name 为代码源增量导入 vipdoc + 网络最新数据入库。
+# append.py：读取 stock_name → 以 stock_name 为代码源增量导入 vipdoc + 网络最新数据入库。
 #
 # 核心复用 tdx import 引擎（vipdoc 本地增量 + 网络补缺 + 复权因子 + 清理），
 # 本脚本仅做「读 stock_name → 组装代码 → 调用 tdx import」的编排与报告，
@@ -13,13 +13,13 @@
 #   本脚本先读 stock_name 报告代码数，确认非空后再调，避免空码表白跑。
 #
 # 用法：
-#   python3 scripts/makeup.py                    # 全量 A 股（stock_name 全市场）
-#   python3 scripts/makeup.py --dry-run          # 仅报告代码数，不执行
-#   python3 scripts/makeup.py --codes sh600000 sz000001
-#   python3 scripts/makeup.py --codes-file my_codes.txt
-#   python3 scripts/makeup.py --daily-only       # 仅日 K（跳过 1m/5m + 复权）
-#   python3 scripts/makeup.py --jobs 8           # 8 线程本地导入
-#   python3 scripts/makeup.py --keep-intraday    # 保留当日盘中（不清今日）
+#   python3 scripts/append.py                    # 全量 A 股（stock_name 全市场）
+#   python3 scripts/append.py --dry-run          # 仅报告代码数，不执行
+#   python3 scripts/append.py --codes sh600000 sz000001
+#   python3 scripts/append.py --codes-file my_codes.txt
+#   python3 scripts/append.py --daily-only       # 仅日 K（跳过 1m/5m + 复权）
+#   python3 scripts/append.py --jobs 8           # 8 线程本地导入
+#   python3 scripts/append.py --keep-intraday    # 保留当日盘中（不清今日）
 #
 # 环境变量：TDX_BIN  TAOS  TDX_TAOS_DB  TDX_HOME  TDX_ZXG_BLK
 import argparse
@@ -157,7 +157,7 @@ def main():
         return
 
     # 4. 执行
-    print(f"\n>>> [makeup] 开始导入 {len(a_codes)} 只 A 股...")
+    print(f"\n>>> [append] 开始导入 {len(a_codes)} 只 A 股...")
     t0 = time.perf_counter()
     r = subprocess.run(cmd)
     dt = time.perf_counter() - t0
@@ -184,7 +184,7 @@ def main():
     print("-" * 50)
     print(f"kline={kline_rows}  adjust={adj_rows}")
     print("=" * 50)
-    print(f"[makeup] 完成，耗时 {fmt(dt)}。")
+    print(f"[append] 完成，耗时 {fmt(dt)}。")
 
 
 if __name__ == "__main__":

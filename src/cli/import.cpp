@@ -11,7 +11,10 @@
 #include <string>
 #include <vector>
 
+#include "absl/flags/flag.h"
 #include "tdx/taos/taos_import.hpp"
+
+extern bool FLAGS_all;
 
 namespace {
 
@@ -41,7 +44,8 @@ ImportConfig ParseArgs(int argc, char** argv) {
     if (a.rfind("--jobs=", 0) == 0) continue;
     if (a == "--no-clear-intraday") { cfg.clear_intraday = false; continue; }
     if (a == "--full-reset") { cfg.full_reset = true; cfg.clear_intraday = false; continue; }
-    if (a == "--all") { cfg.all_market = true; continue; }
+    // --all 已由 absl 解析（fetch-quotes 的 FLAGS_all），此处读全局值
+    if (a == "--all") { cfg.all_market = FLAGS_all; continue; }
     if (a == "--daily-only") { cfg.daily_only = true; continue; }
     if (a == "--kronos") { cfg.kronos = true; continue; }
     if (a == "--zxg-blk") { if (i + 1 < argc) cfg.zxg_blk = argv[++i]; continue; }

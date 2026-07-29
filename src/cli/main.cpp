@@ -15,6 +15,7 @@
 #include "util/fibers/pool.h"
 
 #include "absl/flags/flag.h"
+#include "absl/flags/usage.h"
 #include "absl/strings/numbers.h"
 
 #include "tdx/consts.hpp"
@@ -1108,15 +1109,16 @@ int main(int argc, char **argv)
 
   // helio MainInitGuard 内的 absl::ParseCommandLine 会拒绝未注册的 '--' flag（报
   // "Unknown command line flag" 直接退出）。import 子命令的 --full-reset /
-  // --no-clear-intraday / --all / --zxg-blk 是手动解析（import.cpp::ParseArgs）
-  // 的非 absl flag，故先把它们从 argv 剥离，让 absl 只解析已注册的 --jobs 等；
+  // --no-clear-intraday / --zxg-blk 是手动解析（import.cpp::ParseArgs）的非 absl flag，
+  // 故先把它们从 argv 剥离；--all 已注册为 fetch-quotes 的 absl flag（FLAGS_all），
+  // 必须保留给 absl 解析；--daily-only/--kronos 同样保留。
   // MainInitGuard 后保留原 argc/argv，交由各子命令自行解析（argv[0] 程序名不变）。
   std::vector<char *> absl_argv{argv[0]};
   for (int i = 1; i < argc; ++i)
   {
     std::string a = argv[i];
     bool manual = a == "--full-reset" || a == "--no-clear-intraday" ||
-                  a == "--all" || a == "--zxg-blk" ||
+                  a == "--zxg-blk" ||
                   a == "--daily-only" || a == "--kronos";
     if (manual)
     {
@@ -1127,6 +1129,7 @@ int main(int argc, char **argv)
   }
   int absl_argc = static_cast<int>(absl_argv.size());
   char **absl_argv_ptr = absl_argv.data();
+  absl::SetProgramUsageMessage("tdx-cpp: 通达信行情数据读取工具");
   MainInitGuard guard(&absl_argc, &absl_argv_ptr);
 
   if (argc < 2)

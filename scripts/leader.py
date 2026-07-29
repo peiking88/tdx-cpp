@@ -19,6 +19,7 @@
 import argparse
 import os
 import sys
+import time
 import numpy as np
 import pandas as pd
 import taosws
@@ -97,11 +98,28 @@ def zxg_codes(path=ZXG_PATH):
     return codes
 
 
+def load_stock_names(conn):
+    """加载 {(market, code): name} 对照表。"""
+    names = {}
+    try:
+        r = conn.query("SELECT market, code, name FROM tdx.stock_name")
+        for m, c, n in r:
+            names[(m, c)] = n
+    except Exception:
+        pass
+    return names
+
+
 def all_mainboard_codes(conn):
+    """全量 A 股标的 (SH/SZ/BJ 三市场, 排除基金/指数/B股/债券/回购)。"""
     try:
         r = conn.query(
             "SELECT code, market FROM tdx.stock_name "
-            "WHERE code LIKE '60%' OR code LIKE '00%' OR code LIKE '30%'"
+            "WHERE market IN ('sh','sz','bj') AND ("
+            "  code LIKE '60%' OR code LIKE '68%'"      # SH 主板 / 科创板
+            "  OR code LIKE '00%' OR code LIKE '30%'"   # SZ 主板 / 创业板
+            "  OR code LIKE '43%' OR code LIKE '83%' OR code LIKE '87%' OR code LIKE '920%'"  # BJ 北交所
+            ")"
         )
         return [(m, c) for c, m in r]
     except Exception:
@@ -353,6 +371,9 @@ def main():
 
     print(f"[pool] {len(pool)} stocks")
 
+    # 股票名称对照
+    names = load_stock_names(conn)
+
     # 板块动量
     print("[sector] computing momentum...")
     sec_mom = sector_momentum(conn)
@@ -426,6 +447,7 @@ def main():
             continue
         result["market"] = m
         result["code"] = c
+        result["name"] = names.get((m, c), "")
         result["RPS"] = round(rps, 1)
         result["sector"] = SECTOR_INDICES.get(sector, sector)
         results.append(result)
@@ -437,10 +459,15 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     df_out = pd.DataFrame(results)
     if not df_out.empty:
-        cols = ["market", "code", "score", "RPS", "price", "ret_250", "near_high",
-                "RSI14", "ADX", "CCI", "ATR_pct", "sector",
+        df_out["stop_loss"] = df_out["price"] * (1 - df_out["ATR_pct"].fillna(0) / 100 * 2)
+        cols = ["market", "code", "name", "score", "RPS", "price", "ret_250", "near_high",
+                "RSI14", "ADX", "CCI", "ATR_pct", "stop_loss", "sector",
                 "momentum", "high_score", "ma_align", "rsi", "cci", "pocket_pivot"]
         df_out = df_out[[c for c in cols if c in df_out.columns]]
+        # 日期戳 CSV (浮点保留3位)
+        csv_file = os.path.join(args.output_dir, f"leader-{time.strftime('%Y%m%d')}.csv")
+        df_out.round(3).to_csv(csv_file, index=False)
+        # 兼容旧名
         df_out.to_csv(os.path.join(args.output_dir, "leader.csv"), index=False)
 
     print(f"\n=== 板块龙头候选 (top {args.top}, score >= {args.min_score}) ===")
@@ -448,22 +475,16 @@ def main():
     if not filtered:
         print("  (无通过过滤的股票)")
     else:
-        print(f"{'排名':>4} {'代码':<10} {'评分':>6} {'RPS':>6} {'价格':>8} {'250日%':>8} "
-              f"{'近新高':>6} {'RSI':>5} {'ADX':>5} {'CCI':>6} {'ATR%':>5} {'板块'}")
+        print(f"{'排名':>4} {'代码':<10} {'名称':<8} {'评分':>6} {'RPS':>6} {'价格':>8} {'250日%':>8} "
+              f"{'近新高':>6} {'RSI':>5} {'ADX':>5} {'CCI':>6} {'ATR%':>5} {'止损位':>8} {'板块'}")
         for i, r in enumerate(filtered[:args.top], 1):
-            print(f"{i:4d} {r['market']}{r['code']:<8} {r['score']:6.1f} {r['RPS']:6.1f} "
+            nm = r.get('name', '') or ''
+            atr = r.get("ATR_pct", 0) or 0
+            stop = r["price"] * (1 - atr / 100 * 2)
+            print(f"{i:4d} {r['market']}{r['code']:<8} {nm:<8} {r['score']:6.1f} {r['RPS']:6.1f} "
                   f"{r['price']:8.2f} {r['ret_250']:8.1f} {r['near_high']:6.3f} "
                   f"{r['RSI14']:5.1f} {r['ADX']:5.1f} {r['CCI']:6.1f} "
-                  f"{r['ATR_pct'] or 0:5.2f} {r.get('sector', '')}")
-
-    # 止损参考
-    print(f"\n=== 止损参考 (动态 ATR) ===")
-    for r in filtered[:args.top]:
-        atr = r.get("ATR_pct", 0) or 0
-        price = r["price"]
-        stop = price * (1 - atr / 100 * 2)  # 2×ATR 止损
-        print(f"  {r['market']}{r['code']:<8} 现价 {price:8.2f}  "
-              f"ATR={atr:.2f}%  止损位(-2ATR) {stop:8.2f}")
+                  f"{atr:5.2f} {stop:8.2f} {r.get('sector', '')}")
 
     # 诊断输出
     if args.diagnostic and diagnostic:
@@ -473,6 +494,16 @@ def main():
         for d in diagnostic[:15]:
             print(f"{d['market']}{d['code']:<8} {d['RPS']:6.1f} {d['price']:8.2f} "
                   f"{d['ret_250']:8.1f} {d['reason']}")
+
+    # 保存到通达信自选板块
+    blk_dir = os.path.expanduser("~/.local/share/tdxcfv/drive_c/tc/T0002/blocknew")
+    os.makedirs(blk_dir, exist_ok=True)
+    with open(os.path.join(blk_dir, "LT.blk"), "w", newline="") as f:
+        f.write("1999999\r\n")
+        for r in filtered[:args.top]:
+            prefix = "1" if r["market"] == "sh" else "0"
+            f.write(f"{prefix}{r['code']}\r\n")
+    print(f"[blk] → LT.blk ({min(len(filtered), args.top)} 只)")
 
     print(f"\n[output] → {args.output_dir}/leader.csv")
     print(f"[summary] {len(results)} passed filters, {len(filtered)} with score >= {args.min_score}")

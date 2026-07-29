@@ -63,7 +63,7 @@ ABSL_FLAG(bool, with_unusual, false, "同步采集主力异动 0x563");
 ABSL_FLAG(bool, with_vol, false, "采集成交量分布 0x51a");
 ABSL_FLAG(bool, with_hist, false, "采集历史委托+逐笔 0xfb4/0xfb5");
 ABSL_FLAG(bool, with_board, false, "采集板块列表+资金流向 0x1231/0x1218");
-ABSL_FLAG(bool, all_market, false, "采集全市场（默认仅采集自选股 zxg.blk）");
+ABSL_FLAG(bool, all, false, "采集全市场（默认仅采集自选股 zxg.blk）");
 ABSL_FLAG(std::string, zxg_blk,
           "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk",
           "通达信自选股文件（每行7位：首位1=沪/0=深+6位代码）。可用环境变量 TDX_ZXG_BLK 覆盖");
@@ -814,7 +814,7 @@ int DoFetchQuotes(int /*argc*/, char** /*argv*/) {
     codes.erase(std::remove_if(codes.begin(), codes.end(),
         [](const std::string& c) { return !IsQuoteTarget(c); }), codes.end());
     std::cerr << "指定代码: " << codes.size() << " 只\n";
-  } else if (absl::GetFlag(FLAGS_all_market)) {
+  } else if (absl::GetFlag(FLAGS_all)) {
     std::cerr << "拉取全市场股票列表...\n";
     codes = FetchAllCodes();
     std::cerr << "全市场代码: " << codes.size() << " 只\n";

@@ -296,10 +296,15 @@ def zxg_codes(path=ZXG_PATH):
 
 
 def all_mainboard_codes(conn):
+    """全量 A 股标的 (SH/SZ/BJ 三市场, 排除基金/指数/B股/债券/回购)。"""
     try:
         r = conn.query(
             "SELECT code, market FROM tdx.stock_name "
-            f"WHERE code LIKE '60%' OR code LIKE '00%'"
+            "WHERE market IN ('sh','sz','bj') AND ("
+            "  code LIKE '60%' OR code LIKE '68%'"      # SH 主板 / 科创板
+            "  OR code LIKE '00%' OR code LIKE '30%'"   # SZ 主板 / 创业板
+            "  OR code LIKE '43%' OR code LIKE '83%' OR code LIKE '87%' OR code LIKE '920%'"  # BJ 北交所
+            ")"
         )
         return [(m, c) for c, m in r]
     except Exception:
@@ -592,6 +597,7 @@ def diagnose(market, code, conn, quote_pod, bars_1d, fin, bars_intraday,
 
     result = {
         "code": f"{market}{code}",
+        "name": names.get((market, code), ""),
         "price": price,
         "pre_close": pre_close,
         "volume": volume,
@@ -906,6 +912,14 @@ def main():
     conn = get_conn()
     conn.execute("USE tdx")
 
+    # 股票名称对照
+    names = {}
+    try:
+        for m, c, n in conn.query("SELECT market, code, name FROM tdx.stock_name"):
+            names[(m, c)] = n
+    except Exception:
+        pass
+
     # 标的池
     if args.code:
         market, code = parse_code(args.code)
@@ -960,6 +974,34 @@ def main():
                 output = render_table(results, round_no, elapsed)
                 sys.stdout.write(output)
                 sys.stdout.flush()
+                # 保存结果
+                if results:
+                    blk_dir = os.path.expanduser(
+                        "~/.local/share/tdxcfv/drive_c/tc/T0002/blocknew")
+                    os.makedirs(blk_dir, exist_ok=True)
+                    # WP.blk (通达信自选板块)
+                    with open(os.path.join(blk_dir, "WP.blk"), "w", newline="") as f:
+                        f.write("1999999\r\n")
+                        for r in results:
+                            full = r["code"]
+                            prefix = "1" if full.startswith("sh") else "0"
+                            f.write(f"{prefix}{full[2:]}\r\n")
+                    sys.stderr.write(f"[blk] → WP.blk ({len(results)} 只)\n")
+                    # 本地 CSV
+                    import csv
+                    csv_dir = "output/scalper"
+                    os.makedirs(csv_dir, exist_ok=True)
+                    csv_file = os.path.join(csv_dir, f"scalper-{time.strftime('%Y%m%d')}.csv")
+                    fields = list(results[0].keys())
+                    with open(csv_file, "w", newline="") as cf:
+                        w = csv.DictWriter(cf, fieldnames=fields)
+                        w.writeheader()
+                        for r in results:
+                            row = {}
+                            for k, v in r.items():
+                                row[k] = f"{v:.3f}" if isinstance(v, float) else v
+                            w.writerow(row)
+                    sys.stderr.write(f"[csv] → {csv_file}\n")
             except Exception as e:
                 elapsed = time.time() - t0
                 sys.stderr.write(f"[scalper] 第 {round_no} 轮异常: {e}\n")
