@@ -44,7 +44,7 @@ TEST(VipdocReader, DayFileScaling) {
   pu32(rec, 102000);         // high = 1020.00
   pu32(rec, 99000);          // low = 990.00
   pu32(rec, 101000);         // close = 1010.00
-  pf32(rec, 5000000.0f);     // amount（不缩放）
+  pf32(rec, 10100000000.0f); // amount ≈ vol×close（元），避免触发 lot 单位修正
   pu32(rec, 10000000);       // volume ×1.0 = 10000000（股）
   pu32(rec, 0);              // reserved
 

@@ -59,7 +59,7 @@ TEST(KlineParser, OhlcOrder) {
   ep(resp, 1020);         // high
   ep(resp, 990);          // low
   pf32(resp, 100000.0f);  // vol
-  pf32(resp, 5000000.0f); // amount
+  pf32(resp, 101000.0f);  // amount ≈ vol×close（元），避免触发 lot 单位修正
   auto bars = deserialize_kline(resp.data(), resp.size(), Period::DAILY);
   ASSERT_EQ(bars.size(), 1u);
   // get_price 原始值 /1000（对齐 quotationClient.py:133-136）
@@ -79,6 +79,20 @@ TEST(KlineParser, EmptyCount) {
   pu16(resp, 0);
   auto bars = deserialize_kline(resp.data(), resp.size(), Period::DAILY);
   EXPECT_TRUE(bars.empty());
+}
+
+// 基金拆分后 vol 单位错乱为「手」(lot=100股)：amt/(vol*price)≈100 时应 ×100 还原
+TEST(KlineParser, LotVolumeUnitFix) {
+  std::vector<uint8_t> resp;
+  pu16(resp, 1);
+  pu32(resp, 20260708);
+  ep(resp, 1270); ep(resp, 1271); ep(resp, 1397); ep(resp, 1190);  // OHLC /1000
+  pf32(resp, 58035672.0f);   // vol（实际单位「手」，应为股）
+  pf32(resp, 7262920192.0f); // amount（元，正确）
+  auto bars = deserialize_kline(resp.data(), resp.size(), Period::DAILY);
+  ASSERT_EQ(bars.size(), 1u);
+  // 7262920192 / (58035672 * 1.271) ≈ 98.5 > 10 → vol×100 还原为「股」
+  EXPECT_NEAR(bars[0].volume, 5803567200.0, 1.0);
 }
 
 // ---------- 逐笔：price 增量累加（D1）----------

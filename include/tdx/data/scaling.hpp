@@ -102,4 +102,19 @@ inline FieldScaling GetScaling(DataSource src) {
   return GetScaling(SecurityClass::AStock, src);
 }
 
+// 通达信 .day 文件与网络协议在基金拆分后，volume 单位会从「股」(shares) 错乱为
+// 「手」(lot=100股)，而 amount 保持「元」不变。此时 amt/(vol*price) ≈ 100
+// （正常应为 ≈1）。单位切换在同一只标的不同日期间无规律交替（如 sh588000），
+// 故无法按标的类别或拆分状态一刀切，只能逐 bar 检测。
+//
+// 检测：比值 >10 视为 vol 单位为「手」，×100 还原为「股」。阈值 10 远离正常
+// 波动区间（0.5~2）与错位区间（80~120），无歧义。
+inline double FixLotVolume(double vol, double amt, double price) {
+  if (vol > 0 && amt > 0 && price > 0) {
+    double ratio = amt / (vol * price);
+    if (ratio > 10.0) return vol * 100.0;
+  }
+  return vol;
+}
+
 }  // namespace tdx::data

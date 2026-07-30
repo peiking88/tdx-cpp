@@ -76,6 +76,7 @@ std::vector<KLine> VipdocReader::ReadDay(Market market, std::string_view code) c
     bar.close = close_i * s.ohlc;
     bar.amount = amount * s.amount;
     bar.volume = volume_i * s.volume;
+    bar.volume = tdx::data::FixLotVolume(bar.volume, bar.amount, bar.close);
     bars.push_back(bar);
   }
   return bars;

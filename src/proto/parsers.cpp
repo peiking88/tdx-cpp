@@ -109,6 +109,7 @@ std::vector<KLine> deserialize_kline(const uint8_t* data, std::size_t len, Perio
     bar.low = static_cast<double>(low.value) * scaling.ohlc;
     bar.volume = static_cast<double>(vol);
     bar.amount = static_cast<double>(amount);
+    bar.volume = tdx::data::FixLotVolume(bar.volume, bar.amount, bar.close);
     bar.up_count = up_count;
     bar.down_count = down_count;
     if (!out_of_hours) bars.push_back(std::move(bar));
