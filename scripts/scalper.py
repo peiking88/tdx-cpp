@@ -31,8 +31,10 @@ import mmap
 import os
 import struct
 import sys
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import taosws
@@ -300,6 +302,113 @@ def table_exists(conn, tbl):
     except Exception:
         return False
     return False
+
+
+def batch_query_1d(conn, days):
+    """全市场 1d 批量查询 → {code: [bars]}。一次查询替代 N 次逐股查询。"""
+    try:
+        r = conn.query(
+            f"SELECT code, ts, open, high, low, close, volume, amount "
+            f"FROM tdx.kline WHERE cycle='1d' AND ts > NOW() - {days + 5}d"
+        )
+    except Exception:
+        return {}
+    out = defaultdict(list)
+    for row in r:
+        code = row[0]
+        ts = _parse_ts(row[1])
+        out[code].append({
+            "ts": ts, "open": row[2], "high": row[3], "low": row[4],
+            "close": row[5], "volume": float(row[6] or 0), "amount": float(row[7] or 0),
+        })
+    for code in out:
+        out[code].sort(key=lambda b: b["ts"])
+    return out
+
+
+def batch_query_intraday(conn, cycle="1m", days=None):
+    """全市场分钟线批量查询 → {code: [bars]}。days=None 查当日, 否则查最近 days 天。"""
+    if days is None:
+        where = f"cycle='{cycle}' AND ts >= TODAY()"
+    else:
+        where = f"cycle='{cycle}' AND ts > NOW() - {days + 2}d"
+    try:
+        r = conn.query(
+            f"SELECT code, ts, open, high, low, close, volume, amount "
+            f"FROM tdx.kline WHERE {where}"
+        )
+    except Exception:
+        return {}
+    out = defaultdict(list)
+    for row in r:
+        code = row[0]
+        ts = _parse_ts(row[1])
+        out[code].append({
+            "ts": ts, "open": row[2], "high": row[3], "low": row[4],
+            "close": row[5], "volume": float(row[6] or 0), "amount": float(row[7] or 0),
+        })
+    for code in out:
+        out[code].sort(key=lambda b: b["ts"])
+    return out
+
+
+def batch_query_intraday_ndays(conn, cycle="1m", days=20, workers=8):
+    """N 天分钟线批量查询 (只取 13:31 后 close, 供 calc_tail_momentum_factor)。
+
+    数据量大, 优化: ① SQL 端过滤 13:31 前数据 ② 只取 close 列 ③ 按前缀分片并发。
+    """
+    # 13:31 = (13*3600 + 31*60) * 1000 ms = 48660000
+    TAIL_MS = 48660000
+    chunks = ["code LIKE '60%'", "code LIKE '68%'", "code LIKE '00%'",
+              "code LIKE '30%'", "code LIKE '43%'", "code LIKE '83%'",
+              "code LIKE '87%'", "code LIKE '920%'"]
+    out = {}
+
+    def _query_chunk(chunk_where):
+        try:
+            r = conn.query(
+                f"SELECT code, ts, close FROM tdx.kline "
+                f"WHERE cycle='{cycle}' AND ts > NOW() - {days + 2}d "
+                f"AND (TIMETRUNCATE(ts, 1d) + {TAIL_MS}) <= ts "
+                f"AND ({chunk_where})"
+            )
+            local = defaultdict(list)
+            for row in r:
+                code = row[0]
+                ts = _parse_ts(row[1])
+                local[code].append({
+                    "ts": ts, "open": None, "high": None, "low": None,
+                    "close": row[2], "volume": 0.0, "amount": 0.0,
+                })
+            for code in local:
+                local[code].sort(key=lambda b: b["ts"])
+            return local
+        except Exception:
+            return {}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(_query_chunk, cw) for cw in chunks]
+        for f in as_completed(futs):
+            try:
+                out.update(f.result())
+            except Exception:
+                pass
+    return out
+
+
+def batch_query_finance(conn):
+    """全市场财务批量查询 → {code: {liutongguben, zongguben}}。取每只股最新一行。"""
+    try:
+        r = conn.query(
+            "SELECT code, LAST(liutongguben), LAST(zongguben) FROM tdx.finance GROUP BY code"
+        )
+    except Exception:
+        return {}
+    out = {}
+    for row in r:
+        code = row[0]
+        out[code] = {"liutongguben": float(row[1] or 0), "zongguben": float(row[2] or 0)}
+    return out
 
 
 def fetch_recent_1m(conn, market, code, days=7):
@@ -797,29 +906,87 @@ def diagnose(market, code, conn, quote_pod, bars_1d, fin, bars_intraday,
 
 
 # ---------------------------------------------------------------------------
-# 筛选主流程
+# 筛选主流程 (多线程)
 # ---------------------------------------------------------------------------
-def screen(conn, universe, shm_reader, cfg, require_intraday=True):
+_thread_local = threading.local()
+
+
+def _thread_conn():
+    if not hasattr(_thread_local, "conn"):
+        _thread_local.conn = get_conn()
+    return _thread_local.conn
+
+
+def _screen_one_compute(market, code, pod, bars_1d, fin, intra, intra_ndays,
+                        cfg, rps_baseline):
+    """单股纯计算 (无 I/O, 供线程池调用)。"""
+    return diagnose(market, code, None, pod, bars_1d, fin, intra, intra_ndays,
+                    cfg, rps_baseline)
+
+
+def _screen_one_intraday(market, code, shm_reader, cfg, rps_baseline, bars_1d,
+                         fin, intra_all, intra_ndays_all):
+    """单股分钟线查询 + 计算 (线程内独立连接)。"""
+    pod = shm_reader.get(code)
+    if pod is None:
+        return None
+    intra = intra_all.get(code) if intra_all else None
+    intra_ndays = intra_ndays_all.get(code) if intra_ndays_all else None
+    return diagnose(market, code, None, pod, bars_1d, fin, intra, intra_ndays,
+                    cfg, rps_baseline)
+
+
+def screen(conn, universe, shm_reader, cfg, require_intraday=True, workers=8):
+    t0 = time.time()
     rps_baseline = build_market_rps_baseline(
         conn, cfg["rps_periods"], cfg["rps_baseline_days"])
+    sys.stderr.write(f"[scalper] RPS 基线构建耗时 {time.time() - t0:.1f}s\n")
+
+    # ---- 批量查询 1d + finance (数据量小, 一次查全市场) ----
+    t1 = time.time()
+    bars_1d_all = batch_query_1d(conn, cfg["lookback_days"])
+    fin_all = batch_query_finance(conn)
+    sys.stderr.write(f"[scalper] 批量查询 1d+finance 耗时 {time.time() - t1:.1f}s\n")
+
+    # ---- 分钟线: 当日批量 + N天逐股线程并发 ----
+    intra_all = {}
+    intra_ndays_all = {}
+    if require_intraday:
+        t2 = time.time()
+        intra_all = batch_query_intraday(conn, "1m", days=None)  # 当日 ~120万行, 可接受
+        sys.stderr.write(f"[scalper] 批量查询当日 1m 耗时 {time.time() - t2:.1f}s\n")
+        # N 天分钟线数据量大, 按 code 前缀分片批量查询
+        t3 = time.time()
+        intra_ndays_all = batch_query_intraday_ndays(
+            conn, "1m", days=cfg["tail_mom_lookback"], workers=workers)
+        sys.stderr.write(f"[scalper] 分片批量查询 N天 1m 耗时 {time.time() - t3:.1f}s\n")
+
+    # ---- 纯计算并行 ----
+    t4 = time.time()
     results = []
-    for i, (market, code) in enumerate(universe):
-        pod = shm_reader.get(code)
-        if pod is None:
-            continue
-        bars_1d = query_1d(conn, code, market, cfg["lookback_days"])
-        if not bars_1d:
-            continue
-        fin = query_finance(conn, code)
-        intra = query_intraday(conn, code, market, "1m") if require_intraday else None
-        intra_ndays = None
-        if require_intraday:
-            intra_ndays = query_intraday_ndays(
-                conn, code, market, cfg["tail_mom_lookback"], "1m")
-        r = diagnose(market, code, conn, pod, bars_1d, fin, intra, intra_ndays,
-                     cfg, rps_baseline)
-        if r:
-            results.append(r)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = []
+        for m, c in universe:
+            pod = shm_reader.get(c)
+            if pod is None:
+                continue
+            bars_1d = bars_1d_all.get(c)
+            if not bars_1d:
+                continue
+            fin = fin_all.get(c)
+            intra = intra_all.get(c) if require_intraday else None
+            intra_ndays = intra_ndays_all.get(c) if require_intraday else None
+            futs.append(pool.submit(
+                _screen_one_compute, m, c, pod, bars_1d, fin,
+                intra, intra_ndays, cfg, rps_baseline))
+        for f in as_completed(futs):
+            try:
+                r = f.result()
+                if r:
+                    results.append(r)
+            except Exception:
+                pass
+    sys.stderr.write(f"[scalper] {workers} 线程计算 {len(futs)} 只耗时 {time.time() - t4:.1f}s\n")
     results.sort(key=lambda x: (-x.get("signal_score", 0), -x["gain_pct"]))
     return results
 
@@ -1166,6 +1333,7 @@ def main():
     ap.add_argument("--end", default="15:00", help="结束时间 HH:MM (默认 15:00)")
     ap.add_argument("--interval", type=int, default=30, help="刷新间隔秒 (默认 30)")
     ap.add_argument("--once", action="store_true", help="单次运行 (不循环)")
+    ap.add_argument("--workers", type=int, default=8, help="并发线程数 (默认 8)")
     args = ap.parse_args()
 
     cfg = dict(DEFAULTS)
@@ -1206,16 +1374,10 @@ def main():
     else:
         universe = [(parse_code(c)[0], parse_code(c)[1]) for c in zxg_codes()]
 
-    # 预过滤
+    # 预过滤 (仅按 shm 存活过滤, 表存在性由 query_1d try/except 兜底)
     if not args.code:
         shm_codes = set(shm.all_quotes().keys())
-        filtered = []
-        for m, c in universe:
-            if c not in shm_codes:
-                continue
-            if table_exists(conn, f"k_{m}{c}_1d"):
-                filtered.append((m, c))
-        universe = filtered
+        universe = [(m, c) for m, c in universe if c in shm_codes]
         sys.stderr.write(f"[scalper] 标的池: {len(universe)} 只\n")
 
     require_intraday = not args.no_intraday
@@ -1246,7 +1408,8 @@ def main():
             sys.stderr.write(f"[scalper] 第 {round_no} 轮筛选开始...\n")
             try:
                 results = screen(conn, universe, shm, cfg,
-                                 require_intraday=require_intraday)
+                                 require_intraday=require_intraday,
+                                 workers=args.workers)
                 elapsed = time.time() - t0
                 output = render_table(results, round_no, elapsed)
                 sys.stdout.write(output)
