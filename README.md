@@ -16,4 +16,20 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 ```bash
 python3 scripts/smmd.py --zxg   # SMMD 股市操纵检测（K-Means++ 聚类 + 启发式欺诈分类）
 python3 scripts/append.py       # 全市场增量补导（读 stock_name → vipdoc + 网络增量入库）
+python3 scripts/scalper.py      # 隔夜套利选股（14:30-15:00 循环, 写 WP.blk + scalper_pick + scalper-日期.csv）
+python3 scripts/scalper.py verify   # 选股验证（前日14:30-15:00均价买/当日9:30-10:00均价卖, 写 scalper_verify + verify.csv）
+```
+
+## 选股与验证持久化
+
+选股与验证结果同步落本地（csv/blk）与 TDengine（带日期戳, 方便查询统计）：
+
+| TDengine 超级表 | 子表 | 内容 |
+|---|---|---|
+| `scalper_pick` | `sp_{market}{code}` | 每日选股命中（涨幅/量比/换手/市值/VWAP/信号得分 + enhancement_json 全量信号） |
+| `scalper_verify` | `sv_{market}{code}` + `sv_total` | 验证收益（买卖均价/股数/成本/盈亏/收益率, 含合计行） |
+
+```sql
+SELECT DATE(ts) d, AVG(pnl_pct) FROM scalper_verify WHERE code<>'TOTAL' GROUP BY d ORDER BY d;  -- 战法每日表现
+SELECT code, signal_score FROM scalper_pick WHERE ts='2026-07-30';                              -- 某日选股
 ```

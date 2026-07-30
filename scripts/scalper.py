@@ -43,6 +43,29 @@ import taosws
 TDENGINE_URL = "taosws://root:taosdata@localhost:6041"
 DEFAULT_SHM = "/dev/shm/tdx_quotes.shm"
 ZXG_PATH = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk"
+WP_PATH = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/WP.blk"
+
+# 验证 (verify 子命令): 资金 10 万, 买入=前日 14:30-15:00 算术均价, 卖出=当日 9:30-10:00 算术均价
+VERIFY_CAPITAL = 100000.0
+VERIFY_CSV = "output/scalper/verify.csv"
+VERIFY_FIELDS = ["verify_date", "code", "name", "buy_date", "buy_price", "buy_bars",
+                 "sell_date", "sell_price", "sell_bars", "shares", "cost", "income",
+                 "pnl", "pnl_pct"]
+
+# TDengine 持久化超级表 (对齐项目惯例: kline/finance 的 STable + 子表 + TAGS 模式)
+PICK_DDL = (
+    "CREATE STABLE IF NOT EXISTS scalper_pick ("
+    "ts TIMESTAMP, price DOUBLE, gain_pct DOUBLE, vol_ratio DOUBLE, "
+    "turnover_pct DOUBLE, cap_yi DOUBLE, vwap_above_ratio DOUBLE, "
+    "signal_score DOUBLE, signal_hit INT, signal_total INT, "
+    "enhancement_json VARCHAR(4096)) "
+    "TAGS (code VARCHAR(10), market VARCHAR(2), name VARCHAR(64))")
+VERIFY_DDL = (
+    "CREATE STABLE IF NOT EXISTS scalper_verify ("
+    "ts TIMESTAMP, buy_date VARCHAR(10), buy_price DOUBLE, buy_bars INT, "
+    "sell_price DOUBLE, sell_bars INT, shares DOUBLE, cost DOUBLE, "
+    "income DOUBLE, pnl DOUBLE, pnl_pct DOUBLE) "
+    "TAGS (code VARCHAR(10), market VARCHAR(2), name VARCHAR(64))")
 
 # shm 二进制布局 (与 include/tdx/shm/{segment,snapshot,payload}.hpp 一致)
 POD_FMT = "< q 27d"  # datetime(i64) + 27×double = 224B
@@ -279,6 +302,31 @@ def table_exists(conn, tbl):
     return False
 
 
+def fetch_recent_1m(conn, market, code, days=7):
+    """取最近 days 天 1m bar → [(ts, close)]。verify 专用。"""
+    tbl = f"tdx.k_{market}{code}_1m"
+    try:
+        r = conn.query(f"SELECT ts, close FROM {tbl} WHERE ts > NOW() - {days}d ORDER BY ts")
+    except Exception:
+        return []
+    out = []
+    for row in r:
+        ts = _parse_ts(row[0])
+        if not hasattr(ts, "date"):
+            continue
+        out.append((ts, float(row[1])))
+    return out
+
+
+def window_avg(bars, target_date, hm_lo, hm_hi):
+    """target_date 上 [hm_lo, hm_hi) 分钟 close 算术平均 → (avg, n)。"""
+    picks = [c for ts, c in bars
+             if ts.date() == target_date and hm_lo <= ts.hour * 100 + ts.minute < hm_hi]
+    if not picks:
+        return None, 0
+    return sum(picks) / len(picks), len(picks)
+
+
 # ---------------------------------------------------------------------------
 # 标的池
 # ---------------------------------------------------------------------------
@@ -309,6 +357,22 @@ def all_mainboard_codes(conn):
         return [(m, c) for c, m in r]
     except Exception:
         return []
+
+
+def read_wp_blk(path=WP_PATH):
+    """读 WP.blk → [(market, code)]。每行 '前缀(1=sh/0=sz)+6位代码', 跳过 '1999999' 头标记。"""
+    out = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line == "1999999" or len(line) < 7:
+                    continue
+                if line[0] in "01" and line[1:7].isdigit():
+                    out.append(("sh" if line[0] == "1" else "sz", line[1:7]))
+    except FileNotFoundError:
+        pass
+    return out
 
 
 def parse_code(code):
@@ -871,9 +935,222 @@ def wait_until(target_dt):
 
 
 # ---------------------------------------------------------------------------
+# 验证流程 (verify 子命令)
+# ---------------------------------------------------------------------------
+def run_verify(args):
+    conn = get_conn()
+    ensure_scalper_tables(conn)
+    names = {}
+    try:
+        for m, c, n in conn.query("SELECT market, code, name FROM tdx.stock_name"):
+            names[(m, c)] = n
+    except Exception:
+        pass
+
+    stocks = read_wp_blk(args.wp)
+    if not stocks:
+        sys.stderr.write(f"[verify] {args.wp} 无标的 (需先在前一交易日 14:30 运行选股写入 WP.blk)\n")
+        return 1
+    sys.stderr.write(f"[verify] {args.wp} 读到 {len(stocks)} 只标的\n")
+
+    if args.date:
+        today = datetime.strptime(args.date, "%Y-%m-%d").date()
+    else:
+        today = datetime.now().date()
+
+    # 卖出窗口 [09:30,10:00) 当日: 实时验证时等待至 10:00, 避免数据不全
+    if not args.no_wait and not args.date:
+        wait_until(today_at(10, 0))
+
+    capital = VERIFY_CAPITAL
+    per = capital / len(stocks)
+    rows, total_pnl, valid = [], 0.0, 0
+    for market, code in stocks:
+        bars = fetch_recent_1m(conn, market, code, args.days)
+        dates_before = sorted({ts.date() for ts, _ in bars if ts.date() < today})
+        buy_date = dates_before[-1] if dates_before else None
+        buy, bn = window_avg(bars, buy_date, 1430, 1500) if buy_date else (None, 0)
+        sell, sn = window_avg(bars, today, 930, 1000)
+
+        row = {
+            "verify_date": today.strftime("%Y-%m-%d"),
+            "code": f"{market}{code}", "name": names.get((market, code), ""),
+            "buy_date": buy_date.strftime("%Y-%m-%d") if buy_date else "",
+            "buy_price": round(buy, 4) if buy else "",
+            "buy_bars": bn,
+            "sell_date": today.strftime("%Y-%m-%d") if sell else "",
+            "sell_price": round(sell, 4) if sell else "",
+            "sell_bars": sn,
+            "shares": "", "cost": "", "income": "", "pnl": "", "pnl_pct": "",
+        }
+        if buy and sell and buy > 0:
+            shares = per / buy  # ponytail: 连续股数不取整, 实盘 100 股最小单位 + 手续费/印花税未计
+            income = shares * sell
+            pnl = income - per
+            row.update(shares=round(shares), cost=round(per, 2),
+                       income=round(income, 2), pnl=round(pnl, 2),
+                       pnl_pct=round((sell - buy) / buy * 100, 2))
+            total_pnl += pnl
+            valid += 1
+        rows.append(row)
+
+    total_pct = total_pnl / capital * 100
+    rows.append({
+        "verify_date": today.strftime("%Y-%m-%d"),
+        "code": "TOTAL", "name": f"{valid}/{len(stocks)}有效",
+        "buy_date": "", "buy_price": "", "buy_bars": "",
+        "sell_date": "", "sell_price": "", "sell_bars": "",
+        "shares": "", "cost": round(capital, 2), "income": "",
+        "pnl": round(total_pnl, 2), "pnl_pct": round(total_pct, 2),
+    })
+
+    append_verify_csv(args.out, rows, today.strftime("%Y-%m-%d"))
+    upsert_verify(conn, rows, today.strftime("%Y-%m-%d"))
+    print_verify(rows, capital)
+    return 0
+
+
+def append_verify_csv(out_path, rows, date_str):
+    """追加验证行到 CSV, 同日去重 (重跑覆盖当日)。"""
+    import csv
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    kept = []
+    if os.path.exists(out_path):
+        with open(out_path, newline="") as f:
+            for r in csv.DictReader(f):
+                if r.get("verify_date") != date_str:
+                    kept.append(r)
+    with open(out_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=VERIFY_FIELDS)
+        w.writeheader()
+        for r in kept + rows:
+            w.writerow({k: r.get(k, "") for k in VERIFY_FIELDS})
+    n = sum(1 for r in rows if r["code"] != "TOTAL")
+    sys.stderr.write(f"[verify] → {out_path} (当日 {n} 只 + 汇总)\n")
+
+
+def print_verify(rows, capital):
+    n = sum(1 for r in rows if r["code"] != "TOTAL")
+    lines = [f"=== 隔夜套利战法验证 ===  {time.strftime('%Y-%m-%d %H:%M:%S')}",
+             f"资金 {capital:.0f} 元, 等额分配 {capital / max(1, n):.0f} 元/只",
+             f"{'代码':<10}{'名称':<8}{'买价':>9}{'卖价':>9}{'盈亏':>10}{'收益%':>8}",
+             "-" * 60]
+    for r in rows:
+        if r["code"] == "TOTAL":
+            lines.append("-" * 60)
+            lines.append(f"{('合计 ' + r['name']):<18}{'':>9}{'':>9}{r['pnl']:>10.2f}{r['pnl_pct']:>8.2f}")
+        elif r["pnl"] == "":
+            bp, sp = r["buy_price"] or "-", r["sell_price"] or "-"
+            lines.append(f"{r['code']:<10}{r['name']:<8}{bp:>9}{sp:>9}{'缺数据':>10}{'-':>8}")
+        else:
+            lines.append(f"{r['code']:<10}{r['name']:<8}{r['buy_price']:>9}{r['sell_price']:>9}"
+                         f"{r['pnl']:>10.2f}{r['pnl_pct']:>8.2f}")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+# ---------------------------------------------------------------------------
+# TDengine 持久化 (选股/验证结果带日期戳入库, 方便查询统计)
+# ---------------------------------------------------------------------------
+def _esc(v):
+    return str(v).replace("'", "''")
+
+
+def _num(v):
+    """数值 → SQL 字面量, None/空串 → NULL。"""
+    if v is None or v == "":
+        return "NULL"
+    try:
+        return repr(float(v))
+    except (TypeError, ValueError):
+        return "NULL"
+
+
+def ensure_scalper_tables(conn):
+    conn.execute("USE tdx")
+    conn.execute(PICK_DDL)
+    conn.execute(VERIFY_DDL)
+
+
+def _day_window(date_str):
+    """返回 [date_str, 次日) 的 SQL 时间窗 (DELETE 必须带时间窗)。"""
+    nxt = (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    return f"ts >= '{date_str}' AND ts < '{nxt}'"
+
+
+def upsert_pick(conn, results, pick_date):
+    """选股结果 upsert scalper_pick (ts=当日0点)。幂等: 先删当日窗再插。"""
+    if not results:
+        return
+    ts = f"{pick_date} 00:00:00"
+    try:
+        conn.execute(f"DELETE FROM scalper_pick WHERE {_day_window(pick_date)}")
+    except Exception as e:
+        sys.stderr.write(f"[pick-td] DELETE 失败: {e}\n")
+    for r in results:
+        full = r["code"]  # sh603580
+        market, code = full[:2], full[2:]
+        enh = json.dumps(r.get("enhancements", {}), ensure_ascii=False)
+        sql = (f"INSERT INTO sp_{market}{code} USING scalper_pick "
+               f"TAGS('{_esc(code)}','{market}','{_esc(r.get('name', ''))}') VALUES("
+               f"'{ts}',{_num(r.get('price'))},{_num(r.get('gain_pct'))},"
+               f"{_num(r.get('vol_ratio'))},{_num(r.get('turnover_pct'))},"
+               f"{_num(r.get('cap_yi'))},{_num(r.get('vwap_above_ratio'))},"
+               f"{_num(r.get('signal_score'))},{int(r.get('signal_hit') or 0)},"
+               f"{int(r.get('signal_total') or 0)},'{_esc(enh)}')")
+        try:
+            conn.execute(sql)
+        except Exception as e:
+            sys.stderr.write(f"[pick-td] {full} 写入失败: {e}\n")
+    sys.stderr.write(f"[pick-td] → scalper_pick ({len(results)} 只)\n")
+
+
+def upsert_verify(conn, rows, verify_date):
+    """验证结果 upsert scalper_verify (ts=验证日0点, 含 TOTAL 汇总行)。"""
+    ts = f"{verify_date} 00:00:00"
+    try:
+        conn.execute(f"DELETE FROM scalper_verify WHERE {_day_window(verify_date)}")
+    except Exception as e:
+        sys.stderr.write(f"[verify-td] DELETE 失败: {e}\n")
+    n = 0
+    for r in rows:
+        full = r["code"]  # sh603580 或 TOTAL
+        if full == "TOTAL":
+            sub, market, code = "sv_total", "", "TOTAL"
+        else:
+            market, code = full[:2], full[2:]
+            sub = f"sv_{market}{code}"
+        sql = (f"INSERT INTO {sub} USING scalper_verify "
+               f"TAGS('{_esc(code)}','{market}','{_esc(r.get('name', ''))}') VALUES("
+               f"'{ts}','{_esc(r.get('buy_date', ''))}',{_num(r.get('buy_price'))},"
+               f"{int(r.get('buy_bars') or 0)},{_num(r.get('sell_price'))},"
+               f"{int(r.get('sell_bars') or 0)},{_num(r.get('shares'))},"
+               f"{_num(r.get('cost'))},{_num(r.get('income'))},{_num(r.get('pnl'))},"
+               f"{_num(r.get('pnl_pct'))})")
+        try:
+            conn.execute(sql)
+            if full != "TOTAL":
+                n += 1
+        except Exception as e:
+            sys.stderr.write(f"[verify-td] {full} 写入失败: {e}\n")
+    sys.stderr.write(f"[verify-td] → scalper_verify ({n} 只 + 汇总)\n")
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 def main():
+    # verify 子命令: 验证前日尾盘选股的隔夜套利收益
+    if len(sys.argv) > 1 and sys.argv[1] == "verify":
+        ap = argparse.ArgumentParser(prog="scalper.py verify",
+                                     description="隔夜套利验证: 买入=前日14:30-15:00均价, 卖出=当日9:30-10:00均价")
+        ap.add_argument("--wp", default=WP_PATH, help="板块文件 (默认 WP.blk)")
+        ap.add_argument("--date", help="验证日期 YYYY-MM-DD (默认今天, 用于回测)")
+        ap.add_argument("--days", type=int, default=7, help="回看天数 (回测远日时调大)")
+        ap.add_argument("--no-wait", action="store_true", help="不等 10:00, 立即计算")
+        ap.add_argument("--out", default=VERIFY_CSV, help="输出 CSV 路径")
+        return run_verify(ap.parse_args(sys.argv[2:]))
+
     ap = argparse.ArgumentParser(description="隔夜套利战法选股 (六步法则 + 增强信号) —— 尾盘循环版")
     ap.add_argument("--all", action="store_true", help="全量主板标的 (默认仅自选股)")
     ap.add_argument("--code", help="单股诊断 (如 sh600000)")
@@ -910,7 +1187,7 @@ def main():
         return 1
 
     conn = get_conn()
-    conn.execute("USE tdx")
+    ensure_scalper_tables(conn)
 
     # 股票名称对照
     names = {}
@@ -976,11 +1253,10 @@ def main():
                 sys.stdout.flush()
                 # 保存结果
                 if results:
-                    blk_dir = os.path.expanduser(
-                        "~/.local/share/tdxcfv/drive_c/tc/T0002/blocknew")
+                    blk_dir = os.path.dirname(WP_PATH)
                     os.makedirs(blk_dir, exist_ok=True)
                     # WP.blk (通达信自选板块)
-                    with open(os.path.join(blk_dir, "WP.blk"), "w", newline="") as f:
+                    with open(WP_PATH, "w", newline="") as f:
                         f.write("1999999\r\n")
                         for r in results:
                             full = r["code"]
@@ -1002,6 +1278,7 @@ def main():
                                 row[k] = f"{v:.3f}" if isinstance(v, float) else v
                             w.writerow(row)
                     sys.stderr.write(f"[csv] → {csv_file}\n")
+                    upsert_pick(conn, results, time.strftime("%Y-%m-%d"))
             except Exception as e:
                 elapsed = time.time() - t0
                 sys.stderr.write(f"[scalper] 第 {round_no} 轮异常: {e}\n")
