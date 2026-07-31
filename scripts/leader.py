@@ -24,9 +24,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import taosws
+from common import ZXG_PATH, all_mainboard_codes, parse_code, zxg_codes
 
 TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041")
-ZXG_PATH = os.environ.get("TDX_ZXG_BLK", "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk")
 
 # 板块指数 → 板块映射 (用于判断股票所属板块强度)
 SECTOR_INDICES = {
@@ -51,19 +51,6 @@ CODE_SECTOR_MAP = [
 
 def connect():
     return taosws.connect(TDENGINE_URL)
-
-
-def parse_code(code):
-    code = code.strip().lower()
-    if code[:2] in ("sh", "sz", "bj"):
-        return code[:2], code[2:]
-    if code.startswith(("60", "68", "99")):
-        return "sh", code
-    if code.startswith(("00", "30", "39")):
-        return "sz", code
-    if code.startswith(("8", "4")):
-        return "bj", code
-    return "sh", code
 
 
 def fetch_kline(conn, market, code, cycle="1d", days=400, min_rows=2):
@@ -120,19 +107,6 @@ def batch_fetch_klines(conn, pool, days=400):
     return out
 
 
-def zxg_codes(path=ZXG_PATH):
-    codes = []
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if len(line) >= 7 and line[0] in "01":
-                    codes.append(("sh" if line[0] == "1" else "sz") + line[1:7])
-    except FileNotFoundError:
-        pass
-    return codes
-
-
 def load_stock_names(conn):
     """加载 {(market, code): name} 对照表。"""
     names = {}
@@ -143,22 +117,6 @@ def load_stock_names(conn):
     except Exception:
         pass
     return names
-
-
-def all_mainboard_codes(conn):
-    """全量 A 股标的 (SH/SZ/BJ 三市场, 排除基金/指数/B股/债券/回购)。"""
-    try:
-        r = conn.query(
-            "SELECT code, market FROM tdx.stock_name "
-            "WHERE market IN ('sh','sz','bj') AND ("
-            "  code LIKE '60%' OR code LIKE '68%'"      # SH 主板 / 科创板
-            "  OR code LIKE '00%' OR code LIKE '30%'"   # SZ 主板 / 创业板
-            "  OR code LIKE '43%' OR code LIKE '83%' OR code LIKE '87%' OR code LIKE '920%'"  # BJ 北交所
-            ")"
-        )
-        return [(m, c) for c, m in r]
-    except Exception:
-        return []
 
 
 # ---------------------------------------------------------------------------

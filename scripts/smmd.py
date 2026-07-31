@@ -29,12 +29,12 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import taosws
+from common import parse_code, zxg_codes
 
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
 TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041")
-ZXG_PATH = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk"
 
 FEATURE_COLS = ["dPct", "range", "sigma30", "SV", "STurn", "VWAP", "Pavg"]
 
@@ -44,19 +44,6 @@ FEATURE_COLS = ["dPct", "range", "sigma30", "SV", "STurn", "VWAP", "Pavg"]
 # ---------------------------------------------------------------------------
 def connect():
     return taosws.connect(TDENGINE_URL)
-
-
-def parse_code(code):
-    code = code.strip().lower()
-    if code[:2] in ("sh", "sz", "bj"):
-        return code[:2], code[2:]
-    if code.startswith(("60", "68", "99")):
-        return "sh", code
-    if code.startswith(("00", "30", "39")):
-        return "sz", code
-    if code.startswith(("8", "4")):
-        return "bj", code
-    return "sh", code
 
 
 def fetch_kline(conn, market, code, days=365 * 12):
@@ -78,19 +65,6 @@ def fetch_kline(conn, market, code, days=365 * 12):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna().reset_index(drop=True)
     return df if len(df) >= 60 else None
-
-
-def zxg_codes(path=ZXG_PATH):
-    codes = []
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if len(line) >= 7 and line[0] in "01":
-                    codes.append(("sh" if line[0] == "1" else "sz") + line[1:7])
-    except FileNotFoundError:
-        pass
-    return codes
 
 
 def all_mainboard_codes(conn):
