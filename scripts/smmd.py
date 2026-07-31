@@ -29,7 +29,8 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import taosws
-from common import parse_code, zxg_codes
+from common import (parse_code, zxg_codes, all_mainboard_codes,
+                    apply_qfq, batch_fetch_adjust)
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -65,17 +66,6 @@ def fetch_kline(conn, market, code, days=365 * 12):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna().reset_index(drop=True)
     return df if len(df) >= 60 else None
-
-
-def all_mainboard_codes(conn):
-    try:
-        r = conn.query(
-            "SELECT code, market FROM tdx.stock_name "
-            "WHERE code LIKE '60%' OR code LIKE '00%' OR code LIKE '30%'"
-        )
-        return [(m, c) for c, m in r]
-    except Exception:
-        return []
 
 
 # ---------------------------------------------------------------------------
@@ -377,12 +367,15 @@ def main():
 
     print(f"[pool] {len(pool)} stocks")
 
-    # 拉数据 + 特征
+    # 拉数据 + 前复权 + 特征
+    adj_by_mc = batch_fetch_adjust(conn, pool)
+    print(f"[fetch] {len(adj_by_mc)} 只有除权事件 (应用前复权)")
     all_features = []
     for i, (m, c) in enumerate(pool):
         df = fetch_kline(conn, m, c, days=args.days)
         if df is None:
             continue
+        df = apply_qfq(df, adj_by_mc.get((m, c)))
         df = engineer(df)
         all_features.append((m, c, df))
         if (i + 1) % 50 == 0:

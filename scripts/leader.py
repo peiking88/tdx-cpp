@@ -24,7 +24,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import taosws
-from common import ZXG_PATH, all_mainboard_codes, parse_code, zxg_codes
+from common import (ZXG_PATH, all_mainboard_codes, parse_code, zxg_codes,
+                    apply_qfq, batch_fetch_adjust)
 
 TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041")
 
@@ -75,26 +76,28 @@ def fetch_kline(conn, market, code, cycle="1d", days=400, min_rows=2):
 
 
 def batch_fetch_klines(conn, pool, days=400):
-    """批量查全市场 1d → {code: DataFrame}。一次查询替代 N 次逐股 fetch_kline。
+    """批量查全市场 1d → {(market, code): DataFrame}。一次查询替代 N 次逐股 fetch_kline。
 
+    按 (market, code) 聚合: tdx.kline 超级表虽有 market tag, 但同 code 不同市场是独立
+    子表 (如 k_sh000027 / k_sz000027); 若按 code 聚合会丢失 market 维度导致混合。
     只保留 >=252 行的标的 (score_stock 需 250 周期指标)。
     """
     try:
         r = conn.query(
-            f"SELECT code, ts, open, high, low, close, volume, amount "
+            f"SELECT market, code, ts, open, high, low, close, volume, amount "
             f"FROM tdx.kline WHERE cycle='1d' AND ts > NOW() - {days}d"
         )
     except Exception as e:
         sys.stderr.write(f"[error] 批量查询日线失败: {e}\n")
         return {}
-    want = {c for _, c in pool}
-    by_code = {}
-    for code, ts, o, h, l, c, v, amt in r:
-        if code not in want:
+    want = {(m, c) for m, c in pool}
+    by_mc = {}
+    for m, code, ts, o, h, l, c, v, amt in r:
+        if (m, code) not in want:
             continue
-        by_code.setdefault(code, []).append((ts, o, h, l, c, v, amt))
+        by_mc.setdefault((m, code), []).append((ts, o, h, l, c, v, amt))
     out = {}
-    for code, rows in by_code.items():
+    for mc, rows in by_mc.items():
         if len(rows) < 252:
             continue
         df = pd.DataFrame(rows, columns=["ts", "O", "H", "L", "C", "V", "amount"])
@@ -103,7 +106,7 @@ def batch_fetch_klines(conn, pool, days=400):
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna().reset_index(drop=True)
         if len(df) >= 252:
-            out[code] = df
+            out[mc] = df
     return out
 
 
@@ -210,8 +213,9 @@ def add_dmi(df, period=14):
     return df
 
 
-def _compute(m, c, df):
-    """线程池入口: 算指标 → (m, c, df)。"""
+def _compute(m, c, df, adj_events):
+    """线程池入口: 前复权 → 算指标 → (m, c, df)。"""
+    df = apply_qfq(df, adj_events)
     return m, c, add_indicators(df)
 
 
@@ -378,14 +382,17 @@ def main():
     for code, ret in sorted(sec_mom.items(), key=lambda x: -x[1]):
         print(f"  {SECTOR_INDICES.get(code, code):8s} {code}: {ret:+.2f}% (20d)")
 
-    # 批量拉日线 (一次查询替代 N 次) + 并发算指标
+    # 批量拉日线 (一次查询替代 N 次) + 批量复权事件
     print(f"[fetch] 批量拉取 {len(pool)} 只日线...")
     klines = batch_fetch_klines(conn, pool, days=400)
     print(f"[fetch] {len(klines)} 只有足够数据 (>=252 行)")
+    adj_by_mc = batch_fetch_adjust(conn, pool)
+    print(f"[fetch] {len(adj_by_mc)} 只有除权事件 (应用前复权)")
 
     all_features = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = [ex.submit(_compute, m, c, klines[c]) for m, c in pool if c in klines]
+        futs = [ex.submit(_compute, m, c, klines[(m, c)], adj_by_mc.get((m, c)))
+                for m, c in pool if (m, c) in klines]
         for f in as_completed(futs):
             try:
                 all_features.append(f.result())

@@ -37,8 +37,10 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
+import pandas as pd
 import taosws
-from common import all_mainboard_codes, parse_code, zxg_codes
+from common import (all_mainboard_codes, parse_code, zxg_codes,
+                    apply_qfq, batch_fetch_adjust)
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -230,50 +232,80 @@ def _parse_ts(ts):
 
 
 def batch_query_1d(conn, days):
-    """全市场 1d 批量查询 → {code: [bars]}。一次查询替代 N 次逐股查询。"""
+    """全市场 1d 批量查询 → {(market, code): [bars]}。一次查询替代 N 次逐股查询。
+
+    按 (market, code) 聚合: tdx.kline 同 code 不同市场是独立子表 (如 k_sh000001
+    上证指数 / k_sz000001 平安银行), 按 code 聚合会混合两者数据。
+    """
     try:
         r = conn.query(
-            f"SELECT code, ts, open, high, low, close, volume, amount "
+            f"SELECT market, code, ts, open, high, low, close, volume, amount "
             f"FROM tdx.kline WHERE cycle='1d' AND ts > NOW() - {days + 5}d"
         )
     except Exception:
         return {}
     out = defaultdict(list)
     for row in r:
-        code = row[0]
-        ts = _parse_ts(row[1])
-        out[code].append({
-            "ts": ts, "open": row[2], "high": row[3], "low": row[4],
-            "close": row[5], "volume": float(row[6] or 0), "amount": float(row[7] or 0),
+        m, code = row[0], row[1]
+        ts = _parse_ts(row[2])
+        out[(m, code)].append({
+            "ts": ts, "open": row[3], "high": row[4], "low": row[5],
+            "close": row[6], "volume": float(row[7] or 0), "amount": float(row[8] or 0),
         })
-    for code in out:
-        out[code].sort(key=lambda b: b["ts"])
+    for mc in out:
+        out[mc].sort(key=lambda b: b["ts"])
     return out
 
 
+def _apply_qfq_bars(bars, events):
+    """dict 列表版前复权 (借 common.apply_qfq)。仅改 OHLC, vol/amount 不变。
+
+    scalper 的 bars 是 [{ts, open, high, low, close, volume, amount}, ...],
+    转 DataFrame 复权后写回, 消除除权跳变对 calc_rps/has_limit_up 等跨日指标的影响。
+    """
+    if not events or not bars:
+        return bars
+    df = pd.DataFrame({
+        "ts": pd.to_datetime([b["ts"] for b in bars]),
+        "O": [b["open"] for b in bars],
+        "H": [b["high"] for b in bars],
+        "L": [b["low"] for b in bars],
+        "C": [b["close"] for b in bars],
+        "V": [b["volume"] for b in bars],
+        "amount": [b["amount"] for b in bars],
+    })
+    df = apply_qfq(df, events)
+    for i, b in enumerate(bars):
+        b["open"] = df["O"].iloc[i]
+        b["high"] = df["H"].iloc[i]
+        b["low"] = df["L"].iloc[i]
+        b["close"] = df["C"].iloc[i]
+    return bars
+
+
 def batch_query_intraday(conn, cycle="1m", days=None):
-    """全市场分钟线批量查询 → {code: [bars]}。days=None 查当日, 否则查最近 days 天。"""
+    """全市场分钟线批量查询 → {(market, code): [bars]}。days=None 查当日, 否则查最近 days 天。"""
     if days is None:
         where = f"cycle='{cycle}' AND ts >= TODAY()"
     else:
         where = f"cycle='{cycle}' AND ts > NOW() - {days + 2}d"
     try:
         r = conn.query(
-            f"SELECT code, ts, open, high, low, close, volume, amount "
+            f"SELECT market, code, ts, open, high, low, close, volume, amount "
             f"FROM tdx.kline WHERE {where}"
         )
     except Exception:
         return {}
     out = defaultdict(list)
     for row in r:
-        code = row[0]
-        ts = _parse_ts(row[1])
-        out[code].append({
-            "ts": ts, "open": row[2], "high": row[3], "low": row[4],
-            "close": row[5], "volume": float(row[6] or 0), "amount": float(row[7] or 0),
+        m, code = row[0], row[1]
+        ts = _parse_ts(row[2])
+        out[(m, code)].append({
+            "ts": ts, "open": row[3], "high": row[4], "low": row[5],
+            "close": row[6], "volume": float(row[7] or 0), "amount": float(row[8] or 0),
         })
-    for code in out:
-        out[code].sort(key=lambda b: b["ts"])
+    for mc in out:
+        out[mc].sort(key=lambda b: b["ts"])
     return out
 
 
@@ -292,21 +324,21 @@ def batch_query_intraday_ndays(conn, cycle="1m", days=20, workers=8):
     def _query_chunk(chunk_where):
         try:
             r = conn.query(
-                f"SELECT code, ts, close FROM tdx.kline "
+                f"SELECT market, code, ts, close FROM tdx.kline "
                 f"WHERE cycle='{cycle}' AND ts > NOW() - {days + 2}d "
                 f"AND (TIMETRUNCATE(ts, 1d) + {TAIL_MS}) <= ts "
                 f"AND ({chunk_where})"
             )
             local = defaultdict(list)
             for row in r:
-                code = row[0]
-                ts = _parse_ts(row[1])
-                local[code].append({
+                m, code = row[0], row[1]
+                ts = _parse_ts(row[2])
+                local[(m, code)].append({
                     "ts": ts, "open": None, "high": None, "low": None,
-                    "close": row[2], "volume": 0.0, "amount": 0.0,
+                    "close": row[3], "volume": 0.0, "amount": 0.0,
                 })
-            for code in local:
-                local[code].sort(key=lambda b: b["ts"])
+            for mc in local:
+                local[mc].sort(key=lambda b: b["ts"])
             return local
         except Exception:
             return {}
@@ -322,7 +354,11 @@ def batch_query_intraday_ndays(conn, cycle="1m", days=20, workers=8):
 
 
 def batch_query_finance(conn):
-    """全市场财务批量查询 → {code: {liutongguben, zongguben}}。取每只股最新一行。"""
+    """全市场财务批量查询 → {code: {liutongguben, zongguben}}。取每只股最新一行。
+
+    finance 表仅 code tag (无 market), 但按 code 安全: 指数/无财务标的不入此表,
+    故 sh000001(上证指数) 与 sz000001(平安银行) 不会在 finance 冲突。下游 fin_all.get(code)。
+    """
     try:
         r = conn.query(
             "SELECT code, LAST(liutongguben), LAST(zongguben) FROM tdx.finance GROUP BY code"
@@ -525,26 +561,19 @@ def calc_vol_high(bars_1d, lookback, mult=1.0):
             "max_past": round(max_past, 0), "avg_mult": round(avg_mult, 2)}
 
 
-def build_market_rps_baseline(conn, periods, baseline_days):
-    by_code = defaultdict(list)
-    try:
-        r = conn.query(
-            f"SELECT code, close FROM tdx.kline "
-            f"WHERE cycle='1d' AND (code LIKE '60%' OR code LIKE '00%') "
-            f"AND ts > NOW() - {baseline_days}d"
-        )
-        for code, close in r:
-            if close is not None:
-                by_code[code].append(close)
-    except Exception:
-        return {}
+def build_market_rps_baseline(bars_1d_all, periods):
+    """全市场 RPS 基线 → {period: 排序后的 ret% 列表}。
 
+    直接用已前复权的 bars_1d_all ({(market,code): bars}) 计算, 避免重复全表查询
+    且保证复权一致 (原实现查未复权 close, 除权跳变污染 ret 分位)。
+    样本为全市场个股 (已排除指数), 比原 '60%|00%' 前缀更完整、且无 market 混合。
+    """
     baseline = {}
     for p in periods:
         rets = []
-        for closes in by_code.values():
-            if len(closes) > p:
-                cur, past = closes[-1], closes[-1 - p]
+        for bars in bars_1d_all.values():
+            if len(bars) > p:
+                cur, past = bars[-1]["close"], bars[-1 - p]["close"]
                 if past > 0:
                     rets.append((cur - past) / past * 100)
         rets.sort()
@@ -803,16 +832,20 @@ def prefetch_daily(conn, cfg, workers):
 
     RPS 基线/1d/财务纯历史当日不变; N天1m 供尾盘动量因子 (看历史多日模式, 当日
     贡献小), 盘中缓存可接受。→ (rps_baseline, bars_1d_all, fin_all, intra_ndays_all)
+
+    1d 日线拉取后批量应用前复权 (消除除权跳变), RPS 基线复用复权后的 bars 算。
     """
     t0 = time.time()
-    rps_baseline = build_market_rps_baseline(
-        conn, cfg["rps_periods"], cfg["rps_baseline_days"])
     bars_1d_all = batch_query_1d(conn, cfg["lookback_days"])
+    adj_by_mc = batch_fetch_adjust(conn, list(bars_1d_all.keys()))
+    for mc in bars_1d_all:
+        bars_1d_all[mc] = _apply_qfq_bars(bars_1d_all[mc], adj_by_mc.get(mc))
+    rps_baseline = build_market_rps_baseline(bars_1d_all, cfg["rps_periods"])
     fin_all = batch_query_finance(conn)
     intra_ndays_all = batch_query_intraday_ndays(
         conn, "1m", days=cfg["tail_mom_lookback"], workers=workers)
     sys.stderr.write(
-        f"[scalper] 日频预取 (RPS基线/1d/财务/N天1m) 耗时 {time.time() - t0:.1f}s\n")
+        f"[scalper] 日频预取 (1d复权/RPS基线/财务/N天1m) 耗时 {time.time() - t0:.1f}s\n")
     return rps_baseline, bars_1d_all, fin_all, intra_ndays_all
 
 
@@ -836,12 +869,12 @@ def screen(conn, universe, shm_reader, cfg, names, daily,
             pod = shm_reader.get(c)
             if pod is None:
                 continue
-            bars_1d = bars_1d_all.get(c)
+            bars_1d = bars_1d_all.get((m, c))
             if not bars_1d:
                 continue
-            fin = fin_all.get(c)
-            intra = intra_all.get(c) if require_intraday else None
-            intra_ndays = intra_ndays_all.get(c) if require_intraday else None
+            fin = fin_all.get(c)  # finance 仅 code tag, 按 code 取 (指数无财务, 不混合)
+            intra = intra_all.get((m, c)) if require_intraday else None
+            intra_ndays = intra_ndays_all.get((m, c)) if require_intraday else None
             futs.append(pool.submit(
                 _screen_one_compute, m, c, pod, bars_1d, fin,
                 intra, intra_ndays, cfg, names, rps_baseline))
