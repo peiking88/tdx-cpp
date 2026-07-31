@@ -863,7 +863,7 @@ def screen(conn, universe, shm_reader, cfg, names, daily,
 # 表格渲染
 # ---------------------------------------------------------------------------
 def render_table(results, round_no, elapsed_sec):
-    """ANSI 清屏 + 表格输出。"""
+    """ANSI 清屏 + 表格输出 (基础指标 + 增强信号合并到一张表)。"""
     ts = time.strftime("%H:%M:%S")
     lines = []
     lines.append("\033[2J\033[H")  # 清屏
@@ -873,69 +873,89 @@ def render_table(results, round_no, elapsed_sec):
 
     if not results:
         lines.append("  暂无标的通过六步法则。")
+        lines.append("")
+        lines.append("⚔ 铁的纪律: 次日早盘 (10:30 前) 无论盈亏必须清仓，持股不超 4 小时。")
         return "\n".join(lines) + "\n"
 
-    # 汇总表
+    # 表头: 基础指标 + 增强信号
     hdr = (f"{'代码':<10}{'现价':>8}{'涨幅%':>8}{'量比':>7}{'换手%':>8}"
-           f"{'市值亿':>10}{'VWAP上':>8}{'得分':>6}{'行情时间':>10}")
+           f"{'市值亿':>10}{'VWAP上':>8}{'尾盘动量':>10}{'VWEMA':>9}"
+           f"{'量能':>8}{'RPS':>7}{'MA':>7}{'突破':>10}{'得分':>6}")
     lines.append(hdr)
     lines.append("-" * len(hdr))
-    for r in results:
-        vwap_s = f"{r['vwap_above_ratio']*100:.0f}%" if r.get('vwap_above_ratio') is not None else "N/A"
-        vr_s = f"{r['vol_ratio']:.2f}" if r.get('vol_ratio') is not None else "N/A"
-        score = r.get('signal_score', 0)
-        score_s = f"{score:.0%}" if score is not None else "N/A"
-        # 得分 ≥60% 标红高亮
-        if score >= 0.6:
-            score_s = f"\033[1;33m{score_s}\033[0m"
-        lines.append(f"{r['code']:<10}{r['price']:>8.2f}{r['gain_pct']:>8.2f}{vr_s:>7}"
-                     f"{r['turnover_pct']:>8.2f}{r['cap_yi']:>10.2f}{vwap_s:>8}"
-                     f"{score_s:>6}{r['quote_time']:>10}")
 
-    # 增强信号详情
-    lines.append("")
-    lines.append("--- 增强信号详情 ---")
     for r in results:
         enh = r.get("enhancements", {})
-        parts = []
+
+        # 基础列
+        vwap_s = f"{r['vwap_above_ratio']*100:.0f}%" if r.get('vwap_above_ratio') is not None else "N/A"
+        vr_s = f"{r['vol_ratio']:.2f}" if r.get('vol_ratio') is not None else "N/A"
+
+        # 尾盘动量 (cos 符号 + 颜色)
         tm = enh.get("tail_mom")
-        if tm:
-            cos_s = f"cos={tm['cos']:+.3f}" if tm.get("cos") is not None else "cos=N/A"
-            ar_s = f"ar={tm['ar']:+.4f}" if tm.get("ar") is not None else "ar=N/A"
-            parts.append(f"尾盘动量({cos_s},{ar_s},{tm['days']}日)")
-        if "vwema_diverging" in enh:
-            tag = "向上发散" if enh["vwema_diverging"] else "未发散"
-            parts.append(f"VWEMA{tag}({enh.get('tail_vwema', '')})")
+        if tm and tm.get("cos") is not None:
+            cos_v = tm["cos"]
+            tm_s = f"{cos_v:+.2f}"
+            if cos_v > 0:
+                tm_s = f"\033[1;31m{tm_s}\033[0m"  # 红
+            else:
+                tm_s = f"\033[1;32m{tm_s}\033[0m"  # 绿
+        else:
+            tm_s = "-"
+
+        # VWEMA 发散
+        if enh.get("vwema_diverging") is True:
+            vw_s = "\033[1;31m↑发散\033[0m"
+        elif enh.get("vwema_diverging") is False:
+            vw_s = "─"
+        else:
+            vw_s = "-"
+
+        # 量能 (新高 / 均额倍数)
         vh = enh.get("vol_high")
         if vh:
-            tag = "新高" if vh["is_high"] else "未新高"
-            parts.append(f"量能{tag}({vh['avg_mult']:.2f}×均额)")
-        if "breakout_quality" in enh:
-            parts.append(f"突破{'真' if enh['breakout_quality'] else '假'}"
-                         f"(收盘高比{enh['close_high_ratio']:.2f},放量{'是' if enh['vol_expand'] else '否'})")
-        if "turnover_stable" in enh:
-            parts.append(f"换手{'稳' if enh['turnover_stable'] else '过松'}"
-                         f"(2日均{enh['turnover_2d_avg']:.1f}%)")
-        if "rps" in enh:
-            rps_str = ",".join(f"{p}日={v}" for p, v in enh["rps"].items())
-            parts.append(f"RPS({rps_str})")
-        if "ma_bullish_align" in enh:
-            parts.append(f"多头排列{'是' if enh['ma_bullish_align'] else '否'}")
-        if "ma_position" in enh:
-            ma_str = ",".join(
-                f"{p}日{'上↑' if i['above'] and i['rising'] else ('上→' if i['above'] else '下')}"
-                for p, i in enh["ma_position"].items()
-            )
-            parts.append(f"MA({ma_str})")
-        if "cpr" in enh:
-            c = enh["cpr"]
-            parts.append(f"CPR(上{c['upper']}/中{c['pivot']}/下{c['lower']})")
-        if parts:
-            lines.append(f"  {r['code']}: {' | '.join(parts)}")
+            tag = "\033[1;31m新高\033[0m" if vh["is_high"] else "─"
+            vh_s = f"{tag}{vh['avg_mult']:.1f}×"
+        else:
+            vh_s = "-"
+
+        # RPS (最大百分位)
+        rps = enh.get("rps") or {}
+        if rps:
+            rps_max = max(rps.values())
+            rps_s = f"{'★' if rps_max > 90 else ' '}{rps_max:.0f}"
+        else:
+            rps_s = "-"
+
+        # MA 排列
+        if enh.get("ma_bullish_align") is True:
+            ma_s = "\033[1;31m多排\033[0m"
+        elif enh.get("ma_bullish_align") is False:
+            ma_s = "─"
+        else:
+            ma_s = "-"
+
+        # 突破质量
+        if enh.get("breakout_quality") is True:
+            bq_s = "\033[1;31m真\033[0m"
+        elif enh.get("breakout_quality") is False:
+            bq_s = "假"
+        else:
+            bq_s = "-"
+
+        # 得分
+        score = r.get('signal_score', 0)
+        score_s = f"{score:.0%}" if score is not None else "-"
+        if score >= 0.6:
+            score_s = f"\033[1;33m{score_s}\033[0m"
+
+        lines.append(f"{r['code']:<10}{r['price']:>8.2f}{r['gain_pct']:>8.2f}{vr_s:>7}"
+                     f"{r['turnover_pct']:>8.2f}{r['cap_yi']:>10.2f}{vwap_s:>8}"
+                     f"{tm_s:>10}{vw_s:>9}{vh_s:>8}{rps_s:>7}{ma_s:>7}{bq_s:>10}{score_s:>6}")
 
     lines.append("")
     lines.append("⚔ 铁的纪律: 次日早盘 (10:30 前) 无论盈亏必须清仓，持股不超 4 小时。")
-    lines.append("📊 得分 = 增强信号命中数 / 信号总数，≥60% 为优选标的。")
+    lines.append("📊 得分 = 增强信号命中数 / 信号总数，≥60% 为优选标 (★=RPS>90)。")
     return "\n".join(lines) + "\n"
 
 

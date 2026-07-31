@@ -593,9 +593,9 @@ def main():
         return 1
     sys.stderr.write(f"shm 就绪（{os.path.getsize(shm)} B），{'拉起全屏 TUI' if viewer_mode else '开始行情'}\n")
 
-    # 闭市后自动退出（A 股 15:00；留 30min 缓冲处理尾盘行情，15:30 退）。
+    # 闭市后自动退出（A 股 15:00；留 5min 缓冲处理尾盘行情，15:05 退）。
     # 仅 --all 全量模式启用：自选股监控模式可能有意持续运行，不强制退。
-    MARKOUT_CLOSE_H, MARKOUT_CLOSE_M = 15, 30
+    MARKOUT_CLOSE_H, MARKOUT_CLOSE_M = 15, 5
 
     def _market_closed():
         if not args.all:
@@ -614,7 +614,7 @@ def main():
                     sys.stderr.write("quotes writer 已退出，停止\n")
                     break
                 if _market_closed():
-                    sys.stderr.write("已闭市（15:30），自动退出\n")
+                    sys.stderr.write("已闭市（15:05），自动退出\n")
                     break
         cleanup()
         return 0
