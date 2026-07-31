@@ -26,12 +26,12 @@
 
 import argparse
 import bisect
+import csv
 import json
 import mmap
 import os
 import struct
 import sys
-import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,9 +42,9 @@ import taosws
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
-TDENGINE_URL = "taosws://root:taosdata@localhost:6041"
+TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041")
 DEFAULT_SHM = "/dev/shm/tdx_quotes.shm"
-ZXG_PATH = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk"
+ZXG_PATH = os.environ.get("TDX_ZXG_BLK", "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk")
 WP_PATH = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/WP.blk"
 
 # 验证 (verify 子命令): 资金 10 万, 买入=前日 14:30-15:00 算术均价, 卖出=当日 9:30-10:00 算术均价
@@ -72,6 +72,9 @@ VERIFY_DDL = (
 # shm 二进制布局 (与 include/tdx/shm/{segment,snapshot,payload}.hpp 一致)
 POD_FMT = "< q 27d"  # datetime(i64) + 27×double = 224B
 assert struct.calcsize(POD_FMT) == 224
+# POD 字段索引 (与 include/tdx/shm/payload.hpp 字段顺序一致, 避免裸数字易错)
+POD_TS, POD_PRICE, POD_PRE_CLOSE, POD_OPEN = 0, 1, 2, 3
+POD_HIGH, POD_LOW, POD_VOLUME, POD_AMOUNT = 4, 5, 6, 7
 SLOT_SIZE = 256
 HDR_OFF_MAGIC = 0
 HDR_OFF_VERSION = 8
@@ -224,84 +227,6 @@ def _parse_ts(ts):
         except ValueError:
             continue
     return ts
-
-
-def query_1d(conn, code, market, days):
-    tbl = f"tdx.k_{market}{code}_1d"
-    try:
-        r = conn.query(
-            f"SELECT ts, open, high, low, close, volume, amount "
-            f"FROM {tbl} WHERE ts > NOW() - {days + 5}d ORDER BY ts"
-        )
-    except Exception:
-        return None
-    bars = []
-    for row in r:
-        bars.append({
-            "ts": _parse_ts(row[0]), "open": row[1], "high": row[2], "low": row[3],
-            "close": row[4], "volume": float(row[5] or 0), "amount": float(row[6] or 0),
-        })
-    return bars if bars else None
-
-
-def query_intraday(conn, code, market, cycle="1m"):
-    tbl = f"tdx.k_{market}{code}_{cycle}"
-    try:
-        r = conn.query(
-            f"SELECT ts, open, high, low, close, volume, amount "
-            f"FROM {tbl} WHERE ts >= TODAY() ORDER BY ts"
-        )
-    except Exception:
-        return None
-    bars = []
-    for row in r:
-        bars.append({
-            "ts": _parse_ts(row[0]), "open": row[1], "high": row[2], "low": row[3],
-            "close": row[4], "volume": float(row[5] or 0), "amount": float(row[6] or 0),
-        })
-    return bars if bars else None
-
-
-def query_intraday_ndays(conn, code, market, days, cycle="1m"):
-    tbl = f"tdx.k_{market}{code}_{cycle}"
-    try:
-        r = conn.query(
-            f"SELECT ts, open, high, low, close, volume, amount "
-            f"FROM {tbl} WHERE ts > NOW() - {days + 2}d ORDER BY ts"
-        )
-    except Exception:
-        return None
-    bars = []
-    for row in r:
-        bars.append({
-            "ts": _parse_ts(row[0]), "open": row[1], "high": row[2], "low": row[3],
-            "close": row[4], "volume": float(row[5] or 0), "amount": float(row[6] or 0),
-        })
-    return bars if bars else None
-
-
-def query_finance(conn, code):
-    tbl = f"tdx.fn_{code}"
-    try:
-        r = conn.query(f"SELECT liutongguben, zongguben FROM {tbl} ORDER BY ts DESC LIMIT 1")
-    except Exception:
-        return None
-    for row in r:
-        return {"liutongguben": float(row[0] or 0), "zongguben": float(row[1] or 0)}
-    return None
-
-
-def table_exists(conn, tbl):
-    try:
-        r = conn.query(
-            f"SELECT table_name FROM information_schema.ins_tables "
-            f"WHERE db_name='tdx' AND table_name='{tbl}'"
-        )
-        for _ in r:
-            return True
-    except Exception:
-        return False
-    return False
 
 
 def batch_query_1d(conn, days):
@@ -759,12 +684,12 @@ def calc_turnover_stability(bars_1d, fin, turnover_2d_max):
 # ---------------------------------------------------------------------------
 # 法则判定
 # ---------------------------------------------------------------------------
-def diagnose(market, code, conn, quote_pod, bars_1d, fin, bars_intraday,
-             bars_intraday_ndays, cfg, rps_baseline=None):
+def diagnose(market, code, quote_pod, bars_1d, fin, bars_intraday,
+             bars_intraday_ndays, cfg, names, rps_baseline=None):
     """对单股执行六步法则 + 增强信号，返回结果 dict (None = 被淘汰)。"""
-    price = quote_pod[1]
-    pre_close = quote_pod[2]
-    volume = quote_pod[6]
+    price = quote_pod[POD_PRICE]
+    pre_close = quote_pod[POD_PRE_CLOSE]
+    volume = quote_pod[POD_VOLUME]
     if pre_close <= 0 or price <= 0:
         return None
 
@@ -774,7 +699,7 @@ def diagnose(market, code, conn, quote_pod, bars_1d, fin, bars_intraday,
         "price": price,
         "pre_close": pre_close,
         "volume": volume,
-        "quote_time": time.strftime("%H:%M:%S", time.localtime(quote_pod[0])),
+        "quote_time": time.strftime("%H:%M:%S", time.localtime(quote_pod[POD_TS])),
     }
 
     # 1. 涨幅
@@ -803,7 +728,7 @@ def diagnose(market, code, conn, quote_pod, bars_1d, fin, bars_intraday,
         return None
 
     # 3. 量比
-    elapsed = elapsed_minutes(quote_pod[0])
+    elapsed = elapsed_minutes(quote_pod[POD_TS])
     if bars_1d and len(bars_1d) >= 2:
         past5 = bars_1d[-6:-1] if len(bars_1d) >= 6 else bars_1d[:-1]
         avg_vol = sum(b["volume"] for b in past5) / len(past5)
@@ -843,7 +768,7 @@ def diagnose(market, code, conn, quote_pod, bars_1d, fin, bars_intraday,
         enhancements["tail_vwema"] = vwema
         enhancements["vwema_diverging"] = diverging
 
-    cpr = calc_cpr(quote_pod[4], quote_pod[5], price)
+    cpr = calc_cpr(quote_pod[POD_HIGH], quote_pod[POD_LOW], price)
     if cpr:
         enhancements["cpr"] = cpr
 
@@ -908,64 +833,47 @@ def diagnose(market, code, conn, quote_pod, bars_1d, fin, bars_intraday,
 # ---------------------------------------------------------------------------
 # 筛选主流程 (多线程)
 # ---------------------------------------------------------------------------
-_thread_local = threading.local()
-
-
-def _thread_conn():
-    if not hasattr(_thread_local, "conn"):
-        _thread_local.conn = get_conn()
-    return _thread_local.conn
-
-
 def _screen_one_compute(market, code, pod, bars_1d, fin, intra, intra_ndays,
-                        cfg, rps_baseline):
+                        cfg, names, rps_baseline):
     """单股纯计算 (无 I/O, 供线程池调用)。"""
-    return diagnose(market, code, None, pod, bars_1d, fin, intra, intra_ndays,
-                    cfg, rps_baseline)
+    return diagnose(market, code, pod, bars_1d, fin, intra, intra_ndays,
+                    cfg, names, rps_baseline)
 
 
-def _screen_one_intraday(market, code, shm_reader, cfg, rps_baseline, bars_1d,
-                         fin, intra_all, intra_ndays_all):
-    """单股分钟线查询 + 计算 (线程内独立连接)。"""
-    pod = shm_reader.get(code)
-    if pod is None:
-        return None
-    intra = intra_all.get(code) if intra_all else None
-    intra_ndays = intra_ndays_all.get(code) if intra_ndays_all else None
-    return diagnose(market, code, None, pod, bars_1d, fin, intra, intra_ndays,
-                    cfg, rps_baseline)
+def prefetch_daily(conn, cfg, workers):
+    """每交易日预取一次的日频/财务/N天分钟线 (盘中不变, 循环外缓存)。
 
-
-def screen(conn, universe, shm_reader, cfg, require_intraday=True, workers=8):
+    RPS 基线/1d/财务纯历史当日不变; N天1m 供尾盘动量因子 (看历史多日模式, 当日
+    贡献小), 盘中缓存可接受。→ (rps_baseline, bars_1d_all, fin_all, intra_ndays_all)
+    """
     t0 = time.time()
     rps_baseline = build_market_rps_baseline(
         conn, cfg["rps_periods"], cfg["rps_baseline_days"])
-    sys.stderr.write(f"[scalper] RPS 基线构建耗时 {time.time() - t0:.1f}s\n")
-
-    # ---- 批量查询 1d + finance (数据量小, 一次查全市场) ----
-    t1 = time.time()
     bars_1d_all = batch_query_1d(conn, cfg["lookback_days"])
     fin_all = batch_query_finance(conn)
-    sys.stderr.write(f"[scalper] 批量查询 1d+finance 耗时 {time.time() - t1:.1f}s\n")
+    intra_ndays_all = batch_query_intraday_ndays(
+        conn, "1m", days=cfg["tail_mom_lookback"], workers=workers)
+    sys.stderr.write(
+        f"[scalper] 日频预取 (RPS基线/1d/财务/N天1m) 耗时 {time.time() - t0:.1f}s\n")
+    return rps_baseline, bars_1d_all, fin_all, intra_ndays_all
 
-    # ---- 分钟线: 当日批量 + N天逐股线程并发 ----
+
+def screen(conn, universe, shm_reader, cfg, names, daily,
+           require_intraday=True, workers=8):
+    """单轮筛选: daily=预取的日频数据(盘中不变), 每轮只刷当日 1m + 取 shm pod。"""
+    rps_baseline, bars_1d_all, fin_all, intra_ndays_all = daily
+    t0 = time.time()
+
+    # ---- 当日分钟线 (盘中实时变化, 每轮刷新) ----
     intra_all = {}
-    intra_ndays_all = {}
     if require_intraday:
-        t2 = time.time()
-        intra_all = batch_query_intraday(conn, "1m", days=None)  # 当日 ~120万行, 可接受
-        sys.stderr.write(f"[scalper] 批量查询当日 1m 耗时 {time.time() - t2:.1f}s\n")
-        # N 天分钟线数据量大, 按 code 前缀分片批量查询
-        t3 = time.time()
-        intra_ndays_all = batch_query_intraday_ndays(
-            conn, "1m", days=cfg["tail_mom_lookback"], workers=workers)
-        sys.stderr.write(f"[scalper] 分片批量查询 N天 1m 耗时 {time.time() - t3:.1f}s\n")
+        intra_all = batch_query_intraday(conn, "1m", days=None)
+        sys.stderr.write(f"[scalper] 批量查询当日 1m 耗时 {time.time() - t0:.1f}s\n")
 
-    # ---- 纯计算并行 ----
-    t4 = time.time()
-    results = []
+    # ---- 纯计算并行 (日频/N天1m 取自 daily 缓存, 不每轮查) ----
+    t1 = time.time()
+    results, errs, futs = [], 0, []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = []
         for m, c in universe:
             pod = shm_reader.get(c)
             if pod is None:
@@ -978,15 +886,17 @@ def screen(conn, universe, shm_reader, cfg, require_intraday=True, workers=8):
             intra_ndays = intra_ndays_all.get(c) if require_intraday else None
             futs.append(pool.submit(
                 _screen_one_compute, m, c, pod, bars_1d, fin,
-                intra, intra_ndays, cfg, rps_baseline))
+                intra, intra_ndays, cfg, names, rps_baseline))
         for f in as_completed(futs):
             try:
                 r = f.result()
                 if r:
                     results.append(r)
             except Exception:
-                pass
-    sys.stderr.write(f"[scalper] {workers} 线程计算 {len(futs)} 只耗时 {time.time() - t4:.1f}s\n")
+                errs += 1
+    if errs:
+        sys.stderr.write(f"[scalper] ⚠ {errs}/{len(futs)} 只计算异常 (已跳过)\n")
+    sys.stderr.write(f"[scalper] {workers} 线程计算 {len(futs)} 只耗时 {time.time() - t1:.1f}s\n")
     results.sort(key=lambda x: (-x.get("signal_score", 0), -x["gain_pct"]))
     return results
 
@@ -1179,7 +1089,6 @@ def run_verify(args):
 
 def append_verify_csv(out_path, rows, date_str):
     """追加验证行到 CSV, 同日去重 (重跑覆盖当日)。"""
-    import csv
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     kept = []
     if os.path.exists(out_path):
@@ -1374,7 +1283,7 @@ def main():
     else:
         universe = [(parse_code(c)[0], parse_code(c)[1]) for c in zxg_codes()]
 
-    # 预过滤 (仅按 shm 存活过滤, 表存在性由 query_1d try/except 兜底)
+    # 预过滤 (仅按 shm 存活过滤, 表存在性由 batch 查询 .get() 兜底)
     if not args.code:
         shm_codes = set(shm.all_quotes().keys())
         universe = [(m, c) for m, c in universe if c in shm_codes]
@@ -1383,6 +1292,8 @@ def main():
     require_intraday = not args.no_intraday
     round_no = 0
     start_epoch = time.time()
+    daily = None
+    cur_date = None
 
     try:
         while True:
@@ -1402,12 +1313,18 @@ def main():
                                  f"共运行 {elapsed_min:.1f} 分钟，退出。\n")
                 break
 
+            # 日频预取按交易日缓存 (盘中不变, 跨日才重取)
+            today = now.date()
+            if daily is None or today != cur_date:
+                daily = prefetch_daily(conn, cfg, args.workers)
+                cur_date = today
+
             # 执行一轮筛选
             round_no += 1
             t0 = time.time()
             sys.stderr.write(f"[scalper] 第 {round_no} 轮筛选开始...\n")
             try:
-                results = screen(conn, universe, shm, cfg,
+                results = screen(conn, universe, shm, cfg, names, daily,
                                  require_intraday=require_intraday,
                                  workers=args.workers)
                 elapsed = time.time() - t0
@@ -1427,7 +1344,6 @@ def main():
                             f.write(f"{prefix}{full[2:]}\r\n")
                     sys.stderr.write(f"[blk] → WP.blk ({len(results)} 只)\n")
                     # 本地 CSV
-                    import csv
                     csv_dir = "output/scalper"
                     os.makedirs(csv_dir, exist_ok=True)
                     csv_file = os.path.join(csv_dir, f"scalper-{time.strftime('%Y%m%d')}.csv")

@@ -20,12 +20,13 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import taosws
 
 TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041")
-ZXG_PATH = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk"
+ZXG_PATH = os.environ.get("TDX_ZXG_BLK", "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk")
 
 # 板块指数 → 板块映射 (用于判断股票所属板块强度)
 SECTOR_INDICES = {
@@ -41,10 +42,10 @@ SECTOR_INDICES = {
 
 # 代码前缀 → 板块指数 (用于判断股票属于哪个板块)
 CODE_SECTOR_MAP = [
-    (("68",), "sh000688"),      # 科创板
-    (("30",), "sz399006"),      # 创业板
-    (("00", "60"), "sh000300"), # 主板 (沪深300 代理)
-    (("43", "83", "87", "88"), "bj899050"),  # 北交所
+    (("68",), "sh000688"),            # 科创板
+    (("30",), "sz399006"),            # 创业板
+    (("00", "60"), "sh000300"),       # 主板 (沪深300 代理)
+    (("43", "83", "87", "92"), "bj899050"),  # 北交所 (含 920)
 ]
 
 
@@ -65,7 +66,8 @@ def parse_code(code):
     return "sh", code
 
 
-def fetch_kline(conn, market, code, cycle="1d", days=365 * 20):
+def fetch_kline(conn, market, code, cycle="1d", days=400, min_rows=2):
+    """单标的 K 线 (板块指数用)。个股批量见 batch_fetch_klines。"""
     tbl = f"tdx.k_{market}{code}_{cycle}"
     try:
         r = conn.query(
@@ -82,7 +84,40 @@ def fetch_kline(conn, market, code, cycle="1d", days=365 * 20):
     for c in ("O", "H", "L", "C", "V", "amount"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna().reset_index(drop=True)
-    return df if len(df) >= 60 else None
+    return df if len(df) >= min_rows else None
+
+
+def batch_fetch_klines(conn, pool, days=400):
+    """批量查全市场 1d → {code: DataFrame}。一次查询替代 N 次逐股 fetch_kline。
+
+    只保留 >=252 行的标的 (score_stock 需 250 周期指标)。
+    """
+    try:
+        r = conn.query(
+            f"SELECT code, ts, open, high, low, close, volume, amount "
+            f"FROM tdx.kline WHERE cycle='1d' AND ts > NOW() - {days}d"
+        )
+    except Exception as e:
+        sys.stderr.write(f"[error] 批量查询日线失败: {e}\n")
+        return {}
+    want = {c for _, c in pool}
+    by_code = {}
+    for code, ts, o, h, l, c, v, amt in r:
+        if code not in want:
+            continue
+        by_code.setdefault(code, []).append((ts, o, h, l, c, v, amt))
+    out = {}
+    for code, rows in by_code.items():
+        if len(rows) < 252:
+            continue
+        df = pd.DataFrame(rows, columns=["ts", "O", "H", "L", "C", "V", "amount"])
+        df["ts"] = pd.to_datetime(df["ts"])
+        for col in ("O", "H", "L", "C", "V", "amount"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna().reset_index(drop=True)
+        if len(df) >= 252:
+            out[code] = df
+    return out
 
 
 def zxg_codes(path=ZXG_PATH):
@@ -217,6 +252,11 @@ def add_dmi(df, period=14):
     return df
 
 
+def _compute(m, c, df):
+    """线程池入口: 算指标 → (m, c, df)。"""
+    return m, c, add_indicators(df)
+
+
 # ---------------------------------------------------------------------------
 # 板块动量 (代理)
 # ---------------------------------------------------------------------------
@@ -234,9 +274,9 @@ def sector_momentum(conn, days=20):
 
 
 def get_sector_for_code(code):
-    """根据股票代码推断所属板块指数."""
+    """根据股票代码前缀 (前2位) 推断所属板块指数."""
     for prefixes, sector in CODE_SECTOR_MAP:
-        if code[:2] in prefixes or code[:1] in [p[:1] for p in prefixes if len(p) == 1]:
+        if code[:2] in prefixes:
             return sector
     return "sh000300"  # 默认主板
 
@@ -244,34 +284,33 @@ def get_sector_for_code(code):
 # ---------------------------------------------------------------------------
 # 评分
 # ---------------------------------------------------------------------------
+def hard_filter_fail(last, df):
+    """六步硬过滤失败原因 (None=通过)。score_stock 与诊断共用, 避免阈值重复。"""
+    ret_250 = last.get("ret_250")
+    if pd.isna(ret_250) or ret_250 <= 0:
+        return "no_ret"
+    if pd.isna(last["MA5"]) or pd.isna(last["MA20"]) or last["MA5"] <= last["MA20"]:
+        return "MA5<MA20"
+    if pd.isna(last["ADX"]) or last["ADX"] <= 20:
+        return "ADX<20"
+    if pd.isna(last["plus_DI"]) or pd.isna(last["minus_DI"]) or last["plus_DI"] <= last["minus_DI"]:
+        return "+DI<-DI"
+    if df.tail(5)["long_upper"].any():
+        return "long_upper"
+    return None
+
+
 def score_stock(df, sector_ret):
     """对单只股票评分, 返回 dict 或 None (不通过过滤)."""
-    if df is None or len(df) < 250:
+    if df is None or len(df) < 252:   # ret_250=pct_change(250) 需 251 行
         return None
 
     last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) > 1 else last
 
-    # ---- 硬过滤 ----
-    # RPS > 80 (ret_250 需在后续全市场排名, 这里先记录原始值)
-    ret_250 = last.get("ret_250")
-    if pd.isna(ret_250) or ret_250 <= 0:
+    # ---- 硬过滤 (阈值集中在 hard_filter_fail, 诊断复用) ----
+    if hard_filter_fail(last, df):
         return None
-
-    # MA5 > MA20
-    if pd.isna(last["MA5"]) or pd.isna(last["MA20"]) or last["MA5"] <= last["MA20"]:
-        return None
-
-    # ADX > 20, +DI > -DI
-    if pd.isna(last["ADX"]) or last["ADX"] <= 20:
-        return None
-    if pd.isna(last["plus_DI"]) or pd.isna(last["minus_DI"]) or last["plus_DI"] <= last["minus_DI"]:
-        return None
-
-    # 假突破过滤: 最近 5 日无长上影线
-    recent = df.tail(5)
-    if recent["long_upper"].any():
-        return None
+    ret_250 = last["ret_250"]
 
     # ---- 评分 (0-100) ----
     score = 0
@@ -350,6 +389,7 @@ def main():
                     help="显示 RPS 通过但其他过滤未通过的股票 (诊断模式)")
     ap.add_argument("--limit", type=int, help="最多分析多少只 (调试)")
     ap.add_argument("--output-dir", default="output/leader", help="输出目录")
+    ap.add_argument("--workers", type=int, default=8, help="并发线程数 (默认 8)")
     args = ap.parse_args()
 
     conn = connect()
@@ -380,17 +420,20 @@ def main():
     for code, ret in sorted(sec_mom.items(), key=lambda x: -x[1]):
         print(f"  {SECTOR_INDICES.get(code, code):8s} {code}: {ret:+.2f}% (20d)")
 
-    # 拉数据 + 算指标
+    # 批量拉日线 (一次查询替代 N 次) + 并发算指标
+    print(f"[fetch] 批量拉取 {len(pool)} 只日线...")
+    klines = batch_fetch_klines(conn, pool, days=400)
+    print(f"[fetch] {len(klines)} 只有足够数据 (>=252 行)")
+
     all_features = []
-    for i, (m, c) in enumerate(pool):
-        df = fetch_kline(conn, m, c)
-        if df is None:
-            continue
-        df = add_indicators(df)
-        all_features.append((m, c, df))
-        if (i + 1) % 50 == 0:
-            print(f"  fetched {i + 1}/{len(pool)}")
-    print(f"[fetch] {len(all_features)} stocks with data")
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = [ex.submit(_compute, m, c, klines[c]) for m, c in pool if c in klines]
+        for f in as_completed(futs):
+            try:
+                all_features.append(f.result())
+            except Exception as e:
+                sys.stderr.write(f"[warn] 指标计算异常: {e}\n")
+    print(f"[fetch] {len(all_features)} 只完成指标计算")
     if not all_features:
         print("[error] no data", file=sys.stderr)
         sys.exit(1)
@@ -413,7 +456,7 @@ def main():
         last_ret = df.iloc[-1]["ret_250"] if not pd.isna(df.iloc[-1].get("ret_250")) else None
         if last_ret is None:
             continue
-        # RPS 排名
+        # RPS 排名: last_ret 在样本(上市满250天的子集)内的分位; < 不含自身
         rps = (rets < last_ret).mean() * 100
         if rps < args.rps:
             continue
@@ -425,24 +468,11 @@ def main():
         if result is None:
             if args.diagnostic:
                 last = df.iloc[-1]
-                reason = []
-                if pd.isna(last["ret_250"]) or last["ret_250"] <= 0:
-                    reason.append("no_ret")
-                elif last["MA5"] <= last["MA20"]:
-                    reason.append(f"MA5<MA20({last['MA5']:.1f}<{last['MA20']:.1f})")
-                elif pd.isna(last["ADX"]) or last["ADX"] <= 20:
-                    reason.append(f"ADX<20({last.get('ADX', 0):.0f})")
-                elif last["plus_DI"] <= last["minus_DI"]:
-                    reason.append(f"+DI<-DI")
-                elif df.tail(5)["long_upper"].any():
-                    reason.append("long_upper")
-                else:
-                    reason.append("score<0")
                 diagnostic.append({
                     "market": m, "code": c, "RPS": round(rps, 1),
                     "price": round(last["C"], 2),
                     "ret_250": round(last["ret_250"], 1) if not pd.isna(last["ret_250"]) else 0,
-                    "reason": " ".join(reason),
+                    "reason": hard_filter_fail(last, df) or "filtered",
                 })
             continue
         result["market"] = m
@@ -495,8 +525,8 @@ def main():
             print(f"{d['market']}{d['code']:<8} {d['RPS']:6.1f} {d['price']:8.2f} "
                   f"{d['ret_250']:8.1f} {d['reason']}")
 
-    # 保存到通达信自选板块
-    blk_dir = os.path.expanduser("~/.local/share/tdxcfv/drive_c/tc/T0002/blocknew")
+    # 保存到通达信自选板块 (目录与 ZXG_PATH 同源)
+    blk_dir = os.path.dirname(ZXG_PATH)
     os.makedirs(blk_dir, exist_ok=True)
     with open(os.path.join(blk_dir, "LT.blk"), "w", newline="") as f:
         f.write("1999999\r\n")
