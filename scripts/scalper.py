@@ -34,6 +34,7 @@ import re
 import struct
 import sys
 import time
+import unicodedata
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -916,10 +917,18 @@ def screen(conn, universe, shm_reader, cfg, names, daily,
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _rpad(s, width):
-    """按可见字符右对齐 (忽略 ANSI 转义字节), 修复彩色单元格列错位。"""
-    vis = len(_ANSI_RE.sub("", s))
-    return " " * max(0, width - vis) + s
+def _disp_w(s):
+    """显示宽度: 剥离 ANSI 后 CJK 全角字符计 2, ASCII 计 1。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in _ANSI_RE.sub("", s))
+
+
+def _pad(s, width, align="<"):
+    """按显示宽度对齐填充 (修复中文表头/名称列错位), 保留 ANSI 颜色。"""
+    pad = width - _disp_w(s)
+    if pad <= 0:
+        return s
+    return (" " * pad + s) if align == ">" else (s + " " * pad)
 
 
 def render_table(results, round_no, elapsed_sec):
@@ -937,12 +946,15 @@ def render_table(results, round_no, elapsed_sec):
         lines.append("⚔ 铁的纪律: 次日早盘 (10:30 前) 无论盈亏必须清仓，持股不超 4 小时。")
         return "\n".join(lines) + "\n"
 
-    # 表头: 基础指标 + 增强信号
-    hdr = (f"{'代码':<10}{'现价':>8}{'涨幅%':>8}{'量比':>7}{'换手%':>8}"
-           f"{'市值亿':>10}{'VWAP上':>8}{'尾盘动量':>10}{'VWEMA':>9}"
-           f"{'量能':>8}{'RPS':>7}{'MA':>7}{'突破':>10}{'得分':>6}")
+    # 表头: 基础指标 + 增强信号 (宽度均为显示宽度, 与数据行对齐)
+    hdr = (_pad("代码", 8) + _pad("名称", 8)
+           + _pad("现价", 8, ">") + _pad("涨幅%", 8, ">") + _pad("量比", 7, ">")
+           + _pad("换手%", 8, ">") + _pad("市值亿", 10, ">") + _pad("VWAP上", 8, ">")
+           + _pad("尾盘动量", 10, ">") + _pad("VWEMA", 9, ">") + _pad("量能", 8, ">")
+           + _pad("RPS", 7, ">") + _pad("MA", 7, ">") + _pad("突破", 10, ">")
+           + _pad("得分", 6, ">"))
     lines.append(hdr)
-    lines.append("-" * len(hdr))
+    lines.append("-" * _disp_w(hdr))
 
     for r in results:
         enh = r.get("enhancements", {})
@@ -1009,10 +1021,13 @@ def render_table(results, round_no, elapsed_sec):
         if score >= 0.6:
             score_s = f"\033[1;33m{score_s}\033[0m"
 
-        lines.append(f"{r['code']:<10}{r['price']:>8.2f}{r['gain_pct']:>8.2f}{_rpad(vr_s, 7)}"
-                     f"{r['turnover_pct']:>8.2f}{r['cap_yi']:>10.2f}{_rpad(vwap_s, 8)}"
-                     f"{_rpad(tm_s, 10)}{_rpad(vw_s, 9)}{_rpad(vh_s, 8)}{_rpad(rps_s, 7)}"
-                     f"{_rpad(ma_s, 7)}{_rpad(bq_s, 10)}{_rpad(score_s, 6)}")
+        lines.append(_pad(r["code"], 8) + _pad(r.get("name") or "-", 8)
+                     + _pad(f"{r['price']:.2f}", 8, ">") + _pad(f"{r['gain_pct']:.2f}", 8, ">")
+                     + _pad(vr_s, 7, ">") + _pad(f"{r['turnover_pct']:.2f}", 8, ">")
+                     + _pad(f"{r['cap_yi']:.2f}", 10, ">") + _pad(vwap_s, 8, ">")
+                     + _pad(tm_s, 10, ">") + _pad(vw_s, 9, ">") + _pad(vh_s, 8, ">")
+                     + _pad(rps_s, 7, ">") + _pad(ma_s, 7, ">") + _pad(bq_s, 10, ">")
+                     + _pad(score_s, 6, ">"))
 
     lines.append("")
     lines.append("⚔ 铁的纪律: 次日早盘 (10:30 前) 无论盈亏必须清仓，持股不超 4 小时。")
@@ -1146,20 +1161,25 @@ def append_verify_csv(out_path, rows, date_str):
 
 def print_verify(rows, capital):
     n = sum(1 for r in rows if r["code"] != "TOTAL")
+    sep = "-" * 60
     lines = [f"=== 隔夜套利战法验证 ===  {time.strftime('%Y-%m-%d %H:%M:%S')}",
              f"资金 {capital:.0f} 元, 等额分配 {capital / max(1, n):.0f} 元/只",
-             f"{'代码':<10}{'名称':<8}{'买价':>9}{'卖价':>9}{'盈亏':>10}{'收益%':>8}",
-             "-" * 60]
+             (_pad("代码", 10) + _pad("名称", 8) + _pad("买价", 9, ">") + _pad("卖价", 9, ">")
+              + _pad("盈亏", 10, ">") + _pad("收益%", 8, ">")),
+             sep]
     for r in rows:
         if r["code"] == "TOTAL":
-            lines.append("-" * 60)
-            lines.append(f"{('合计 ' + r['name']):<18}{'':>9}{'':>9}{r['pnl']:>10.2f}{r['pnl_pct']:>8.2f}")
+            lines.append(sep)
+            lines.append(_pad("合计 " + r["name"], 18) + _pad("", 9, ">") + _pad("", 9, ">")
+                         + _pad(f"{r['pnl']:.2f}", 10, ">") + _pad(f"{r['pnl_pct']:.2f}", 8, ">"))
         elif r["pnl"] == "":
             bp, sp = r["buy_price"] or "-", r["sell_price"] or "-"
-            lines.append(f"{r['code']:<10}{r['name']:<8}{bp:>9}{sp:>9}{'缺数据':>10}{'-':>8}")
+            lines.append(_pad(r["code"], 10) + _pad(r["name"], 8) + _pad(str(bp), 9, ">")
+                         + _pad(str(sp), 9, ">") + _pad("缺数据", 10, ">") + _pad("-", 8, ">"))
         else:
-            lines.append(f"{r['code']:<10}{r['name']:<8}{r['buy_price']:>9}{r['sell_price']:>9}"
-                         f"{r['pnl']:>10.2f}{r['pnl_pct']:>8.2f}")
+            lines.append(_pad(r["code"], 10) + _pad(r["name"], 8)
+                         + _pad(f"{r['buy_price']:.4f}", 9, ">") + _pad(f"{r['sell_price']:.4f}", 9, ">")
+                         + _pad(f"{r['pnl']:.2f}", 10, ">") + _pad(f"{r['pnl_pct']:.2f}", 8, ">"))
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
@@ -1205,7 +1225,10 @@ def upsert_pick(conn, results, pick_date):
     for r in results:
         full = r["code"]  # sh603580
         market, code = full[:2], full[2:]
-        enh = json.dumps(r.get("enhancements", {}), ensure_ascii=False)
+        # taosws 查询返回 numpy 标量 (np.bool_/np.int64 非 Python int/bool 子类),
+        # 比较运算 (如 MA above/rising) 产生 np.bool_ 会被 json.dumps 拒收 → default 还原原生类型
+        enh = json.dumps(r.get("enhancements", {}), ensure_ascii=False,
+                         default=lambda o: o.item() if hasattr(o, "item") else str(o))
         sql = (f"INSERT INTO sp_{market}{code} USING scalper_pick "
                f"TAGS('{_esc(code)}','{market}','{_esc(r.get('name', ''))}') VALUES("
                f"'{ts}',{_num(r.get('price'))},{_num(r.get('gain_pct'))},"
