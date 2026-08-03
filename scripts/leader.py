@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import taosws
 from common import (ZXG_PATH, all_mainboard_codes, parse_code, zxg_codes,
-                    apply_qfq, batch_fetch_adjust)
+                    apply_qfq, batch_fetch_adjust, pad)
 
 TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041")
 
@@ -380,7 +380,7 @@ def main():
     print("[sector] computing momentum...")
     sec_mom = sector_momentum(conn)
     for code, ret in sorted(sec_mom.items(), key=lambda x: -x[1]):
-        print(f"  {SECTOR_INDICES.get(code, code):8s} {code}: {ret:+.2f}% (20d)")
+        print(f"  {pad(SECTOR_INDICES.get(code, code), 8)} {code}: {ret:+.2f}% (20d)")
 
     # 批量拉日线 (一次查询替代 N 次) + 批量复权事件
     print(f"[fetch] 批量拉取 {len(pool)} 只日线...")
@@ -470,13 +470,16 @@ def main():
     if not filtered:
         print("  (无通过过滤的股票)")
     else:
-        print(f"{'排名':>4} {'代码':<10} {'名称':<8} {'评分':>6} {'RPS':>6} {'价格':>8} {'250日%':>8} "
-              f"{'近新高':>6} {'RSI':>5} {'ADX':>5} {'CCI':>6} {'ATR%':>5} {'止损位':>8} {'板块'}")
+        print(pad("排名", 4, ">") + " " + pad("代码", 10) + " " + pad("名称", 15)
+              + " " + pad("评分", 6, ">") + " " + pad("RPS", 6, ">") + " " + pad("价格", 8, ">")
+              + " " + pad("250日%", 8, ">") + " " + pad("近新高", 6, ">") + " " + pad("RSI", 5, ">")
+              + " " + pad("ADX", 5, ">") + " " + pad("CCI", 6, ">") + " " + pad("ATR%", 5, ">")
+              + " " + pad("止损位", 8, ">") + " " + pad("板块", 4))
         for i, r in enumerate(filtered[:args.top], 1):
             nm = r.get('name', '') or ''
             atr = r.get("ATR_pct", 0) or 0
             stop = r["price"] * (1 - atr / 100 * 2)
-            print(f"{i:4d} {r['market']}{r['code']:<8} {nm:<8} {r['score']:6.1f} {r['RPS']:6.1f} "
+            print(f"{i:4d} {r['market']}{r['code']:<8} {pad(nm, 15)} {r['score']:6.1f} {r['RPS']:6.1f} "
                   f"{r['price']:8.2f} {r['ret_250']:8.1f} {r['near_high']:6.3f} "
                   f"{r['RSI14']:5.1f} {r['ADX']:5.1f} {r['CCI']:6.1f} "
                   f"{atr:5.2f} {stop:8.2f} {r.get('sector', '')}")

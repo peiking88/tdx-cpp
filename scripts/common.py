@@ -4,12 +4,33 @@
 """
 
 import os
+import re
 import sys
+import unicodedata
 
 import pandas as pd
 
 # 自选股板块文件 (通达信 zxg.blk)。环境变量 TDX_ZXG_BLK 可覆盖。
 ZXG_PATH = os.environ.get("TDX_ZXG_BLK", "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk")
+
+# ---------------------------------------------------------------------------
+# 表格渲染: 显示宽度感知对齐 (CJK 全角计 2, ASCII 计 1)
+# ---------------------------------------------------------------------------
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def disp_w(s):
+    """显示宽度: 剥离 ANSI 后 CJK 全角字符计 2, ASCII 计 1。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in _ANSI_RE.sub("", s))
+
+
+def pad(s, width, align="<"):
+    """按显示宽度对齐填充 (修复中文表头/名称列错位), 保留 ANSI 颜色。"""
+    n = width - disp_w(s)
+    if n <= 0:
+        return s
+    return (" " * n + s) if align == ">" else (s + " " * n)
 
 
 def parse_code(code):

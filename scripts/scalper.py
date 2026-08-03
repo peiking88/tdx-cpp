@@ -30,11 +30,9 @@ import csv
 import json
 import mmap
 import os
-import re
 import struct
 import sys
 import time
-import unicodedata
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -42,7 +40,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import taosws
 from common import (all_mainboard_codes, parse_code, zxg_codes,
-                    apply_qfq, batch_fetch_adjust)
+                    apply_qfq, batch_fetch_adjust, disp_w, pad)
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -914,23 +912,6 @@ def screen(conn, universe, shm_reader, cfg, names, daily,
 # ---------------------------------------------------------------------------
 # 表格渲染
 # ---------------------------------------------------------------------------
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _disp_w(s):
-    """显示宽度: 剥离 ANSI 后 CJK 全角字符计 2, ASCII 计 1。"""
-    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-               for ch in _ANSI_RE.sub("", s))
-
-
-def _pad(s, width, align="<"):
-    """按显示宽度对齐填充 (修复中文表头/名称列错位), 保留 ANSI 颜色。"""
-    pad = width - _disp_w(s)
-    if pad <= 0:
-        return s
-    return (" " * pad + s) if align == ">" else (s + " " * pad)
-
-
 def render_table(results, round_no, elapsed_sec):
     """ANSI 清屏 + 表格输出 (基础指标 + 增强信号合并到一张表)。"""
     ts = time.strftime("%H:%M:%S")
@@ -947,14 +928,14 @@ def render_table(results, round_no, elapsed_sec):
         return "\n".join(lines) + "\n"
 
     # 表头: 基础指标 + 增强信号 (宽度均为显示宽度, 与数据行对齐)
-    hdr = (_pad("代码", 8) + _pad("名称", 8)
-           + _pad("现价", 8, ">") + _pad("涨幅%", 8, ">") + _pad("量比", 7, ">")
-           + _pad("换手%", 8, ">") + _pad("市值亿", 10, ">") + _pad("VWAP上", 8, ">")
-           + _pad("尾盘动量", 10, ">") + _pad("VWEMA", 9, ">") + _pad("量能", 8, ">")
-           + _pad("RPS", 7, ">") + _pad("MA", 7, ">") + _pad("突破", 10, ">")
-           + _pad("得分", 6, ">"))
+    hdr = (pad("代码", 8) + pad("名称", 8)
+           + pad("现价", 8, ">") + pad("涨幅%", 8, ">") + pad("量比", 7, ">")
+           + pad("换手%", 8, ">") + pad("市值亿", 10, ">") + pad("VWAP上", 8, ">")
+           + pad("尾盘动量", 10, ">") + pad("VWEMA", 9, ">") + pad("量能", 8, ">")
+           + pad("RPS", 7, ">") + pad("MA", 7, ">") + pad("突破", 10, ">")
+           + pad("得分", 6, ">"))
     lines.append(hdr)
-    lines.append("-" * _disp_w(hdr))
+    lines.append("-" * disp_w(hdr))
 
     for r in results:
         enh = r.get("enhancements", {})
@@ -1021,13 +1002,13 @@ def render_table(results, round_no, elapsed_sec):
         if score >= 0.6:
             score_s = f"\033[1;33m{score_s}\033[0m"
 
-        lines.append(_pad(r["code"], 8) + _pad(r.get("name") or "-", 8)
-                     + _pad(f"{r['price']:.2f}", 8, ">") + _pad(f"{r['gain_pct']:.2f}", 8, ">")
-                     + _pad(vr_s, 7, ">") + _pad(f"{r['turnover_pct']:.2f}", 8, ">")
-                     + _pad(f"{r['cap_yi']:.2f}", 10, ">") + _pad(vwap_s, 8, ">")
-                     + _pad(tm_s, 10, ">") + _pad(vw_s, 9, ">") + _pad(vh_s, 8, ">")
-                     + _pad(rps_s, 7, ">") + _pad(ma_s, 7, ">") + _pad(bq_s, 10, ">")
-                     + _pad(score_s, 6, ">"))
+        lines.append(pad(r["code"], 8) + pad(r.get("name") or "-", 8)
+                     + pad(f"{r['price']:.2f}", 8, ">") + pad(f"{r['gain_pct']:.2f}", 8, ">")
+                     + pad(vr_s, 7, ">") + pad(f"{r['turnover_pct']:.2f}", 8, ">")
+                     + pad(f"{r['cap_yi']:.2f}", 10, ">") + pad(vwap_s, 8, ">")
+                     + pad(tm_s, 10, ">") + pad(vw_s, 9, ">") + pad(vh_s, 8, ">")
+                     + pad(rps_s, 7, ">") + pad(ma_s, 7, ">") + pad(bq_s, 10, ">")
+                     + pad(score_s, 6, ">"))
 
     lines.append("")
     lines.append("⚔ 铁的纪律: 次日早盘 (10:30 前) 无论盈亏必须清仓，持股不超 4 小时。")
@@ -1164,22 +1145,22 @@ def print_verify(rows, capital):
     sep = "-" * 60
     lines = [f"=== 隔夜套利战法验证 ===  {time.strftime('%Y-%m-%d %H:%M:%S')}",
              f"资金 {capital:.0f} 元, 等额分配 {capital / max(1, n):.0f} 元/只",
-             (_pad("代码", 10) + _pad("名称", 8) + _pad("买价", 9, ">") + _pad("卖价", 9, ">")
-              + _pad("盈亏", 10, ">") + _pad("收益%", 8, ">")),
+             (pad("代码", 10) + pad("名称", 8) + pad("买价", 9, ">") + pad("卖价", 9, ">")
+              + pad("盈亏", 10, ">") + pad("收益%", 8, ">")),
              sep]
     for r in rows:
         if r["code"] == "TOTAL":
             lines.append(sep)
-            lines.append(_pad("合计 " + r["name"], 18) + _pad("", 9, ">") + _pad("", 9, ">")
-                         + _pad(f"{r['pnl']:.2f}", 10, ">") + _pad(f"{r['pnl_pct']:.2f}", 8, ">"))
+            lines.append(pad("合计 " + r["name"], 18) + pad("", 9, ">") + pad("", 9, ">")
+                         + pad(f"{r['pnl']:.2f}", 10, ">") + pad(f"{r['pnl_pct']:.2f}", 8, ">"))
         elif r["pnl"] == "":
             bp, sp = r["buy_price"] or "-", r["sell_price"] or "-"
-            lines.append(_pad(r["code"], 10) + _pad(r["name"], 8) + _pad(str(bp), 9, ">")
-                         + _pad(str(sp), 9, ">") + _pad("缺数据", 10, ">") + _pad("-", 8, ">"))
+            lines.append(pad(r["code"], 10) + pad(r["name"], 8) + pad(str(bp), 9, ">")
+                         + pad(str(sp), 9, ">") + pad("缺数据", 10, ">") + pad("-", 8, ">"))
         else:
-            lines.append(_pad(r["code"], 10) + _pad(r["name"], 8)
-                         + _pad(f"{r['buy_price']:.4f}", 9, ">") + _pad(f"{r['sell_price']:.4f}", 9, ">")
-                         + _pad(f"{r['pnl']:.2f}", 10, ">") + _pad(f"{r['pnl_pct']:.2f}", 8, ">"))
+            lines.append(pad(r["code"], 10) + pad(r["name"], 8)
+                         + pad(f"{r['buy_price']:.4f}", 9, ">") + pad(f"{r['sell_price']:.4f}", 9, ">")
+                         + pad(f"{r['pnl']:.2f}", 10, ">") + pad(f"{r['pnl_pct']:.2f}", 8, ">"))
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
