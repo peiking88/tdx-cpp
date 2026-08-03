@@ -23,7 +23,9 @@ Patterns in Capital Market" (arXiv:2607.04184).
 import argparse
 import os
 import sys
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import numpy as np
@@ -346,6 +348,7 @@ def main():
     ap.add_argument("--output-dir", default="output/smmd", help="输出目录")
     ap.add_argument("--no-plot", action="store_true", help="不画图")
     ap.add_argument("--top-n", type=int, default=6, help="画图 top N")
+    ap.add_argument("--workers", type=int, default=8, help="并发抓取线程数 (默认 8)")
     args = ap.parse_args()
 
     conn = connect()
@@ -367,19 +370,32 @@ def main():
 
     print(f"[pool] {len(pool)} stocks")
 
-    # 拉数据 + 前复权 + 特征
+    # 拉数据 + 前复权 + 特征（并发：每线程独立连接，taosws conn 不支持跨线程共享）
     adj_by_mc = batch_fetch_adjust(conn, pool)
     print(f"[fetch] {len(adj_by_mc)} 只有除权事件 (应用前复权)")
-    all_features = []
-    for i, (m, c) in enumerate(pool):
-        df = fetch_kline(conn, m, c, days=args.days)
+
+    _tls = threading.local()
+
+    def _fetch_one(m, c):
+        if not hasattr(_tls, "conn"):
+            _tls.conn = connect()
+        df = fetch_kline(_tls.conn, m, c, days=args.days)
         if df is None:
-            continue
+            return None
         df = apply_qfq(df, adj_by_mc.get((m, c)))
-        df = engineer(df)
-        all_features.append((m, c, df))
-        if (i + 1) % 50 == 0:
-            print(f"  fetched {i + 1}/{len(pool)}")
+        return (m, c, engineer(df))
+
+    all_features = []
+    done = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = [ex.submit(_fetch_one, m, c) for m, c in pool]
+        for f in as_completed(futs):
+            r = f.result()
+            if r is not None:
+                all_features.append(r)
+            done += 1
+            if done % 50 == 0:
+                print(f"  fetched {done}/{len(pool)}")
     print(f"[fetch] {len(all_features)} stocks with data")
     if not all_features:
         print("[error] no data", file=sys.stderr)

@@ -30,6 +30,7 @@ import csv
 import json
 import mmap
 import os
+import re
 import struct
 import sys
 import time
@@ -316,9 +317,18 @@ def batch_query_intraday_ndays(conn, cycle="1m", days=20, workers=8):
     """
     # 13:31 = (13*3600 + 31*60) * 1000 ms = 48660000
     TAIL_MS = 48660000
-    chunks = ["code LIKE '60%'", "code LIKE '68%'", "code LIKE '00%'",
-              "code LIKE '30%'", "code LIKE '43%'", "code LIKE '83%'",
-              "code LIKE '87%'", "code LIKE '920%'"]
+    # market 限定前缀分片: 排除 sh000xxx / sz399xxx 指数混入查询 (对齐 all_mainboard_codes 的
+    # (market, code) 联合过滤; 沪指 000xxx 与深股 00xxx 同前缀, 须按 market 区分)。
+    chunks = [
+        "(market='sh' AND code LIKE '60%')",
+        "(market='sh' AND code LIKE '68%')",
+        "(market='sz' AND code LIKE '00%')",
+        "(market='sz' AND code LIKE '30%')",
+        "(market='bj' AND code LIKE '43%')",
+        "(market='bj' AND code LIKE '83%')",
+        "(market='bj' AND code LIKE '87%')",
+        "(market='bj' AND code LIKE '920%')",
+    ]
     out = {}
 
     def _query_chunk(chunk_where):
@@ -419,10 +429,15 @@ def read_wp_blk(path=WP_PATH):
 # ---------------------------------------------------------------------------
 # 基础指标计算
 # ---------------------------------------------------------------------------
-def has_limit_up(bars, threshold=LIMIT_UP_PCT):
+def has_limit_up(bars, threshold=LIMIT_UP_PCT, lookback=None):
     if len(bars) < 2:
         return False
+    # 语义: 近 lookback 天内是否有某日涨停——只要求涨停当日落在窗口内,
+    # 参照日 (前一日) 可早于窗口 (否则窗口边界的涨停会被漏掉)。
+    cutoff = datetime.now() - timedelta(days=lookback) if lookback else None
     for i in range(1, len(bars)):
+        if cutoff is not None and bars[i]["ts"] < cutoff:
+            continue
         pre = bars[i - 1]["close"]
         if pre <= 0:
             continue
@@ -696,7 +711,8 @@ def diagnose(market, code, quote_pod, bars_1d, fin, bars_intraday,
         return None
 
     # 2. 股性 (涨停基因)
-    result["has_limit_up"] = has_limit_up(bars_1d) if bars_1d else False
+    result["has_limit_up"] = (has_limit_up(bars_1d, lookback=cfg["lookback_days"])
+                              if bars_1d else False)
     if not result["has_limit_up"]:
         return None
 
@@ -836,7 +852,9 @@ def prefetch_daily(conn, cfg, workers):
     1d 日线拉取后批量应用前复权 (消除除权跳变), RPS 基线复用复权后的 bars 算。
     """
     t0 = time.time()
-    bars_1d_all = batch_query_1d(conn, cfg["lookback_days"])
+    # 1d 查询窗口须覆盖最长指标周期 (RPS 250 / MA 120); lookback_days 仅控制涨停基因回看。
+    window = max(cfg["lookback_days"], cfg["rps_baseline_days"])
+    bars_1d_all = batch_query_1d(conn, window)
     adj_by_mc = batch_fetch_adjust(conn, list(bars_1d_all.keys()))
     for mc in bars_1d_all:
         bars_1d_all[mc] = _apply_qfq_bars(bars_1d_all[mc], adj_by_mc.get(mc))
@@ -895,6 +913,15 @@ def screen(conn, universe, shm_reader, cfg, names, daily,
 # ---------------------------------------------------------------------------
 # 表格渲染
 # ---------------------------------------------------------------------------
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _rpad(s, width):
+    """按可见字符右对齐 (忽略 ANSI 转义字节), 修复彩色单元格列错位。"""
+    vis = len(_ANSI_RE.sub("", s))
+    return " " * max(0, width - vis) + s
+
+
 def render_table(results, round_no, elapsed_sec):
     """ANSI 清屏 + 表格输出 (基础指标 + 增强信号合并到一张表)。"""
     ts = time.strftime("%H:%M:%S")
@@ -982,9 +1009,10 @@ def render_table(results, round_no, elapsed_sec):
         if score >= 0.6:
             score_s = f"\033[1;33m{score_s}\033[0m"
 
-        lines.append(f"{r['code']:<10}{r['price']:>8.2f}{r['gain_pct']:>8.2f}{vr_s:>7}"
-                     f"{r['turnover_pct']:>8.2f}{r['cap_yi']:>10.2f}{vwap_s:>8}"
-                     f"{tm_s:>10}{vw_s:>9}{vh_s:>8}{rps_s:>7}{ma_s:>7}{bq_s:>10}{score_s:>6}")
+        lines.append(f"{r['code']:<10}{r['price']:>8.2f}{r['gain_pct']:>8.2f}{_rpad(vr_s, 7)}"
+                     f"{r['turnover_pct']:>8.2f}{r['cap_yi']:>10.2f}{_rpad(vwap_s, 8)}"
+                     f"{_rpad(tm_s, 10)}{_rpad(vw_s, 9)}{_rpad(vh_s, 8)}{_rpad(rps_s, 7)}"
+                     f"{_rpad(ma_s, 7)}{_rpad(bq_s, 10)}{_rpad(score_s, 6)}")
 
     lines.append("")
     lines.append("⚔ 铁的纪律: 次日早盘 (10:30 前) 无论盈亏必须清仓，持股不超 4 小时。")
@@ -1290,7 +1318,10 @@ def main():
         market, code = parse_code(args.code)
         universe = [(market, code)]
     elif args.all:
-        universe = all_mainboard_codes(conn)
+        # 战法规则与阈值 (涨幅/涨停基因 9.8%/换手) 均针对 10% 涨停的主板 (60/00);
+        # 创业板/科创/北交涨跌幅不同, 统一 9.8% 判定失真 → --all 限定主板。
+        universe = [(m, c) for m, c in all_mainboard_codes(conn)
+                    if c.startswith(MAIN_BOARD_PREFIXES)]
     else:
         universe = [(parse_code(c)[0], parse_code(c)[1]) for c in zxg_codes()]
 
@@ -1351,6 +1382,8 @@ def main():
                         f.write("1999999\r\n")
                         for r in results:
                             full = r["code"]
+                            if full.startswith("bj"):
+                                continue  # blk 格式仅 1=sh/0=sz 两位前缀, 无法表示北交所
                             prefix = "1" if full.startswith("sh") else "0"
                             f.write(f"{prefix}{full[2:]}\r\n")
                     sys.stderr.write(f"[blk] → WP.blk ({len(results)} 只)\n")

@@ -577,7 +577,7 @@ def main():
                 break
             time.sleep(0.2)
         cleanup()
-        sys.exit(0)
+        sys.exit(130)  # Ctrl-C 退出码 130, 不伪装成功
 
     signal.signal(signal.SIGINT, on_sig)
     signal.signal(signal.SIGTERM, on_sig)

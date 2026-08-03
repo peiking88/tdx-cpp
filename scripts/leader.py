@@ -493,12 +493,16 @@ def main():
     # 保存到通达信自选板块 (目录与 ZXG_PATH 同源)
     blk_dir = os.path.dirname(ZXG_PATH)
     os.makedirs(blk_dir, exist_ok=True)
+    written = 0
     with open(os.path.join(blk_dir, "LT.blk"), "w", newline="") as f:
         f.write("1999999\r\n")
         for r in filtered[:args.top]:
+            if r["market"] == "bj":
+                continue  # blk 格式仅 1=sh/0=sz 两位前缀, 无法表示北交所
             prefix = "1" if r["market"] == "sh" else "0"
             f.write(f"{prefix}{r['code']}\r\n")
-    print(f"[blk] → LT.blk ({min(len(filtered), args.top)} 只)")
+            written += 1
+    print(f"[blk] → LT.blk ({written} 只)")
 
     print(f"\n[output] → {args.output_dir}/leader.csv")
     print(f"[summary] {len(results)} passed filters, {len(filtered)} with score >= {args.min_score}")

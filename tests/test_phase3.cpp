@@ -143,6 +143,41 @@ TEST(Adjust, ApplyAdjustHfq) {
   }
 }
 
+TEST(Adjust, ApplyAdjustQfqSplitExDateNoGap) {
+  // 回归：除权日 bar 只乘其后事件因子（不含自身送转），否则前复权序列在除权日保留假跳空。
+  // 事件: 2024-06-01 10送10 (ef=0.5); 2024-09-01 每股分红1元 (ef=0.98, 归一后=1.0)。
+  // 原始: 5月 close=100 (除权前), 6月 close=50 (送转后), 9月 close=49 (分红后)。
+  // 前复权: 5月×0.5=50, 6月×1.0=50, 9月×1.0=49 —— 6/1 除权日处连续 (50→50)。
+  // 旧 backward-asof 会把 6/1 自身 0.5 也算入 → 6月 bar×0.5=25, 出现 4× 假跳空。
+  std::vector<Xdxr> events = {
+      {"2024-06-01", 0.0, 0.0, 10.0, 0.0, 1, "除权除息"},  // 10送10
+      {"2024-09-01", 1.0, 0.0, 0.0, 0.0, 1, "除权除息"},  // 每股分红1元
+  };
+  std::vector<KLine> kline;
+  auto add = [&](int y, int m, int d0, int d1, double close) {
+    for (int d = d0; d <= d1; ++d) {
+      KLine k;
+      k.datetime = util::date_to_epoch(y, m, d);
+      k.open = k.high = k.low = k.close = close;
+      kline.push_back(k);
+    }
+  };
+  add(2024, 5, 20, 31, 100.0);  // 除权前
+  add(2024, 6, 1, 30, 50.0);    // 除权日 bar 已是送转后价格
+  add(2024, 9, 2, 20, 49.0);    // 分红后
+  auto factors = ComputeFactorFromXdxr(events, kline, AdjustType::Qfq);
+  ApplyAdjust(kline, factors, AdjustType::Qfq);
+  auto close_at = [&](int y, int m, int d) {
+    int64_t t = util::date_to_epoch(y, m, d);
+    for (const auto& k : kline)
+      if (k.datetime == t) return k.close;
+    return -1.0;
+  };
+  EXPECT_NEAR(close_at(2024, 5, 31), 50.0, 1e-9);  // 除权前 bar 乘自身 0.5
+  EXPECT_NEAR(close_at(2024, 6, 1), 50.0, 1e-9);   // 除权日 bar 不乘自身事件 (旧代码会变 25)
+  EXPECT_NEAR(close_at(2024, 9, 2), 49.0, 1e-9);   // 最新事件后 bar 因子=1
+}
+
 // ---------- Resampler ----------
 TEST(Resampler, BarEndTimeAShare5m) {
   int64_t e930 = util::cst_to_epoch(2024, 6, 15, 9, 30);

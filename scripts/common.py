@@ -95,7 +95,8 @@ def apply_qfq(df, events):
 
     qfq: 事件按日期降序 (新→旧); event_factor = (pre_close - fenhong + peigujia*peigu)
          / (pre_close*(1+songzhuangu+peigu)); 累乘后末尾归一 (最新日 factor=1);
-         backward-asof (date<=kdate 取最大因子)。仅 category in {1,2} 或 name=='除权除息' 计因子。
+         forward-asof (取首个 date>kdate 的因子——除权日 bar 不乘自身事件,
+         否则序列在除权日保留假跳空)。仅 category in {1,2} 或 name=='除权除息' 计因子。
     无事件或查询失败时原样返回 (退化为未复权)。
     """
     if not events:
@@ -129,13 +130,12 @@ def apply_qfq(df, events):
     fac_val = [f for _, f in fac]
 
     def factor_for(ts):
-        f = 1.0
+        # forward-asof: 找第一个 date > ts 的事件因子。除权日 bar 在事件前 (pre_close)
+        # 取值, 已是除权后价格, 不应乘自身事件因子; 否则序列在除权日出现假跳空。
         for d, v in zip(fac_ts, fac_val):
-            if d <= ts:
-                f = v
-            else:
-                break
-        return f
+            if d > ts:
+                return v
+        return 1.0
 
     fs = ts_naive.map(factor_for)
     out = df.copy()

@@ -111,10 +111,10 @@ void ApplyAdjust(std::vector<KLine>& kline, const std::vector<FactorPoint>& fact
     std::string kdate = EpochToDate(k.datetime);
     double factor = 1.0;
     if (adjust == AdjustType::Qfq) {
-      // backward-asof：找 date <= kdate 的最大因子
+      // forward-asof：取首个 date > kdate 的因子。除权日 bar 已是除权后价格，
+      // 不乘自身事件因子，否则序列在除权日保留假跳空（回归见 ApplyAdjustQfqSplitExDateNoGap）。
       for (const auto& f : fac) {
-        if (f.date <= kdate) factor = f.factor;
-        else break;
+        if (f.date > kdate) { factor = f.factor; break; }
       }
     } else {
       // forward-asof：找 date >= kdate 的最小因子
