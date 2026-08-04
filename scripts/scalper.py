@@ -309,7 +309,7 @@ def batch_query_intraday(conn, cycle="1m", days=None):
     return out
 
 
-def batch_query_intraday_ndays(conn, cycle="1m", days=20, workers=8):
+def batch_query_intraday_ndays(conn, cycle="1m", days=20, jobs=8):
     """N 天分钟线批量查询 (只取 13:31 后 close, 供 calc_tail_momentum_factor)。
 
     数据量大, 优化: ① SQL 端过滤 13:31 前数据 ② 只取 close 列 ③ 按前缀分片并发。
@@ -352,7 +352,7 @@ def batch_query_intraday_ndays(conn, cycle="1m", days=20, workers=8):
         except Exception:
             return {}
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
         futs = [pool.submit(_query_chunk, cw) for cw in chunks]
         for f in as_completed(futs):
             try:
@@ -842,7 +842,7 @@ def _screen_one_compute(market, code, pod, bars_1d, fin, intra, intra_ndays,
                     cfg, names, rps_baseline)
 
 
-def prefetch_daily(conn, cfg, workers):
+def prefetch_daily(conn, cfg, jobs):
     """每交易日预取一次的日频/财务/N天分钟线 (盘中不变, 循环外缓存)。
 
     RPS 基线/1d/财务纯历史当日不变; N天1m 供尾盘动量因子 (看历史多日模式, 当日
@@ -860,14 +860,14 @@ def prefetch_daily(conn, cfg, workers):
     rps_baseline = build_market_rps_baseline(bars_1d_all, cfg["rps_periods"])
     fin_all = batch_query_finance(conn)
     intra_ndays_all = batch_query_intraday_ndays(
-        conn, "1m", days=cfg["tail_mom_lookback"], workers=workers)
+        conn, "1m", days=cfg["tail_mom_lookback"], jobs=jobs)
     sys.stderr.write(
         f"[scalper] 日频预取 (1d复权/RPS基线/财务/N天1m) 耗时 {time.time() - t0:.1f}s\n")
     return rps_baseline, bars_1d_all, fin_all, intra_ndays_all
 
 
 def screen(conn, universe, shm_reader, cfg, names, daily,
-           require_intraday=True, workers=8):
+           require_intraday=True, jobs=8):
     """单轮筛选: daily=预取的日频数据(盘中不变), 每轮只刷当日 1m + 取 shm pod。"""
     rps_baseline, bars_1d_all, fin_all, intra_ndays_all = daily
     t0 = time.time()
@@ -881,7 +881,7 @@ def screen(conn, universe, shm_reader, cfg, names, daily,
     # ---- 纯计算并行 (日频/N天1m 取自 daily 缓存, 不每轮查) ----
     t1 = time.time()
     results, errs, futs = [], 0, []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
         for m, c in universe:
             pod = shm_reader.get(c)
             if pod is None:
@@ -904,7 +904,7 @@ def screen(conn, universe, shm_reader, cfg, names, daily,
                 errs += 1
     if errs:
         sys.stderr.write(f"[scalper] ⚠ {errs}/{len(futs)} 只计算异常 (已跳过)\n")
-    sys.stderr.write(f"[scalper] {workers} 线程计算 {len(futs)} 只耗时 {time.time() - t1:.1f}s\n")
+    sys.stderr.write(f"[scalper] {jobs} 线程计算 {len(futs)} 只耗时 {time.time() - t1:.1f}s\n")
     results.sort(key=lambda x: (-x.get("signal_score", 0), -x["gain_pct"]))
     return results
 
@@ -1285,7 +1285,7 @@ def main():
     ap.add_argument("--end", default="15:00", help="结束时间 HH:MM (默认 15:00)")
     ap.add_argument("--interval", type=int, default=30, help="刷新间隔秒 (默认 30)")
     ap.add_argument("--once", action="store_true", help="单次运行 (不循环)")
-    ap.add_argument("--workers", type=int, default=8, help="并发线程数 (默认 8)")
+    ap.add_argument("--jobs", type=int, default=8, help="并发线程数 (默认 8)")
     args = ap.parse_args()
 
     cfg = dict(DEFAULTS)
@@ -1362,7 +1362,7 @@ def main():
             # 日频预取按交易日缓存 (盘中不变, 跨日才重取)
             today = now.date()
             if daily is None or today != cur_date:
-                daily = prefetch_daily(conn, cfg, args.workers)
+                daily = prefetch_daily(conn, cfg, args.jobs)
                 cur_date = today
 
             # 执行一轮筛选
@@ -1372,7 +1372,7 @@ def main():
             try:
                 results = screen(conn, universe, shm, cfg, names, daily,
                                  require_intraday=require_intraday,
-                                 workers=args.workers)
+                                 jobs=args.jobs)
                 elapsed = time.time() - t0
                 output = render_table(results, round_no, elapsed)
                 sys.stdout.write(output)
