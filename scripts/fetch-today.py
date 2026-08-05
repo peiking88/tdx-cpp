@@ -413,6 +413,17 @@ class ShmViewer:
         return True
 
 
+def _exit_newline():
+    """退出前回车换行，避免 shell 提示符接在末行行情/统计之后。"""
+    try:
+        sys.stdout.write("\r\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+atexit.register(_exit_newline)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="编排 N×fetch-kline + fetch-quotes(shm+TDengine)；屏幕行情，日志入 stderr")

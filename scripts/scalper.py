@@ -88,8 +88,9 @@ SLOT_OFF_CODE = 8
 SLOT_OFF_POD = 16
 SLOT_OFF_FLAGS = 240
 
-MAIN_BOARD_PREFIXES = ("60", "00")
+MAIN_BOARD_PREFIXES = ("60", "00", "30", "68")
 LIMIT_UP_PCT = 9.8
+LIMIT_UP_PCT_20 = 19.8  # 创业板 (30) / 科创板 (68) 20% 涨跌幅限制
 
 DEFAULTS = {
     "gain_low": 3.0,
@@ -428,9 +429,12 @@ def read_wp_blk(path=WP_PATH):
 # ---------------------------------------------------------------------------
 # 基础指标计算
 # ---------------------------------------------------------------------------
-def has_limit_up(bars, threshold=LIMIT_UP_PCT, lookback=None):
+def has_limit_up(bars, threshold=LIMIT_UP_PCT, lookback=None, code=None):
     if len(bars) < 2:
         return False
+    # 创业板 (30) / 科创板 (68) 20% 涨跌幅限制, 主板 10% (北交所已排除出标的池)。
+    if code is not None and code.startswith(("30", "68")):
+        threshold = LIMIT_UP_PCT_20
     # 语义: 近 lookback 天内是否有某日涨停——只要求涨停当日落在窗口内,
     # 参照日 (前一日) 可早于窗口 (否则窗口边界的涨停会被漏掉)。
     cutoff = datetime.now() - timedelta(days=lookback) if lookback else None
@@ -710,7 +714,7 @@ def diagnose(market, code, quote_pod, bars_1d, fin, bars_intraday,
         return None
 
     # 2. 股性 (涨停基因)
-    result["has_limit_up"] = (has_limit_up(bars_1d, lookback=cfg["lookback_days"])
+    result["has_limit_up"] = (has_limit_up(bars_1d, lookback=cfg["lookback_days"], code=code)
                               if bars_1d else False)
     if not result["has_limit_up"]:
         return None
@@ -1322,8 +1326,8 @@ def main():
         market, code = parse_code(args.code)
         universe = [(market, code)]
     elif args.all:
-        # 战法规则与阈值 (涨幅/涨停基因 9.8%/换手) 均针对 10% 涨停的主板 (60/00);
-        # 创业板/科创/北交涨跌幅不同, 统一 9.8% 判定失真 → --all 限定主板。
+        # 标的池: 主板 (60/00) + 创业板 (30) + 科创板 (68), 10%/20% 涨跌幅限制
+        # 同台竞技; 北交所 (30% 涨跌幅) 仍排除, 因涨停基因阈值 9.8% 对其失真。
         universe = [(m, c) for m, c in all_mainboard_codes(conn)
                     if c.startswith(MAIN_BOARD_PREFIXES)]
     else:
