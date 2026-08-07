@@ -18,6 +18,9 @@ python3 scripts/smmd.py --zxg   # SMMD 股市操纵检测（K-Means++ 聚类 + �
 python3 scripts/append.py       # 全市场增量补导（读 stock_name → vipdoc + 网络增量入库）
 python3 scripts/scalper.py      # 隔夜套利选股（14:30-15:00 循环, 写 WP.blk + scalper_pick + scalper-日期.csv）
 python3 scripts/scalper.py verify   # 选股验证（前日14:30-15:00均价买/当日9:30-10:00均价卖, 写 scalper_verify + verify.csv）
+python3 scripts/seiver.py --zxg     # 多策略选股筛子（--methods leader dc div 三法 OR 合并, 写 LT.blk + seiver.csv）
+python3 scripts/seiver.py --zxg --methods div             # 仅分钟信号（30m MACD底背离 + 5m MACD零轴金叉）
+python3 scripts/seiver.py --zxg --backtest-div            # 回测分钟信号各持有期收益率（vs 全 bar 基线）
 ```
 
 ## 选股与验证持久化
