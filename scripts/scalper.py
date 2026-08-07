@@ -773,6 +773,9 @@ def diagnose(market, code, quote_pod, bars_1d, fin, bars_intraday,
     if vwema is not None:
         enhancements["tail_vwema"] = vwema
         enhancements["vwema_diverging"] = diverging
+    # --no-vwema-diverge: 硬过滤拉尾盘票 (回测 vwema=True 过夜 29%/-0.89%)
+    if cfg.get("no_vwema_diverge") and diverging:
+        return None
 
     cpr = calc_cpr(quote_pod[POD_HIGH], quote_pod[POD_LOW], price)
     if cpr:
@@ -803,16 +806,17 @@ def diagnose(market, code, quote_pod, bars_1d, fin, bars_intraday,
 
     result["enhancements"] = enhancements
 
-    # 综合信号得分
+    # 综合信号得分 (vwema_diverging=拉尾盘, 回测显示对隔夜反相关 → --no-vwema-diverge 可剔除此项)
     checks = [
         ("tail_mom", lambda: enhancements.get("tail_mom", {}).get("cos") is not None
                               and enhancements["tail_mom"]["cos"] > 0),
-        ("vwema_diverging", lambda: enhancements.get("vwema_diverging") is True),
         ("vol_high", lambda: enhancements.get("vol_high", {}).get("is_high") is True),
         ("breakout_quality", lambda: enhancements.get("breakout_quality") is True),
         ("turnover_stable", lambda: enhancements.get("turnover_stable") is True),
         ("ma_bullish", lambda: enhancements.get("ma_bullish_align") is True),
     ]
+    if not cfg.get("no_vwema_diverge"):
+        checks.append(("vwema_diverging", lambda: enhancements.get("vwema_diverging") is True))
     hit, total = 0, 0
     for _, pred in checks:
         total += 1
@@ -1290,6 +1294,12 @@ def main():
     ap.add_argument("--interval", type=int, default=30, help="刷新间隔秒 (默认 30)")
     ap.add_argument("--once", action="store_true", help="单次运行 (不循环)")
     ap.add_argument("--jobs", type=int, default=8, help="并发线程数 (默认 8)")
+    ap.add_argument("--max-signal-score", type=float, default=1.0,
+                    help="实验: 丢弃 signal_score 高于此值的票 (默认 1.0=关; "
+                         "回测显示高分票过夜反而差, 根因=vwema_diverging 拉尾盘)")
+    ap.add_argument("--no-vwema-diverge", action="store_true",
+                    help="实验: 中和 vwema_diverging (拉尾盘) — signal_score 剔除该项 + "
+                         "硬过滤拉尾盘票 (回测: 排除后胜率49%%→62%%, 默认关)")
     args = ap.parse_args()
 
     cfg = dict(DEFAULTS)
@@ -1299,6 +1309,7 @@ def main():
     cfg["cap_max"] = args.cap_max
     cfg["vol_ratio"] = args.vol_ratio
     cfg["tail_mom_lookback"] = args.tail_lookback
+    cfg["no_vwema_diverge"] = args.no_vwema_diverge
 
     # 解析时段
     start_h, start_m = parse_hhmm(args.start)
@@ -1377,6 +1388,14 @@ def main():
                 results = screen(conn, universe, shm, cfg, names, daily,
                                  require_intraday=require_intraday,
                                  jobs=args.jobs)
+                # 实验: 丢弃高分票 (回测反相关, 根因 vwema_diverging 拉尾盘)
+                if args.max_signal_score < 1.0:
+                    n0 = len(results)
+                    results = [r for r in results
+                               if r.get("signal_score", 0) <= args.max_signal_score]
+                    if n0 != len(results):
+                        sys.stderr.write(f"[scalper] --max-signal-score {args.max_signal_score}: "
+                                         f"滤掉 {n0 - len(results)} 只高分票\n")
                 elapsed = time.time() - t0
                 output = render_table(results, round_no, elapsed)
                 sys.stdout.write(output)
