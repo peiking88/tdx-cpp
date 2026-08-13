@@ -84,21 +84,30 @@ def read_zxg(path):
 
 
 def read_all_market_codes():
-    """从 stock_name 表枚举全市场 A 股代码——与 import --all 同源。"""
+    """从 stock_name 表枚举全市场 A 股代码——与 import --all 同源。
+    taos 不可用/查询失败时打印真实 stderr 并返回 None（区别于表为空的 []），
+    不再静默吞异常——否则上游只报误导的"无代码…均空"。
+    timeout=30 防坏 taos（如 pip 装的 Python CLI 卡在 HTTP 重连）挂死本进程。"""
     try:
         r = subprocess.run(
             [TAOS, "-s", f"USE {TAOS_DB}; SELECT code, market FROM stock_name"],
-            capture_output=True, text=True)
-        codes = []
-        for ln in r.stdout.splitlines():
-            parts = ln.split("|")
-            if len(parts) >= 2:
-                c, m = parts[0].strip(), parts[1].strip()
-                if len(c) == 6 and m in ("sh", "sz", "bj"):
-                    codes.append(f"{m}{c}")
-        return codes
-    except Exception:
-        return []
+            capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        sys.stderr.write(f"读取 stock_name 失败（taos={TAOS}）: {e}\n")
+        return None
+    if r.returncode != 0 or not r.stdout:
+        sys.stderr.write(
+            f"读取 stock_name 失败（taos={TAOS}，returncode={r.returncode}）:\n"
+            f"{r.stderr.strip() or '(无 stderr)'}\n")
+        return None
+    codes = []
+    for ln in r.stdout.splitlines():
+        parts = ln.split("|")
+        if len(parts) >= 2:
+            c, m = parts[0].strip(), parts[1].strip()
+            if len(c) == 6 and m in ("sh", "sz", "bj"):
+                codes.append(f"{m}{c}")
+    return codes
 
 
 def round_robin(items, n):
@@ -456,6 +465,8 @@ def main():
             codes = f.read().split()
     elif args.all:
         codes = read_all_market_codes()
+        if codes is None:
+            return 1  # taos 失败，已在 read_all_market_codes 打印真实错误
     else:
         codes = read_zxg(args.zxg)
     if not codes:

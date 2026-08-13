@@ -120,7 +120,7 @@ def load_stock_names(conn):
 
 
 def write_xlsx(all_results, output_dir):
-    """结果写 Excel：带日期戳 + 固定最新名双文件（对齐 seiver 惯例）。
+    """结果写 Excel：带日期戳 + 固定最新名双文件（对齐 find-diverse 惯例）。
 
     百分比列 ×100 存数值（如 回撤 55.1），列名带 %，Excel 直读无需设格式。
     """

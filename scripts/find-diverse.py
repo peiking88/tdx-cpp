@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""seiver (筛子) — 两套选股方法, --methods 参数化组合。
+"""find-diverse (选股筛子) — 三套选股方法, --methods 参数化组合。
 
-方法 (任选, 默认两法并用 OR 合并):
-  leader (龙头漏斗): 四层技术指标漏斗 (RPS + MA + 新高 + RSI/ADX/CCI + 口袋支点 + 风控)
-  dc    (二次穿越) : 周线 MACD DIFF 两次上穿 DEA, 中间夹死叉 (洗盘),
+方法 (任选, 默认三法 OR 合并):
+  leader       (龙头漏斗)  : 四层技术指标漏斗 (RPS + MA + 新高 + RSI/ADX/CCI + 口袋支点 + 风控)
+  macd-week-dc (周线二次穿越): 周线 MACD DIFF 两次上穿 DEA, 中间夹死叉 (洗盘),
                      第二次金叉在零轴附近/上方 + 放量 + 站上周均线
-  div   (分钟信号) : 30m MACD 底背离 (价 LL + DIFF HL) + 5m MACD 零轴上金叉
+  macd-min-gc  (分钟信号)  : 30m MACD 底背离 (价 LL + DIFF HL) + 5m MACD 零轴上金叉
 
 命中标记 strategy: 漏斗 / 二次穿越 / 双命中 (两法同中)。dc-only 时跳过日线指标计算。
 
@@ -757,7 +757,7 @@ def _base_row(last, rets=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="seiver 选股筛子 (龙头漏斗 + 周线二次穿越 + 30m底背离/5m零轴金叉)")
+    ap = argparse.ArgumentParser(description="find-diverse 选股筛子 (龙头漏斗 + 周线二次穿越 + 30m底背离/5m零轴金叉)")
     ap.add_argument("--codes", nargs="*", help="指定代码")
     ap.add_argument("--zxg", action="store_true", help="自选股")
     ap.add_argument("--all", action="store_true", help="全主板")
@@ -767,12 +767,12 @@ def main():
     ap.add_argument("--diagnostic", action="store_true",
                     help="显示 RPS 通过但其他过滤未通过的股票 (诊断模式)")
     ap.add_argument("--limit", type=int, help="最多分析多少只 (调试)")
-    ap.add_argument("--output-dir", default="output/seiver", help="输出目录")
+    ap.add_argument("--output-dir", default="output/find-diverse", help="输出目录")
     ap.add_argument("--jobs", type=int, default=8, help="并发线程数 (默认 8)")
-    ap.add_argument("--methods", nargs="+", default=["leader", "dc", "div"],
-                    choices=["leader", "dc", "div"],
-                    help="选股方法 (默认 leader dc div 三法 OR 合并; "
-                         "leader=龙头漏斗, dc=周线二次穿越, div=30m底背离+5m零轴金叉)")
+    ap.add_argument("--methods", nargs="+", default=["leader", "macd-week-dc", "macd-min-gc"],
+                    choices=["leader", "macd-week-dc", "macd-min-gc"],
+                    help="选股方法 (默认三法 OR 合并; "
+                         "leader=龙头漏斗, macd-week-dc=周线二次穿越, macd-min-gc=30m底背离+5m零轴金叉)")
     # 周线 MACD 二次穿越参数
     ap.add_argument("--dc-fresh", type=int, default=4, help="二次穿越新鲜度: g2 在最近 N 周内 (默认 4)")
     ap.add_argument("--dc-lookback", type=int, default=30, help="二次穿越回溯窗口周数 (默认 30)")
@@ -806,8 +806,8 @@ def main():
         return
 
     run_leader = "leader" in args.methods
-    run_dc = "dc" in args.methods
-    run_div = "div" in args.methods
+    run_dc = "macd-week-dc" in args.methods
+    run_div = "macd-min-gc" in args.methods
 
     conn = connect()
 
@@ -1005,10 +1005,9 @@ def main():
                 "gc_diff", "gc_dea", "gc_age", "gc_ts", "gc_rising"]
         df_out = df_out[[c for c in cols if c in df_out.columns]]
         # 日期戳 CSV (浮点保留3位)
-        csv_file = os.path.join(args.output_dir, f"seiver-{time.strftime('%Y%m%d')}.csv")
+        csv_file = os.path.join(args.output_dir, f"find-diverse-{time.strftime('%Y%m%d')}.csv")
         df_out.round(3).to_csv(csv_file, index=False)
-        # 兼容旧名
-        df_out.to_csv(os.path.join(args.output_dir, "seiver.csv"), index=False)
+        df_out.to_csv(os.path.join(args.output_dir, "find-diverse.csv"), index=False)
 
     # 主表 (龙头漏斗视角): 仅 leader 模式有日线指标列, dc-only 跳过直接看二次穿越明细
     filtered = [r for r in results if _selected(r, args)]
@@ -1097,7 +1096,7 @@ def main():
             written += 1
     print(f"[blk] → LT.blk ({written} 只)")
 
-    print(f"\n[output] → {args.output_dir}/seiver.csv")
+    print(f"\n[output] → {args.output_dir}/find-diverse.csv")
     n_dc = sum(1 for r in results if "二次穿越" in r["strategy"])
     n_div = sum(1 for r in results if "背离" in r["strategy"])
     n_gc = sum(1 for r in results if "金叉" in r["strategy"])
