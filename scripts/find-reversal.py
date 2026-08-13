@@ -145,10 +145,8 @@ def write_xlsx(all_results, output_dir):
     df = pd.DataFrame(rows)
     stamp = time.strftime("%Y%m%d")
     stamped = os.path.join(output_dir, f"find-reversal-{stamp}.xlsx")
-    latest = os.path.join(output_dir, "find-reversal.xlsx")
     df.to_excel(stamped, index=False)
-    df.to_excel(latest, index=False)
-    return stamped, latest, len(rows)
+    return stamped, len(rows)
 
 
 # ======================== 筛选逻辑 ========================
@@ -439,9 +437,8 @@ def main():
 
     # 写 Excel（json 模式跳过；写全部通过结果，不限 top）
     if not args.json:
-        stamped, latest, n = write_xlsx(all_results, args.output_dir)
-        print(f"[xlsx] → {latest} (+ {os.path.basename(stamped)} 带日期, 共 {n} 条)",
-              file=sys.stderr)
+        stamped, n = write_xlsx(all_results, args.output_dir)
+        print(f"[xlsx] → {stamped} (共 {n} 条)", file=sys.stderr)
 
     return 0
 
