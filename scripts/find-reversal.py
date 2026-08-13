@@ -29,6 +29,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+import pandas as pd
 import taosws
 
 from common import all_mainboard_codes, parse_code, zxg_codes
@@ -107,6 +108,47 @@ def batch_query_shares(cursor, codes):
     for row in cursor.fetchall():
         shares[row[0]] = row[1]
     return shares
+
+
+def load_stock_names(conn):
+    """从 stock_name 表加载 {code: 名称}（code 形如 'sh600105'）。"""
+    try:
+        return {f"{m}{c}": n for m, c, n in conn.query(
+            "SELECT market, code, name FROM tdx.stock_name")}
+    except Exception:
+        return {}
+
+
+def write_xlsx(all_results, output_dir):
+    """结果写 Excel：带日期戳 + 固定最新名双文件（对齐 seiver 惯例）。
+
+    百分比列 ×100 存数值（如 回撤 55.1），列名带 %，Excel 直读无需设格式。
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    rows = []
+    for code, d in all_results:
+        rows.append({
+            "代码": code,
+            "名称": d.get("name", ""),
+            "底部日期": d["trough_date"],
+            "低点": d["trough_low"],
+            "回撤%": round(d["drawdown"] * 100, 1),
+            "振幅%": round(d["bottom_amplitude"] * 100, 1),
+            "下影%": round(d["lower_shadow_ratio"] * 100, 1),
+            "假阴线": ",".join(d["fake_bearish"]) if d["fake_bearish"] else "",
+            "换手%": round(d["turnover_peak"], 1),
+            "换手日": d.get("turnover_peak_date", ""),
+            "二次低": d["secondary_low"] if d["secondary_low"] is not None else "",
+            "现价": d["current_close"],
+            "反弹%": round(d["rebound"] * 100, 1),
+        })
+    df = pd.DataFrame(rows)
+    stamp = time.strftime("%Y%m%d")
+    stamped = os.path.join(output_dir, f"find-reversal-{stamp}.xlsx")
+    latest = os.path.join(output_dir, "find-reversal.xlsx")
+    df.to_excel(stamped, index=False)
+    df.to_excel(latest, index=False)
+    return stamped, latest, len(rows)
 
 
 # ======================== 筛选逻辑 ========================
@@ -258,7 +300,8 @@ def main():
     parser.add_argument("--no-fake-bearish", action="store_true", help="不要求假阴线")
     parser.add_argument("--no-secondary-test", action="store_true", help="不要求二次探底")
     parser.add_argument("--no-breakout", action="store_true", help="不要求突破确认")
-    parser.add_argument("--json", action="store_true", help="JSON 输出")
+    parser.add_argument("--json", action="store_true", help="JSON 输出 (stdout, 不写 xlsx)")
+    parser.add_argument("--output-dir", default="output/find-reversal", help="Excel 输出目录")
     args = parser.parse_args()
 
     # 构建配置
@@ -275,6 +318,7 @@ def main():
     url = f"taosws://{TDENGINE_USER}:{TDENGINE_PASS}@{TDENGINE_HOST}:{TDENGINE_PORT}/{TDENGINE_DB}"
     conn = taosws.connect(url)
     cursor = conn.cursor()
+    names_by_code = load_stock_names(conn)
 
     t0 = time.time()
 
@@ -335,6 +379,7 @@ def main():
             passed, details = screen_stock(code, rows, float_shares, config)
             if passed:
                 batch_passed += 1
+                details["name"] = names_by_code.get(code, "")
                 all_results.append((code, details))
 
         print(
@@ -391,6 +436,14 @@ def main():
 
         print(f"{'='*100}")
         print(f"[4/4] 输出前 {min(args.top, len(all_results))} 个结果", file=sys.stderr)
+
+    # 写 Excel（json 模式跳过；写全部通过结果，不限 top）
+    if not args.json:
+        stamped, latest, n = write_xlsx(all_results, args.output_dir)
+        print(f"[xlsx] → {latest} (+ {os.path.basename(stamped)} 带日期, 共 {n} 条)",
+              file=sys.stderr)
+
+    return 0
 
 
 if __name__ == "__main__":
