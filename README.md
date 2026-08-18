@@ -44,6 +44,7 @@ python3 scripts/fetch-margin.py                            # 融资融券数据�
 python3 scripts/leverage-risk.py                           # 市场杠杆风险监测（读 TDengine，零外部依赖）
 python3 scripts/find-jerry.py                               # 某队 ETF 动向追踪（汇金/证金/社保持仓变化）
 python3 scripts/market-analysis.py                           # 盘面分析（财经资讯 + LLM 生成报告; 需 DEEPSEEK_API_KEY）
+python3 scripts/czsc-predict.py                              # 缠论趋势预测（1d/30m/5m 趋势质量评估, 复用 C++ czsc 引擎）
 ```
 
 ## 选股与验证持久化

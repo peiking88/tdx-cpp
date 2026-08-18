@@ -1064,6 +1064,9 @@ int DoFetchQuotes(int argc, char **argv);
 // czsc 子命令（定义在 cli/czsc.cpp）：批量缠论信号分析
 int DoCzsc(int argc, char **argv);
 
+// czsc-structure 子命令（定义在 cli/czsc_structure.cpp）：单标的缠论结构 JSON
+int DoCzscStructure(int argc, char **argv);
+
 // 在 absl ParseCommandLine (由 MainInitGuard 触发) 之前拦截 --help/-h/help，
 // 否则 gflags 会吃掉 --help 直接 exit(0)，用户永远看不到子命令列表。
 static void PrintUsage()
@@ -1190,6 +1193,7 @@ int main(int argc, char **argv)
   if (cmd == "sp-bar")        return DoSpSymbolBar(argc, argv);
   if (cmd == "sp-auction")    return DoSpAuction(argc, argv);
   if (cmd == "czsc")          return DoCzsc(argc, argv);
+  if (cmd == "czsc-structure") return DoCzscStructure(argc, argv);
 
   // ---- 向后兼容别名（v0.15.0 重命名，下个大版本可移除） ----
   if (cmd == "sync-names") {

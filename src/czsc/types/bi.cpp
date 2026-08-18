@@ -155,6 +155,47 @@ double BI::get_angle() const noexcept {
   return round_n(angle_deg, 2);
 }
 
+// R² 拟合优度（bi.rs:510-521）— 线性回归决定系数，对齐 Rust single_linear()
+double BI::get_rsq() const noexcept {
+  auto raw_bars = get_raw_bars();
+  size_t n = raw_bars.size();
+  if (n == 0) return 0.0;
+
+  double sample_size = static_cast<double>(n);
+
+  // x = [0, 1, 2, ..., n-1]，用等差数列公式
+  double sum_x = (sample_size - 1.0) * sample_size / 2.0;
+  double sum_x_squared = (sample_size - 1.0) * sample_size * (2.0 * sample_size - 1.0) / 6.0;
+
+  double sum_xy = 0.0, sum_y = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    double y = raw_bars[i].close;
+    sum_xy += static_cast<double>(i) * y;
+    sum_y += y;
+  }
+
+  double denominator = sample_size * sum_x_squared - sum_x * sum_x;
+  if (denominator == 0.0) return 0.0;
+
+  double y_intercept = (sum_x_squared * sum_y - sum_x * sum_xy) / denominator;
+  double slope = (sample_size * sum_xy - sum_x * sum_y) / denominator;
+
+  double y_mean = sum_y / sample_size;
+  double ss_tot = 0.0, ss_err = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    double y = raw_bars[i].close;
+    double y_diff = y - y_mean;
+    double predicted = slope * static_cast<double>(i) + y_intercept;
+    double err = y - predicted;
+    ss_tot += y_diff * y_diff;
+    ss_err += err * err;
+  }
+
+  // 对齐 Rust: rsq = 1.0 - ss_err / (ss_tot + 0.00001)
+  double rsq = 1.0 - ss_err / (ss_tot + 0.00001);
+  return round_n(rsq, 4);
+}
+
 // 原始K线（bi.rs:524-539）
 std::vector<RawBar> BI::get_raw_bars() const {
   if (bars.size() <= 2) return {};

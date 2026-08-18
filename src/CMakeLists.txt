@@ -83,6 +83,6 @@ set_target_properties(tdx_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINA
 target_link_libraries(tdx_smoke PRIVATE base fibers2)
 
 # ---- tdx_cli：命令行工具（server-test / bars / ex-bars / fetch-history / import）----
-add_executable(tdx cli/main.cpp cli/import.cpp cli/fetch_quotes.cpp cli/czsc.cpp)
+add_executable(tdx cli/main.cpp cli/import.cpp cli/fetch_quotes.cpp cli/czsc.cpp cli/czsc_structure.cpp)
 target_link_libraries(tdx PRIVATE tdx_data tdx_quotes tdx_taos tdx_shm base fibers2 czsc_signals_persist czsc_signals)
 

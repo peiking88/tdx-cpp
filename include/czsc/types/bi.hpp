@@ -54,8 +54,8 @@ struct BI {
   // 无包含K线数量（bi.rs:505-507）
   size_t get_length() const noexcept { return bars.size(); }
 
-  // R² 拟合优度（bi.rs:510-521）— 依赖 LinearRegression，Phase 1 返回 0
-  double get_rsq() const noexcept { return 0.0; }  // ponytail: Phase 2 补 LinearRegression
+  // R² 拟合优度（bi.rs:510-521）— 线性回归决定系数
+  double get_rsq() const noexcept;
 
   // 斜边长度（bi.rs:542-544）
   double get_hypotenuse() const noexcept;
