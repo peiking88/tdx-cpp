@@ -12,7 +12,7 @@
      主板 ST 5%；涨停价 = 前收 ×(1+比率) 四舍五入到分，Decimal 精确计算）
   2. 今日开盘价 < 昨日收盘（低开）
   3. (当前价 - 底部最低价) / 底部最低价 <= --rise（默认 10%）
-     底部最低价 = 截至昨日的最近 --days 个交易日（默认 60）最低 low
+     底部最低价 = 回看一年（250 交易日）内最低 low（不含今日），自动确定无需参数。
 
 前置条件: 需 fetch-today / fetch-kline 已在盘中运行，当日 1d bar 已入库
 （当前价取当日 bar 的 close，即最新价）。
@@ -20,7 +20,8 @@
 用法:
   python3 scripts/find-limit-up.py                     # 默认筛自选股 zxg.blk
   python3 scripts/find-limit-up.py --all               # 筛全部 A 股
-  python3 scripts/find-limit-up.py --rise 0.15 --days 40
+  python3 scripts/find-limit-up.py --rise 0.15
+  python3 scripts/find-limit-up.py --all --y           # 仅昨日涨停+今日低开, 不限距底涨幅
 ================================================================================
 """
 
@@ -46,7 +47,7 @@ TDENGINE_PASS = os.environ.get("TDENGINE_PASS", "taosdata")
 TDENGINE_DB = os.environ.get("TDENGINE_DB", "tdx")
 
 BATCH_SIZE = 1800  # UNION ALL 批大小（实测 ~1.8s/批）
-LOOKBACK_DAYS = 60  # 底部回看交易日数
+BOTTOM_SCAN_DAYS = 250  # U 型底检测回看上限（交易日，≈一年）
 MAX_RISE_FROM_BOTTOM = 0.10  # 距底部低点最大涨幅
 TOP_N = 50
 
@@ -158,7 +159,19 @@ def write_xlsx(all_results, output_dir):
 
 
 # ======================== 筛选逻辑 ========================
-def screen_stock(code, kline_rows, name, today_str, max_rise, lookback):
+def find_recent_bottom(hist, scan_days=BOTTOM_SCAN_DAYS):
+    """最近底部最低价 → (最低价, 日期)：回看 scan_days 交易日（默认一年）内
+    最低 low。hist 不含今日。
+
+    不做左沿/近端 U 启发式——容差式左沿会被普通日内振幅误触发，把上升趋势中的
+    短暂回调低点误判为底部（且结果随容差漂移）。一年最低点即谷底，确定唯一。
+    """
+    window = hist[-scan_days:] if len(hist) > scan_days else hist
+    lo, ts = min((float(r[3]), r[0]) for r in window)
+    return lo, ts
+
+
+def screen_stock(code, kline_rows, name, today_str, max_rise):
     """
     对单只股票应用筛选条件。kline_rows 按 ts 升序，最后一行须为今日。
 
@@ -189,16 +202,12 @@ def screen_stock(code, kline_rows, name, today_str, max_rise, lookback):
     if today_open >= yday_close:
         return False, {"reason": "未低开"}
 
-    # 3. 距底部涨幅（底部窗口截至昨日，含昨日）
-    window = kline_rows[-1 - lookback:-1]
-    if not window:
-        return False, {"reason": "窗口无数据"}
-    lows = [(float(r[3]), r[0]) for r in window]
-    bottom_low, bottom_ts = min(lows, key=lambda x: x[0])
+    # 3. 距底部涨幅（底部 = 一年内最低 low，截至昨日）。max_rise=None (--y) 不设限，仅报告
+    bottom_low, bottom_ts = find_recent_bottom(kline_rows[:-1])
     if bottom_low <= 0:
         return False, {"reason": "底部低点异常"}
     rise = (current - bottom_low) / bottom_low
-    if rise > max_rise:
+    if max_rise is not None and rise > max_rise:
         return False, {"reason": "距底涨幅超标"}
 
     return True, {
@@ -231,24 +240,45 @@ def self_test():
     rows.append(mk(10, 9.98, 10.05, 9.90, 9.95))   # 前收 9.95
     rows.append(mk(11, 10.00, 10.95, 9.98, 10.95))  # 昨日涨停
     rows.append(mk(12, 10.50, 10.90, 10.40, 10.80))  # 今日低开
-    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", 0.10, 60)
+    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", 0.10)
     assert ok and abs(d["rise_from_bottom"] - (10.80 - 9.90) / 9.90) < 1e-9, d
 
     # 距底涨幅超标（现价 12.00 距底 9.90 涨 21%）
     rows[-1] = mk(12, 10.50, 12.10, 10.40, 12.00)
-    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", 0.10, 60)
+    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", 0.10)
     assert not ok and d["reason"] == "距底涨幅超标", d
 
     # 未低开
     rows[-1] = mk(12, 11.00, 12.10, 10.90, 12.00)
-    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", 0.10, 60)
+    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", 0.10)
     assert not ok and d["reason"] == "未低开", d
 
     # 昨日未涨停
     rows[-2] = mk(11, 10.00, 10.80, 9.98, 10.80)
     rows[-1] = mk(12, 10.50, 10.90, 10.40, 10.80)
-    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", 0.10, 60)
+    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", 0.10)
     assert not ok and d["reason"] == "昨日未涨停", d
+
+    # 底部=一年最低: 上升趋势中的短暂回调低点(9.5)不是底, 更深历史底(8.0)才是
+    # （鸿博股份 2026-08 实例：7月深底 8.56 被误报为 08-14 回调低点 12.29 的回归）
+    rows = [mk(1, 11.0, 11.5, 10.8, 11.2), mk(2, 11.0, 11.5, 10.8, 11.2),
+            mk(3, 10.5, 10.6, 8.0, 8.5),          # 历史深底 8.0
+            mk(4, 10.0, 11.0, 10.2, 10.8), mk(5, 10.2, 11.0, 10.2, 10.8),
+            mk(6, 10.0, 10.1, 9.5, 9.7),          # 上升趋势中的回调低点（非底）
+            mk(7, 9.8, 10.67, 9.6, 10.67),        # 昨日涨停: 9.7×1.1=10.67
+            mk(8, 10.20, 10.5, 10.1, 10.30)]      # 今日低开
+    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-08", None)
+    assert ok and abs(d["bottom_low"] - 8.0) < 1e-9 and d["bottom_date"] == "2026-08-03", d
+    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-08", 0.10)
+    assert not ok and d["reason"] == "距底涨幅超标", d  # (10.30-8.0)/8.0 = 28.8%
+
+    # 底部=一年最低: 阴跌后涨停, 谷底 9.0 (两日等低取最早日)
+    rows = [mk(1, 10.0, 10.2, 10.0, 10.0), mk(2, 9.8, 9.9, 9.8, 9.8),
+            mk(3, 9.1, 9.2, 9.0, 9.0),            # 谷底 9.0
+            mk(4, 9.1, 9.9, 9.0, 9.9),            # 涨停: 9.0×1.1=9.9
+            mk(5, 9.50, 9.8, 9.4, 9.60)]          # 今日低开
+    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-05", 0.10)
+    assert ok and abs(d["bottom_low"] - 9.0) < 1e-9 and d["bottom_date"] == "2026-08-03", d
 
     # qfq: 08-09 除息 10派5（前收 10.0 → ef=0.95），除权前 low 10.0 复权到 9.5
     raw = [mk(d, 10.2, 10.3, 10.0, 10.1) for d in range(1, 8)]
@@ -260,9 +290,17 @@ def self_test():
     adj = qfq_rows(raw, ev)
     assert qfq_rows(raw, None) is raw, "无事件原样返回"
     assert abs(adj[0][3] - 9.5) < 1e-9, f"除权前 low 应复权到 9.5: {adj[0][3]}"
-    ok, d = screen_stock("sh600000", adj, "测试", "2026-08-11", 0.10, 60)
+    ok, d = screen_stock("sh600000", adj, "测试", "2026-08-11", 0.10)
     assert ok and abs(d["bottom_low"] - 9.5) < 1e-9, d  # 底部来自复权后除权前低点
     assert abs(d["rise_from_bottom"] - (10.20 - 9.5) / 9.5) < 1e-9, d
+
+    # --y 模式: 不限距底涨幅（原 21% 超标用例改判通过，仍报告底部）
+    rows = [mk(d, 10.2, 10.3, 10.0, 10.1) for d in range(1, 9)]
+    rows.append(mk(10, 9.98, 10.05, 9.90, 9.95))
+    rows.append(mk(11, 10.00, 10.95, 9.98, 10.95))
+    rows.append(mk(12, 10.50, 12.10, 10.40, 12.00))
+    ok, d = screen_stock("sh600000", rows, "测试", "2026-08-12", None)
+    assert ok and abs(d["rise_from_bottom"] - (12.00 - 9.90) / 9.90) < 1e-9, d
 
     print("self-test OK")
 
@@ -274,8 +312,8 @@ def main():
     parser.add_argument("--all", action="store_true", help="筛全部 A 股 (默认仅自选股 zxg.blk)")
     parser.add_argument("--rise", type=float, default=MAX_RISE_FROM_BOTTOM,
                         help="距底部低点最大涨幅 (默认 0.10)")
-    parser.add_argument("--days", type=int, default=LOOKBACK_DAYS,
-                        help="底部回看交易日数 (默认 60)")
+    parser.add_argument("--y", action="store_true",
+                        help="仅昨日涨停+今日低开，不限距底涨幅（仍检测并报告 U 型底）")
     parser.add_argument("--top", type=int, default=TOP_N, help="输出前 N 个结果")
     parser.add_argument("--json", action="store_true", help="JSON 输出 (stdout, 不写 xlsx)")
     parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-limit-up"), help="Excel 输出目录")
@@ -317,7 +355,7 @@ def main():
     adj_by_mc = batch_fetch_adjust(conn, a_stocks)
     print(f"[1/4] 复权事件: {len(adj_by_mc)} 只有除权记录", file=sys.stderr)
 
-    start_date = (datetime.now() - timedelta(days=args.days * 3 // 2 + 10)).strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=BOTTOM_SCAN_DAYS * 3 // 2 + 10)).strftime("%Y-%m-%d")
 
     all_results = []
     reject_count = Counter()
@@ -345,7 +383,7 @@ def main():
             name = names_by_code.get(code, "")
             rows = qfq_rows(rows, adj_by_mc.get((market, num)))
             passed, details = screen_stock(code, rows, name, today_str,
-                                           args.rise, args.days)
+                                           None if args.y else args.rise)
             if passed:
                 batch_passed += 1
                 details["name"] = name
@@ -370,13 +408,15 @@ def main():
               file=sys.stderr)
 
     mode_desc = "全 A 股" if args.all else "自选股"
+    rise_desc = "距底涨幅不限(--y)" if args.y else \
+        f"现价距一年内最低点涨幅 <= {args.rise:.0%}"
     if args.json:
         output = [{"code": code, **d} for code, d in all_results[:args.top]]
         print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
     else:
         print(f"\n{'='*100}")
         print(f" 昨日涨停今低开筛选结果 [{mode_desc}] {today_str}")
-        print(f" 条件: 昨日涨停, 今开<昨收, 现价距底部({args.days}日)低点涨幅 <= {args.rise:.0%}")
+        print(f" 条件: 昨日涨停, 今开<昨收, {rise_desc}")
         print(f" 共筛选 {len(a_stocks)} 只{mode_desc}, {len(all_results)} 只通过")
         print(f"{'='*100}")
         print(f"{'代码':<10} {'名称':<10} {'昨收':>8} {'涨停':>4} {'今开':>8} "
