@@ -151,3 +151,38 @@ add_executable(test_shm test_shm.cpp)
 target_include_directories(test_shm PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_shm PRIVATE tdx_shm gtest gtest_main)
 add_test(NAME test_shm COMMAND test_shm)
+
+# ======================== czsc 缠论模块测试（并入自 czsc-cpp）========================
+# gtest_no_skip.py: SKIPPED 不得被计为 PASSED（czsc 语义，防假绿）。
+# 纯单元测试严格模式；环境依赖型（TDengine / python czsc / golden 缺失可跳）放行
+# CZSC_ALLOW_SKIP=1，WORKING_DIRECTORY=源码根（cxt/compare 读相对路径数据）。
+find_program(CZSC_PYTHON3 NAMES python3 REQUIRED)
+function(czsc_test name libs)
+  add_executable(${name} ${name}.cpp)
+  target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  target_link_libraries(${name} PRIVATE ${libs} gtest gtest_main)
+  add_test(NAME ${name}
+    COMMAND ${CZSC_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/gtest_no_skip.py
+            $<TARGET_FILE:${name}>)
+endfunction()
+function(czsc_test_skip_ok name libs)
+  czsc_test(${name} "${libs}")
+  set_tests_properties(${name} PROPERTIES
+      ENVIRONMENT "CZSC_ALLOW_SKIP=1" WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endfunction()
+
+# Phase 1-5 纯单元（严格：任何 SKIP 即失败）
+czsc_test(czsc_test_types czsc_types)
+czsc_test(czsc_test_ta czsc_ta)
+czsc_test(czsc_test_analyze czsc_analyze)
+czsc_test_skip_ok(czsc_test_signals czsc_signals)
+czsc_test(czsc_test_integration czsc_signals)
+
+# golden 对照 / 环境依赖（数据缺失自动跳过，放行）
+czsc_test_skip_ok(czsc_test_cxt_signals czsc_signals)
+czsc_test_skip_ok(czsc_test_cxt_bs_positive czsc_signals)
+czsc_test_skip_ok(czsc_test_compare_py czsc_analyze)
+czsc_test_skip_ok(czsc_test_compare_py_multi czsc_analyze)
+czsc_test_skip_ok(czsc_test_market "czsc_signals_persist;czsc_signals")
+czsc_test_skip_ok(czsc_test_io czsc_io)
+czsc_test_skip_ok(czsc_test_io_resample czsc_signals_persist)

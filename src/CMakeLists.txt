@@ -74,12 +74,15 @@ add_subdirectory(taos)
 # ---- tdx_shm：盘中实时行情共享内存（Phase 6，纯标准库 mmap + seqlock）----
 add_subdirectory(shm)
 
+# ---- czsc：缠论分析引擎（并入自 czsc-cpp v0.7.0，upstream ebb3ef2）----
+add_subdirectory(czsc)
+
 # ---- Task 1 smoke：验证 helio 集成（输出到 build/demos）----
 add_executable(tdx_smoke smoke.cc)
 set_target_properties(tdx_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/demos)
 target_link_libraries(tdx_smoke PRIVATE base fibers2)
 
 # ---- tdx_cli：命令行工具（server-test / bars / ex-bars / fetch-history / import）----
-add_executable(tdx cli/main.cpp cli/import.cpp cli/fetch_quotes.cpp)
-target_link_libraries(tdx PRIVATE tdx_data tdx_quotes tdx_taos tdx_shm base fibers2)
+add_executable(tdx cli/main.cpp cli/import.cpp cli/fetch_quotes.cpp cli/czsc.cpp)
+target_link_libraries(tdx PRIVATE tdx_data tdx_quotes tdx_taos tdx_shm base fibers2 czsc_signals_persist czsc_signals)
 

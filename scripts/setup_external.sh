@@ -129,3 +129,10 @@ fi
 
 echo "external/ 初始化完成："
 ls -la external/
+
+# ---- czsc 模块系统依赖检查：ta-lib（czsc_ta 层需要，缺失则 cmake 配置失败） ----
+if ldconfig -p 2>/dev/null | grep -q "libta-lib\.so"; then
+  echo "ta-lib: 已安装 ($(ldconfig -p | grep -o 'libta-lib\.so[^ ]*' | head -1))"
+else
+  echo "警告: 未找到 libta-lib（czsc 缠论模块依赖）。安装: sudo apt install ta-lib-dev libta-lib0"
+fi

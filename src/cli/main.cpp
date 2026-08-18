@@ -1061,6 +1061,9 @@ int DoImport(int argc, char **argv, int jobs);
 // fetch-quotes 子命令（定义在 cli/fetch_quotes.cpp）
 int DoFetchQuotes(int argc, char **argv);
 
+// czsc 子命令（定义在 cli/czsc.cpp）：批量缠论信号分析
+int DoCzsc(int argc, char **argv);
+
 // 在 absl ParseCommandLine (由 MainInitGuard 触发) 之前拦截 --help/-h/help，
 // 否则 gflags 会吃掉 --help 直接 exit(0)，用户永远看不到子命令列表。
 static void PrintUsage()
@@ -1091,7 +1094,8 @@ static void PrintUsage()
             << "  tdx ex-history-tx <code> [ymd]   扩展历史成交（港股）\n"
             << "  tdx sp-quotes <sh|sz><code> [...] 单标的报价（SP 0x122B）\n"
             << "  tdx sp-bar <board_code> [period] 板块K线（SP 0x122E）\n"
-            << "  tdx sp-auction <sh|sz><code>     个股集合竞价（SP 0x123D，盘中 9:15-9:25）\n";
+            << "  tdx sp-auction <sh|sz><code>     个股集合竞价（SP 0x123D，盘中 9:15-9:25）\n"
+            << "  tdx czsc [--blk|--all|--codes] [--freqs F5,F30,D,week] [--n 4] [--interval 0]  缠论信号分析\n";
 }
 
 int main(int argc, char **argv)
@@ -1117,9 +1121,12 @@ int main(int argc, char **argv)
   for (int i = 1; i < argc; ++i)
   {
     std::string a = argv[i];
+    // --help/-h 在子命令后（如 tdx czsc --help）需剥离，让子命令自行处理帮助
+    // （顶层 tdx --help 已被上方拦截，不经过此处）。
     bool manual = a == "--full-reset" || a == "--no-clear-intraday" ||
                   a == "--zxg-blk" ||
-                  a == "--daily-only" || a == "--kronos";
+                  a == "--daily-only" || a == "--kronos" ||
+                  a == "--help" || a == "-h" || a == "--helpfull";
     if (manual)
     {
       if (a == "--zxg-blk" && i + 1 < argc) ++i;  // 跳过它的路径值
@@ -1182,6 +1189,7 @@ int main(int argc, char **argv)
   if (cmd == "sp-quotes")     return DoSpSymbolQuotes(argc, argv);
   if (cmd == "sp-bar")        return DoSpSymbolBar(argc, argv);
   if (cmd == "sp-auction")    return DoSpAuction(argc, argv);
+  if (cmd == "czsc")          return DoCzsc(argc, argv);
 
   // ---- 向后兼容别名（v0.15.0 重命名，下个大版本可移除） ----
   if (cmd == "sync-names") {

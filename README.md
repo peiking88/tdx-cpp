@@ -11,6 +11,19 @@ cmake --build build -j$(nproc)
 ctest --test-dir build -j$(nproc) --output-on-failure
 ```
 
+## 技术栈与依赖
+
+| 依赖 | 用途 | 备注 |
+|---|---|---|
+| C++17 + CMake + Ninja | 构建 | `setup_external.sh` 初始化 |
+| TDengine 客户端 | 时序存储 | libtaos（系统包 `libtaos-dev`） |
+| ta-lib | 技术指标（MACD/RSI/BOLL 等） | **czsc 模块必需**（`sudo apt install ta-lib-dev libta-lib0`） |
+| helio | 异步 IO（io_uring + fibers） | 行情网络层 |
+| nlohmann/json | JSON 序列化 | vendored（`include/nlohmann`，含 json_fwd.hpp） |
+| zlib / iconv | 压缩 / GBK 转码 | 协议必需 |
+
+**czsc 缠论模块**（`include/czsc` + `src/czsc`，并入自 [czsc-cpp](https://github.com/waditu/czsc) v0.7.0）提供分型/笔/中枢识别与 246 个信号函数；纯计算库，**不链 helio/absl**，taos 连接走 `tdx_taos_conn` 叶子。
+
 ## 辅助脚本
 
 ```bash

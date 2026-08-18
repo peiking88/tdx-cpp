@@ -26,6 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **v0.15.3**：文档整理——CLAUDE.md 全面重组（补 shm 模块/命令/心跳教训，里程碑压缩）+ README.md 删垃圾 diff 块/修过时 flag
 - **v0.15.4**：移除已回退命令的 CLI 分发（batch-fetch/bars/ex-bars/fetch-history/pull-kline 全部落入未知命令；tdx 链接移除 tdx_batch）+ 文档清理（README/CLAUDE 移除 batch-fetch/quotes_reader 引用）
 - **v0.36.0**：**qfq 末尾归一缺陷修复（三处同源）**——`adjust.cpp`/`common.apply_qfq` 前复权删「末尾归一」：forward-asof 下最新 bar 因子天然=1，归一除以最新事件 ef 会把该事件复权效果从所有 bar 约掉（**单除权事件股票 qfq 完全失效**；上游 tdxdata 的 backward-asof+归一同样有此问题，C++ 已偏离修正）。测试同步重写（`ApplyAdjustQfqSingleEvent` 单事件回归 + `SplitExDateNoGap` 双事件全连续）。新增 `scripts/find-limit-up.py`（昨日涨停今低开 + 现价距 60 日底部 ≤10% 筛选，前复权，涨停价 Decimal 四舍五入到分）
+- **v0.38.0**：**czsc 缠论分析引擎并入**（上游 czsc-cpp v0.7.0 @ebb3ef2 冻结归档）——`include/czsc` + `src/czsc`（types/ta/analyze/signals/io 五库 + signals_persist，246 信号函数）；整合三删一改：删 nlohmann/gtest FetchContent（复用本仓 vendored/helio）、删 `TDX_CPP_DIR` 反向引用（shm 改链 `tdx_shm`）；`tdx_taos` 拆出连接 RAII 叶子 `tdx_taos_conn`（czsc 连接统一走 `tdx::taos::TaosConnection`，不拖 helio）；工具 `czsc_cli`/`czsc_signal_viewer`/`czsc_data_viewer` + 12 个测试入 ctest（55 全绿）；新系统依赖 ta-lib（setup_external.sh 检查）
 - **v0.27.0**：fetch-today 屏显优化——行情表去掉当日无数据标的（`_has_today` 按本地日期过滤，单遍 `_lookup`）；`--all` 全量模式改为单行覆盖式统计（`第N轮A股 | 更新/写mmap X 只 | 无数据 Y 只 | 耗时 Zs`，从 quotes stderr 解析轮次 + shm 扫描 fresh 计数，避免 16k 行行情表刷屏）
 - **v0.25.0**：fetch-today 全市场采集——新增 `--all` 参数（从 `stock_name` 表枚举全量 A 股，~16245 只）；修复 `FetchAllCodes()` 服务器裸代码无前缀导致 0 条行情；helio 池支持 `HELIO_USE_EPOLL=1` 切 epoll 后端（低 memlock 环境 io_uring 多进程 SIGSEGV）；kline 分片 ≤500 只/≤6 并发 + 主循环仅 quotes writer 退出才中断
 - **v0.15.5**：新增编排脚本 `scripts/fetch-today.py`——并行启动 fetch-kline + fetch-quotes --quote_loop，每分钟报告进度；codes 来自 zxg.blk / --codes / --codes-file，可选 --mmap
@@ -132,9 +133,11 @@ include/     公共头文件（tdx/ 命名空间）
   ├─ tdx/batch/              批量拉取头文件
   ├─ tdx/shm/                盘中实时共享内存（payload/segment/snapshot）
   ├─ tdx/util/               工具头文件（5 个：gbk/zlib_wrap/time_util/byte_order/code_validate）
-  └─ nlohmann/               JSON 库（vendored 单头文件）
+  ├─ czsc/                   缠论分析引擎（types/ta/analyze/signals/io，并入自 czsc-cpp v0.7.0）
+  └─ nlohmann/               JSON 库（vendored 单头文件 json.hpp + json_fwd.hpp）
 src/         源码
   ├─ util/                   gbk / zlib_wrap / time_util（absl::Time+FixedTimeZone）
+  ├─ czsc/                   缠论分析引擎（并入自 czsc-cpp；不链 helio/absl，taos 连接走 tdx_taos_conn）
   ├─ proto/                  协议层（14 文件，拆 4 子 target：core/transport/parsers/local）
   ├─ quotes/                 行情接口层（std/ext/sp）
   ├─ data/                   数据管理层
@@ -157,7 +160,9 @@ output/      程序输出（不入 git）
 | `tdx::data` | `tdx_data` | 数据管理层（Calendar / Adjust / Resampler / SyncState / TdxData） |
 | `tdx::taos` | `tdx_taos` | TDengine 导入层（多线程 + 批量 INSERT） |
 | `tdx::batch` | `tdx_batch` | 并发批量拉取（helio fiber 池分片 + `-n` 并发数） |
+| `tdx::taos`（连接） | `tdx_taos_conn` | 连接 RAII 叶子（仅 taos C API，czsc 等纯计算模块共链） |
 | `tdx::shm` | `tdx_shm` | 盘中实时行情共享内存（mmap 段 + seqlock 快照表，`/dev/shm` 跨进程 O(1) 读最新价） |
+| `czsc` | `czsc_types/ta/analyze/signals/io` | 缠论分析引擎（并入自 czsc-cpp v0.7.0）：分型/笔/中枢 + 246 信号函数 + TDengine/mmap 数据拼接，不链 helio |
 | `tdx` (exe) | `tdx` | CLI 入口（见下） |
 
 **CLI 命令**（`src/cli/main.cpp` 分发）：

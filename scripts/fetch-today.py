@@ -456,6 +456,17 @@ def main():
                     help="fetch-quotes 写数（写入 shm + TDengine 异步入库）。"
                          "viewer: 1 写者 + --quote_jobs=N 内部 fiber"
                          "all use default 8 .")
+    ap.add_argument("--czsc", action="store_true",
+                    help="启用盘中 czsc 信号计算（增量 + 写 shm）。"
+                         "与 fetch-quotes 并列的长期子进程，--interval 秒一轮")
+    ap.add_argument("--czsc-shm", default=os.environ.get("CZSC_SHM", "/dev/shm/tdx_signals.shm"),
+                    help="czsc 信号 shm 路径（默认 /dev/shm/tdx_signals.shm）")
+    ap.add_argument("--czsc-interval", type=int, default=30,
+                    help="czsc 信号计算周期（秒，默认 30）")
+    ap.add_argument("--czsc-freqs", default="D,F30,F5,week",
+                    help="czsc 周期子集（默认 D,F30,F5,week）")
+    ap.add_argument("--czsc-n", type=int, default=4,
+                    help="czsc 并行工作线程（默认 4）")
     args = ap.parse_args()
 
     if args.codes:
@@ -521,7 +532,23 @@ def main():
     else:
         quotes_cmd.insert(3, "--quote_codes=" + ",".join(codes))
     quotes_monitors = [ProcMonitor("quotes", quotes_cmd)]
-    monitors = kline_monitors + quotes_monitors
+
+    # czsc 信号计算（盘中实时模式）：长期子进程，增量计算 + 写 shm。
+    czsc_monitors = []
+    if args.czsc:
+        czsc_cmd = [args.bin, "czsc",
+                    "--shm", args.czsc_shm,
+                    "--interval", str(args.czsc_interval),
+                    "--freqs", args.czsc_freqs,
+                    "--n", str(args.czsc_n)]
+        if args.all:
+            czsc_cmd.append("--all")
+        elif args.codes:
+            czsc_cmd += ["--codes", ",".join(args.codes)]
+        # 否则走默认 zxg.blk
+        czsc_monitors = [ProcMonitor("czsc", czsc_cmd)]
+
+    monitors = kline_monitors + quotes_monitors + czsc_monitors
     stop = threading.Event()
 
     # stderr 落到日志文件（屏幕只输出 stdout：尾行行情 TUI）。
@@ -532,6 +559,7 @@ def main():
     sys.stderr.write(
         f"=== fetch-today: {len(codes)} 只 | bin={args.bin} | shm={shm} | "
         f"kline-jobs={kline_jobs} | quote-jobs={quote_jobs} | viewer={viewer_mode} | "
+        f"czsc={'ON' if args.czsc else 'off'} | "
         f"报告间隔 {args.interval}s | 日志={log_path} ===\n")
 
     # 全量模式轮次计时：检测轮次号变化，计算实际轮耗时（含采集+等待）。

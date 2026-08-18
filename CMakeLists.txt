@@ -206,6 +206,13 @@ add_executable(mmap_viewer tools/mmap_viewer.cpp)
 target_include_directories(mmap_viewer PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(mmap_viewer PRIVATE tdx_shm)
 
+# ---- czsc 工具（并入自 czsc-cpp）----
+# czsc 主入口已合并到 tdx CLI（tdx czsc 子命令）；保留独立查看器
+add_executable(czsc_signal_viewer tools/czsc_signal_viewer.cpp)
+target_link_libraries(czsc_signal_viewer PRIVATE czsc_signals_persist)
+add_executable(czsc_data_viewer tools/data_loader_demo.cpp)
+target_link_libraries(czsc_data_viewer PRIVATE czsc_signals_persist)
+
 enable_testing()
 add_subdirectory(tests)
 
