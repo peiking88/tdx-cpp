@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
- 抄底策略脚本 bottom-fishing.py — 「跌了买、弹了卖」DEMA/RSI 量化版
+ 抄底策略脚本 find-bottom.py — 「跌了买、弹了卖」DEMA/RSI 量化版
 ================================================================================
 
 源文章《一个简单的抄底策略，能打败买入持有吗？》规则（仅 2 个指标，无止损）:
@@ -17,9 +17,9 @@
 日线前复权。默认自选股，--all 全市场。
 
 用法:
-  python3 scripts/bottom-fishing.py                # 自选股当日信号
-  python3 scripts/bottom-fishing.py --all          # 全市场信号
-  python3 scripts/bottom-fishing.py --all --backtest   # 回测: 策略 vs 买入持有
+  python3 scripts/find-bottom.py                # 自选股当日信号
+  python3 scripts/find-bottom.py --all          # 全市场信号
+  python3 scripts/find-bottom.py --all --backtest   # 回测: 策略 vs 买入持有
 ================================================================================
 """
 
@@ -88,9 +88,9 @@ def backtest(df, cost=COST_PER_SIDE, dema_period=DEMA_PERIOD,
     """
     c = df["C"].reset_index(drop=True)
     o = df["O"].reset_index(drop=True)
-    ent = entry_state(c, dema_period).shift(1).fillna(False).to_numpy()
+    ent = entry_state(c, dema_period).shift(1).fillna(False).astype(bool).to_numpy()
     ext, _ = exit_signal(c, rsi_period, level)
-    ext = ext.shift(1).fillna(False).to_numpy()
+    ext = ext.shift(1).fillna(False).astype(bool).to_numpy()
 
     cash, shares = 1.0, 0.0
     entry_px = 0.0
@@ -204,7 +204,7 @@ def main():
     parser.add_argument("--rsi-period", type=int, default=RSI_PERIOD, help="RSI 周期 (默认 14)")
     parser.add_argument("--rsi-level", type=float, default=RSI_LEVEL, help="RSI 超卖阈值 (默认 30)")
     parser.add_argument("--cost", type=float, default=COST_PER_SIDE, help="单边成本 (默认 0.003)")
-    parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "bottom-fishing"), help="输出目录")
+    parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-bottom"), help="输出目录")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
     args = parser.parse_args()
 
@@ -325,7 +325,7 @@ def main():
             "距DEMA%": round(g * 100, 1), "RSI": round(r, 1),
         } for c, n, k, cl, d, g, r in signals])
 
-    stamped = os.path.join(args.output_dir, f"bottom-fishing-{stamp}.xlsx")
+    stamped = os.path.join(args.output_dir, f"find-bottom-{stamp}.xlsx")
     out.to_excel(stamped, index=False)
     print(f"[xlsx] → {stamped} (共 {len(out)} 条)", file=sys.stderr)
     return 0

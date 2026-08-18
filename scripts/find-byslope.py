@@ -20,9 +20,9 @@
 日线前复权。默认自选股，--all 全市场。
 
 用法:
-  python3 scripts/eval-slope.py                # 评估自选股近一年金叉分桶收益
-  python3 scripts/eval-slope.py --all          # 全市场评估（标定阈值用这个）
-  python3 scripts/eval-slope.py --all --today  # 当前金叉标的清单（写 xlsx）
+  python3 scripts/find-byslope.py                # 评估自选股近一年金叉分桶收益
+  python3 scripts/find-byslope.py --all          # 全市场评估（标定阈值用这个）
+  python3 scripts/find-byslope.py --all --today  # 当前金叉标的清单（写 xlsx）
 ================================================================================
 """
 
@@ -288,7 +288,7 @@ def main():
         return 0
 
     # -------- --today 模式: 最近金叉清单，按当前 MA5 斜率降序 --------
-    out_dir = os.path.join(OUTPUT_DIR, "eval-slope")
+    out_dir = os.path.join(OUTPUT_DIR, "find-byslope")
     os.makedirs(out_dir, exist_ok=True)
     xlsx_rows = []
     for code, cross_date, s5, s20 in cross_recent:
@@ -302,7 +302,7 @@ def main():
         })
     df = pd.DataFrame(xlsx_rows).sort_values("当前斜率5", ascending=False)
     stamp = time.strftime("%Y%m%d")
-    stamped = os.path.join(out_dir, f"eval-slope-{stamp}.xlsx")
+    stamped = os.path.join(out_dir, f"find-byslope-{stamp}.xlsx")
     df.to_excel(stamped, index=False)
 
     print(f"\n{'='*100}")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
- 吸筹结束突破筛选脚本 find-pbover.py — 「券商吸筹结束的判断标准」量化版
+ 吸筹结束突破筛选脚本 find-pbuildover.py — 「券商吸筹结束的判断标准」量化版
 ================================================================================
 
 源文章五大维度（控盘度/筹码结构/量价行为/市场情绪/放量突破）中，可从日线
@@ -27,8 +27,8 @@
            涨幅 >= --min-break(3%)
 
 用法:
-  python3 scripts/find-pbover.py                # 默认自选股（建议尾盘运行, 量更真实）
-  python3 scripts/find-pbover.py --all          # 全 A 股
+  python3 scripts/find-pbuildover.py                # 默认自选股（建议尾盘运行, 量更真实）
+  python3 scripts/find-pbuildover.py --all          # 全 A 股
 ================================================================================
 """
 
@@ -379,7 +379,7 @@ def main():
     parser.add_argument("--vol-ratio", type=float, default=VOL_RATIO, help="突破日量/前日量下限 (默认 2.0)")
     parser.add_argument("--min-break", type=float, default=MIN_BREAK, help="突破日最小涨幅 (默认 0.03)")
     parser.add_argument("--conc90", type=float, default=CONC90, help="筹码90%%成本集中度上限 (默认 0.40)")
-    parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-pbover"), help="Excel 输出目录")
+    parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-pbuildover"), help="Excel 输出目录")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
     args = parser.parse_args()
 
@@ -502,7 +502,7 @@ def main():
         "户数变动%": d["holder_chg"],
         "现价": d["close"],
     } for code, d in results]
-    stamped = os.path.join(args.output_dir, f"find-pbover-{time.strftime('%Y%m%d')}.xlsx")
+    stamped = os.path.join(args.output_dir, f"find-pbuildover-{time.strftime('%Y%m%d')}.xlsx")
     pd.DataFrame(rows).to_excel(stamped, index=False)
     print(f"[4/4] [xlsx] → {stamped} (共 {len(rows)} 条)", file=sys.stderr)
     return 0
