@@ -25,7 +25,7 @@ import threading
 import numpy as np
 import pandas as pd
 import taosws
-from common import (ZXG_PATH, all_mainboard_codes, parse_code, zxg_codes,
+from common import (ZXG_PATH, OUTPUT_DIR, all_mainboard_codes, parse_code, zxg_codes,
                     apply_qfq, batch_fetch_adjust, pad)
 
 TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041")
@@ -767,7 +767,7 @@ def main():
     ap.add_argument("--diagnostic", action="store_true",
                     help="显示 RPS 通过但其他过滤未通过的股票 (诊断模式)")
     ap.add_argument("--limit", type=int, help="最多分析多少只 (调试)")
-    ap.add_argument("--output-dir", default="output/find-diverse", help="输出目录")
+    ap.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-diverse"), help="输出目录")
     ap.add_argument("--jobs", type=int, default=8, help="并发线程数 (默认 8)")
     ap.add_argument("--methods", nargs="+", default=["leader", "macd-week-dc", "macd-min-gc"],
                     choices=["leader", "macd-week-dc", "macd-min-gc"],

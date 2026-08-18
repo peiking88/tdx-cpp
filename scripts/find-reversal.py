@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import taosws
 
-from common import all_mainboard_codes, parse_code, zxg_codes
+from common import OUTPUT_DIR, all_mainboard_codes, parse_code, zxg_codes
 
 
 # ======================== 配置 ========================
@@ -299,7 +299,7 @@ def main():
     parser.add_argument("--no-secondary-test", action="store_true", help="不要求二次探底")
     parser.add_argument("--no-breakout", action="store_true", help="不要求突破确认")
     parser.add_argument("--json", action="store_true", help="JSON 输出 (stdout, 不写 xlsx)")
-    parser.add_argument("--output-dir", default="output/find-reversal", help="Excel 输出目录")
+    parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-reversal"), help="Excel 输出目录")
     args = parser.parse_args()
 
     # 构建配置

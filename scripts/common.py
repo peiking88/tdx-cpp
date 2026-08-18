@@ -13,6 +13,9 @@ import pandas as pd
 # 自选股板块文件 (通达信 zxg.blk)。环境变量 TDX_ZXG_BLK 可覆盖。
 ZXG_PATH = os.environ.get("TDX_ZXG_BLK", "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk")
 
+# 项目根 output/（scripts/ 上级目录锚定，不随运行 cwd 漂移）
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output")
+
 # ---------------------------------------------------------------------------
 # 表格渲染: 显示宽度感知对齐 (CJK 全角计 2, ASCII 计 1)
 # ---------------------------------------------------------------------------

@@ -35,7 +35,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import pandas as pd
 import taosws
 
-from common import all_mainboard_codes, apply_qfq, batch_fetch_adjust, parse_code, zxg_codes
+from common import OUTPUT_DIR, all_mainboard_codes, apply_qfq, batch_fetch_adjust, parse_code, zxg_codes
 
 
 # ======================== 配置 ========================
@@ -278,7 +278,7 @@ def main():
                         help="底部回看交易日数 (默认 60)")
     parser.add_argument("--top", type=int, default=TOP_N, help="输出前 N 个结果")
     parser.add_argument("--json", action="store_true", help="JSON 输出 (stdout, 不写 xlsx)")
-    parser.add_argument("--output-dir", default="output/find-limit-up", help="Excel 输出目录")
+    parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-limit-up"), help="Excel 输出目录")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
     args = parser.parse_args()
 

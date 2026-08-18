@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 import taosws
 from common import (parse_code, zxg_codes, all_mainboard_codes,
-                    apply_qfq, batch_fetch_adjust)
+                    apply_qfq, batch_fetch_adjust, OUTPUT_DIR)
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -345,7 +345,7 @@ def main():
     ap.add_argument("--days", type=int, default=365 * 10, help="回溯天数")
     ap.add_argument("--k", type=int, default=5, help="聚类数")
     ap.add_argument("--limit", type=int, help="最多分析多少只 (调试用)")
-    ap.add_argument("--output-dir", default="output/smmd", help="输出目录")
+    ap.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "smmd"), help="输出目录")
     ap.add_argument("--no-plot", action="store_true", help="不画图")
     ap.add_argument("--top-n", type=int, default=6, help="画图 top N")
     ap.add_argument("--workers", type=int, default=8, help="并发抓取线程数 (默认 8)")

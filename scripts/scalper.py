@@ -40,7 +40,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import taosws
 from common import (all_mainboard_codes, parse_code, zxg_codes,
-                    apply_qfq, batch_fetch_adjust, disp_w, pad)
+                    apply_qfq, batch_fetch_adjust, disp_w, pad, OUTPUT_DIR)
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -51,7 +51,7 @@ WP_PATH = "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/WP.blk"
 
 # 验证 (verify 子命令): 资金 10 万, 买入=前日 14:30-15:00 算术均价, 卖出=当日 9:30-10:00 算术均价
 VERIFY_CAPITAL = 100000.0
-VERIFY_CSV = "output/scalper/verify.csv"
+VERIFY_CSV = os.path.join(OUTPUT_DIR, "scalper", "verify.csv")
 VERIFY_FIELDS = ["verify_date", "code", "name", "buy_date", "buy_price", "buy_bars",
                  "sell_date", "sell_price", "sell_bars", "shares", "cost", "income",
                  "pnl", "pnl_pct"]
@@ -1415,7 +1415,7 @@ def main():
                             f.write(f"{prefix}{full[2:]}\r\n")
                     sys.stderr.write(f"[blk] → WP.blk ({len(results)} 只)\n")
                     # 本地 CSV
-                    csv_dir = "output/scalper"
+                    csv_dir = os.path.join(OUTPUT_DIR, "scalper")
                     os.makedirs(csv_dir, exist_ok=True)
                     csv_file = os.path.join(csv_dir, f"scalper-{time.strftime('%Y%m%d')}.csv")
                     fields = list(results[0].keys())
