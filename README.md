@@ -43,8 +43,8 @@ python3 scripts/find-wave.py --code sh600276 --cycle 1d   # 波浪分析：波�
 python3 scripts/fetch-margin.py                            # 融资融券数据入库（AKShare → TDengine）
 python3 scripts/leverage-risk.py                           # 市场杠杆风险监测（读 TDengine，零外部依赖）
 python3 scripts/find-jerry.py                               # 某队 ETF 动向追踪（汇金/证金/社保持仓变化）
-python3 scripts/market-analysis.py                           # 盘面分析（财经资讯 + LLM 生成报告; 需 DEEPSEEK_API_KEY）
-python3 scripts/czsc-predict.py                              # 缠论趋势预测（1d/30m/5m 趋势质量评估, 复用 C++ czsc 引擎）
+python3 scripts/market-analysis.py                           # 盘面分析（财经资讯 + LLM 生成报告; 需 DEEPSEEK_API_KEY; → output/market-analysis/）
+python3 scripts/czsc-predict.py                              # 缠论趋势预测（1d/30m/5m, 复用C++ czsc引擎; → output/czsc/）
 ```
 
 ## 选股与验证持久化

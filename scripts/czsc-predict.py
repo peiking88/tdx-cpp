@@ -9,8 +9,8 @@
   python3 scripts/czsc-predict.py -n 4 600519.SH 999999.SH  # 指定并发数
 
 输出:
-  自选股模式 → output/czsc-zxg-yyyymmdd.md
-  手动模式   → output/czsc-<symbol>.md
+  自选股模式 → output/czsc/czsc-zxg-yyyymmdd.md
+  手动模式   → output/czsc/czsc-<symbol>.md
 """
 import argparse
 import json
@@ -29,6 +29,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 from taosws import connect
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CZSC_OUTPUT = os.path.join(REPO, "output", "czsc")
 TDX_BIN = os.environ.get("TDX_BIN", os.path.join(REPO, "build", "bin", "tdx"))
 TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041/tdx")
 
@@ -543,7 +544,7 @@ def _parse_tdx_blk(path):
 
 def _merged_filename(symbols):
     parts = [s.replace(".", "_") for s in symbols]
-    return os.path.join(REPO, "output", f"czsc-{'_'.join(parts)}.md")
+    return os.path.join(CZSC_OUTPUT, f"czsc-{'_'.join(parts)}.md")
 
 
 def _sort_key(symbol, all_results, name_map):
@@ -603,8 +604,8 @@ def main():
     edt = date.today().strftime("%Y-%m-%d")
     sdt = (date.today() - timedelta(days=365)).strftime("%Y-%m-%d")
 
-    os.makedirs(os.path.join(REPO, "output"), exist_ok=True)
-    log_file = os.path.join(REPO, "output", f"predict_{edt.replace('-', '')}.log")
+    os.makedirs(CZSC_OUTPUT, exist_ok=True)
+    log_file = os.path.join(CZSC_OUTPUT, f"predict_{edt.replace('-', '')}.log")
     logger = _setup_logging(log_file)
 
     t_start = time.time()
@@ -639,9 +640,9 @@ def main():
                 print(f"  [{done_count}/{total}] {name_map.get(symbol, symbol)} 完成")
 
     if from_zxg:
-        filename = os.path.join(REPO, "output", f"czsc-zxg-{edt.replace('-', '')}.md")
+        filename = os.path.join(CZSC_OUTPUT, f"czsc-zxg-{edt.replace('-', '')}.md")
     elif len(symbols) == 1:
-        filename = os.path.join(REPO, "output", f"czsc-{symbols[0].replace('.', '_')}.md")
+        filename = os.path.join(CZSC_OUTPUT, f"czsc-{symbols[0].replace('.', '_')}.md")
     else:
         filename = _merged_filename(symbols)
 

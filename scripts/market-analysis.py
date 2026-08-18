@@ -508,7 +508,7 @@ def main(argv: list[str] | None = None):
         return
 
     output_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                               "output", f"market-analysis-{date_str}.md")
+                               "output", "market-analysis", f"market-analysis-{date_str}.md")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(f"# 📊 盘面分析（{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}）\n\n")
