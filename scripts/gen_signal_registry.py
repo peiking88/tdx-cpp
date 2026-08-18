@@ -4,7 +4,7 @@ import re, os
 from pathlib import Path
 
 BASE = Path.home() / "peiking88/czsc/crates/czsc-signals/src/"
-OUT = Path.home() / "peiking88/czsc-cpp/src/signals/registry.cpp"
+OUT = Path(__file__).resolve().parent.parent / "src" / "czsc" / "signals" / "registry.cpp"
 
 # 提取 Rust signal 中的中文字符串映射
 ZH_MAP = {
@@ -224,6 +224,28 @@ lines.append("")
 lines.append("}  // namespace czsc::signals")
 
 content = '\n'.join(lines)
+
+# ---- 内联修复（原 fix_registry.py，合并后消除单独脚本）----
+# 1. auto + 三元字符串 → std::string（使 .c_str() 合法）
+content = re.sub(
+    r'auto\s+(\w+)\s*=\s*(?:\()?([^;]*?\?"[^"]+"\s*:\s*"[^"]+")(?:\)?;)',
+    r'std::string \1 = \2;',
+    content
+)
+# 2. 变量 p 遮蔽参数 p → 重命名
+content = content.replace(
+    "double p=(b.upper.back()-b.lower.back())/b.mid.back()*100;",
+    "double pw=(b.upper.back()-b.lower.back())/b.mid.back()*100;"
+)
+content = content.replace('p>5?"', 'pw>5?"')
+content = content.replace('p>2?"', 'pw>2?"')
+content = content.replace("double p=std::abs(mc.macd.back());", "double mp=std::abs(mc.macd.back());")
+content = content.replace('mp>0.5?"', 'mp>0.5?"')
+content = content.replace('mp>0.1?"', 'mp>0.1?"')
+content = content.replace("double p=(cl-ll)/(hh-ll)*100;", "double pos=(cl-ll)/(hh-ll)*100;")
+content = content.replace('p>80?"', 'pos>80?"')
+content = content.replace('p<20?"', 'pos<20?"')
+
 OUT.write_text(content)
 print(f"Generated {OUT} with {len(signals)} signals")
 print(f"  kline: {sum(1 for s in signals if s['category']=='kline')}")

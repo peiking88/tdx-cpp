@@ -18,10 +18,10 @@
 （当前价取当日 bar 的 close，即最新价）。
 
 用法:
-  python3 scripts/find-limit-up.py                     # 默认筛自选股 zxg.blk
-  python3 scripts/find-limit-up.py --all               # 筛全部 A 股
-  python3 scripts/find-limit-up.py --rise 0.15
-  python3 scripts/find-limit-up.py --all --y           # 仅昨日涨停+今日低开, 不限距底涨幅
+  python3 scripts/find-retrace.py                     # 默认筛自选股 zxg.blk
+  python3 scripts/find-retrace.py --all               # 筛全部 A 股
+  python3 scripts/find-retrace.py --rise 0.15
+  python3 scripts/find-retrace.py --all --y           # 仅昨日涨停+今日低开, 不限距底涨幅
 ================================================================================
 """
 
@@ -153,7 +153,7 @@ def write_xlsx(all_results, output_dir):
         })
     df = pd.DataFrame(rows)
     stamp = time.strftime("%Y%m%d")
-    stamped = os.path.join(output_dir, f"find-limit-up-{stamp}.xlsx")
+    stamped = os.path.join(output_dir, f"find-retrace-{stamp}.xlsx")
     df.to_excel(stamped, index=False)
     return stamped, len(rows)
 
@@ -316,7 +316,7 @@ def main():
                         help="仅昨日涨停+今日低开，不限距底涨幅（仍检测并报告 U 型底）")
     parser.add_argument("--top", type=int, default=TOP_N, help="输出前 N 个结果")
     parser.add_argument("--json", action="store_true", help="JSON 输出 (stdout, 不写 xlsx)")
-    parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-limit-up"), help="Excel 输出目录")
+    parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-retrace"), help="Excel 输出目录")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
     args = parser.parse_args()
 

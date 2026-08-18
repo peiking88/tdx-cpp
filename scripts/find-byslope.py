@@ -53,7 +53,7 @@ SLOPE_BUCKETS = (0, 1, 2, 4)  # 分桶边界 (%/日): <0 | 0-1 | 1-2 | 2-4 | >=4
 CROSS_WITHIN = 3       # --today: 金叉发生在此交易日数内
 
 
-# ======================== 数据获取（对齐 find-limit-up 惯例） ========================
+# ======================== 数据获取（对齐 find-retrace 惯例） ========================
 def get_a_stock_codes(cursor):
     cursor.execute(r'SELECT table_name FROM information_schema.ins_tables WHERE table_name LIKE "k\_%\_1d"')
     a_codes = []

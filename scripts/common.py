@@ -8,7 +8,9 @@ import re
 import sys
 import unicodedata
 
+import numpy as np
 import pandas as pd
+import taosws
 
 # 自选股板块文件 (通达信 zxg.blk)。环境变量 TDX_ZXG_BLK 可覆盖。
 ZXG_PATH = os.environ.get("TDX_ZXG_BLK", "/home/li/.local/share/tdxcfv/drive_c/tc/T0002/blocknew/zxg.blk")
@@ -166,3 +168,190 @@ def apply_qfq(df, events):
     for col in ("O", "H", "L", "C"):
         out[col] = out[col] * fs
     return out
+
+# ============================================================================
+# 选股共享工具（并入自 find_diverse_common.py）
+# ============================================================================
+TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041/tdx")
+
+SECTOR_INDICES = {
+    "sh000688": "科创", "sz399006": "创业板", "sz399001": "深证成指",
+    "sh000001": "上证", "sh000300": "沪深300", "sh000905": "中证500",
+    "sh000852": "中证1000", "bj899050": "北证50",
+}
+
+CODE_SECTOR_MAP = [
+    (("68",), "sh000688"),
+    (("30",), "sz399006"),
+    (("00", "60"), "sh000300"),
+    (("43", "83", "87", "92"), "bj899050"),
+]
+
+
+def connect():
+    conn = taosws.connect(TDENGINE_URL)
+    conn.query("USE tdx")
+    return conn
+
+
+def fetch_kline(conn, market, code, cycle="1d", days=400, min_rows=2):
+    """查单只 K 线。返回 DataFrame 或 None。"""
+    start = (pd.Timestamp.now() - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+    r = conn.query(
+        f"SELECT ts,open,high,low,close,volume FROM k_{market}{code}_{cycle} "
+        f"WHERE ts >= '{start}' ORDER BY ts"
+    )
+    if len(r) < min_rows:
+        return None
+    return pd.DataFrame(list(r), columns=["ts", "O", "H", "L", "C", "V"])
+
+
+def batch_fetch_klines(conn, pool, days=400, min_rows=252):
+    """批量查全市场 1d → {(market, code): DataFrame}。"""
+    queries = []
+    for m, c in pool:
+        queries.append(
+            f"SELECT ts,open,high,low,close,volume,'{m}{c}' as code FROM k_{m}{c}_1d"
+        )
+    if not queries:
+        return {}
+    sql = " UNION ALL ".join(queries) + " ORDER BY code, ts"
+    r = conn.query(sql)
+    out = {}
+    cur_m, cur_c, buf = None, None, []
+    for row in r:
+        mc = row[6]
+        m, c = mc[:2], mc[2:]
+        if (m, c) != (cur_m, cur_c):
+            if cur_m and len(buf) >= min_rows:
+                out[(cur_m, cur_c)] = pd.DataFrame(buf, columns=["ts", "O", "H", "L", "C", "V"])
+            cur_m, cur_c, buf = m, c, []
+        buf.append(row[:6])
+    if cur_m and len(buf) >= min_rows:
+        out[(cur_m, cur_c)] = pd.DataFrame(buf, columns=["ts", "O", "H", "L", "C", "V"])
+    return out
+
+
+def load_stock_names(conn):
+    try:
+        return {f"{m}{c}": n for m, c, n in conn.query(
+            "SELECT market, code, name FROM tdx.stock_name")}
+    except Exception:
+        return {}
+
+
+def add_indicators(df):
+    """计算技术指标列。"""
+    df = df.copy()
+    df["MA5"] = df["C"].rolling(5).mean()
+    df["MA20"] = df["C"].rolling(20).mean()
+    df["MA60"] = df["C"].rolling(60).mean()
+    df["MA120"] = df["C"].rolling(120).mean()
+    df["MA250"] = df["C"].rolling(250).mean()
+    df["ret_250"] = df["C"].pct_change(250) * 100
+    df["ret_120"] = df["C"].pct_change(120) * 100
+    df["high_250"] = df["C"].rolling(250).max()
+    df["near_high"] = df["C"] / df["high_250"]
+    delta = df["C"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df["RSI14"] = 100 - 100 / (1 + rs)
+    df["RSI_bull"] = (df["RSI14"] > 50).astype(int)
+    # CCI
+    tp = (df["H"] + df["L"] + df["C"]) / 3
+    sma = tp.rolling(20).mean()
+    mad = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    df["CCI"] = (tp - sma) / (0.015 * mad)
+    return df
+
+
+def add_dmi(df, period=14):
+    """ADX / +DI / -DI。"""
+    up = df["H"].diff()
+    down = -df["L"].diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = np.maximum(df["H"] - df["L"],
+                   np.maximum(abs(df["H"] - df["C"].shift()),
+                              abs(df["L"] - df["C"].shift())))
+    atr = pd.Series(tr).rolling(period).mean()
+    plus_di = 100 * pd.Series(plus_dm).rolling(period).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / atr
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
+    df["ADX"] = dx.rolling(period).mean()
+    df["plus_DI"] = plus_di
+    df["minus_DI"] = minus_di
+    return df
+
+
+def _compute(m, c, df, adj_events, need_ind=True):
+    """单只预处理: 复权 + 指标。"""
+    if df is None:
+        return None
+    df = apply_qfq(df, adj_events)
+    if need_ind:
+        df = add_indicators(df)
+        df = add_dmi(df)
+    return (m, c, df)
+
+
+def to_weekly(df):
+    """日线 → 周线。"""
+    df = df.copy()
+    df["ts"] = pd.to_datetime(df["ts"])
+    df = df.set_index("ts").resample("W").agg({
+        "O": "first", "H": "max", "L": "min", "C": "last", "V": "sum"
+    }).dropna().reset_index()
+    return df
+
+
+def thread_conn():
+    conn = taosws.connect(TDENGINE_URL)
+    conn.query("USE tdx")
+    return conn
+
+
+def sector_momentum(conn, days=20):
+    """板块指数近 N 日涨幅。"""
+    out = {}
+    start = (pd.Timestamp.now() - pd.Timedelta(days=days * 2)).strftime("%Y-%m-%d")
+    for sec in SECTOR_INDICES:
+        try:
+            r = conn.query(
+                f"SELECT ts,close FROM k_{sec}_1d WHERE ts >= '{start}' ORDER BY ts"
+            )
+            if len(r) >= 2:
+                out[sec] = (r[-1][1] / r[0][1] - 1) * 100
+        except Exception:
+            pass
+    return out
+
+
+def get_sector_for_code(code):
+    for prefixes, sector in CODE_SECTOR_MAP:
+        if code[:2] in prefixes:
+            return sector
+    return "sh000300"
+
+
+def resample_intraday(df, tf):
+    """5m → 目标周期。"""
+    df = df.copy()
+    df["ts"] = pd.to_datetime(df["ts"])
+    df = df.set_index("ts").resample(tf).agg({
+        "O": "first", "H": "max", "L": "min", "C": "last", "V": "sum"
+    }).dropna().reset_index()
+    return df
+
+
+def _pivot_lows(cv, k=3, sep=4):
+    """波谷位置列表。"""
+    n = len(cv)
+    piv = []
+    for i in range(k, n - k):
+        if all(cv[i] <= cv[i - j] for j in range(1, k + 1)) and \
+           all(cv[i] <= cv[i + j] for j in range(1, k + 1)):
+            if not piv or i - piv[-1] >= sep:
+                piv.append(i)
+    return piv
