@@ -22,6 +22,7 @@ python3 scripts/find-diverse.py --zxg     # 多策略选股筛子（--methods le
 python3 scripts/find-diverse.py --zxg --methods macd-min-gc             # 仅分钟信号（30m MACD底背离 + 5m MACD零轴金叉）
 python3 scripts/find-diverse.py --zxg --backtest-div            # 回测分钟信号各持有期收益率（vs 全 bar 基线）
 python3 scripts/find-reversal.py                          # 底部反转筛选（默认自选股, --all 全 A 股; 600105 模式）
+python3 scripts/find-limit-up.py                          # 昨日涨停今低开筛选（前复权, 现价距底部低点 <=10%; 开盘后运行, 需当日 bar 已入库）
 ```
 
 ## 选股与验证持久化

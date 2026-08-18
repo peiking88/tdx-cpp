@@ -99,13 +99,10 @@ void ApplyAdjust(std::vector<KLine>& kline, const std::vector<FactorPoint>& fact
   std::sort(fac.begin(), fac.end(),
             [](const FactorPoint& a, const FactorPoint& b) { return a.date < b.date; });
 
-  // qfq 末尾归一（除以最新因子，使最新日 factor=1，adjust.py:204-207）
-  if (adjust == AdjustType::Qfq) {
-    double latest = fac.back().factor;
-    if (latest > 0) {
-      for (auto& f : fac) f.factor /= latest;
-    }
-  }
+  // qfq 不做「末尾归一」：forward-asof 下 factor(bar)=∏(date>bar 事件的 ef)，
+  // 最新 bar 天然=1。若再除以最新事件的 ef（曾对照上游 adjust.py 的归一），
+  // 会把最新事件的复权效果从所有 bar 约掉——单除权事件股票 qfq 完全失效
+  // （回归见 ApplyAdjustQfqSingleEvent / ApplyAdjustQfqSplitExDateNoGap）。
 
   for (auto& k : kline) {
     std::string kdate = EpochToDate(k.datetime);

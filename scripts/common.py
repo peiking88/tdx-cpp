@@ -115,7 +115,7 @@ def apply_qfq(df, events):
     """对 df 的 OHLC 应用前复权因子 (对齐 src/data/adjust.cpp)。仅 OHLC, vol/amount 不变。
 
     qfq: 事件按日期降序 (新→旧); event_factor = (pre_close - fenhong + peigujia*peigu)
-         / (pre_close*(1+songzhuangu+peigu)); 累乘后末尾归一 (最新日 factor=1);
+         / (pre_close*(1+songzhuangu+peigu)); 累乘即最终因子 (不归一, 最新 bar 天然=1);
          forward-asof (取首个 date>kdate 的因子——除权日 bar 不乘自身事件,
          否则序列在除权日保留假跳空)。仅 category in {1,2} 或 name=='除权除息' 计因子。
     无事件或查询失败时原样返回 (退化为未复权)。
@@ -144,9 +144,9 @@ def apply_qfq(df, events):
     if not fac:
         return df
     fac.sort(key=lambda x: x[0])  # 升序
-    latest = fac[-1][1]
-    if latest > 0:
-        fac = [(d, f / latest) for d, f in fac]  # 末尾归一
+    # 注意: 不做「末尾归一」。forward-asof 下 factor(bar)=∏(date>bar 事件的 ef)，
+    # 最新 bar 天然=1；若除以最新事件的 ef（曾对照上游 adjust.py 的归一）会把
+    # 最新事件的复权效果从所有 bar 约掉——单事件股票 qfq 完全失效（实测 2026-08）。
     fac_ts = [pd.Timestamp(d) for d, _ in fac]
     fac_val = [f for _, f in fac]
 

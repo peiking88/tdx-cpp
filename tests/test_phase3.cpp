@@ -86,13 +86,13 @@ TEST(Adjust, ComputeFactorQfq) {
   ASSERT_GE(factors.size(), 1u);
   // pre_close=10(6/14)，songzhuangu=0.1
   // numerator = 10 - 0 + 0 = 10；denominator = 10*(1+0.1) = 11
-  // qfq event_factor = 10/11 ≈ 0.9091（ComputeFactor 不归一，ApplyAdjust 归一）
+  // qfq event_factor = 10/11 ≈ 0.9091（累乘即最终因子，不归一）
   EXPECT_NEAR(factors[0].factor, 10.0 / 11.0, 0.001);
 }
 
-TEST(Adjust, ApplyAdjustQfq) {
-  // qfq 末尾归一：最新事件后因子=1（基准），事件前无匹配默认因子=1。
-  // 单事件归一后 factor=1.0，所有 K 线价格不变。
+TEST(Adjust, ApplyAdjustQfqSingleEvent) {
+  // qfq：除权前 bar 乘事件因子（10送1 → ef=10/11），除权日及之后 factor=1。
+  // 回归：曾因「末尾归一」把唯一因子除成 1.0，单除权事件股票 qfq 完全失效。
   std::vector<Xdxr> events = {{"2024-06-15", 0.0, 0.0, 1.0, 0.0, 1, "除权除息"}};
   std::vector<KLine> kline;
   for (int d = 13; d <= 17; ++d) {
@@ -103,14 +103,17 @@ TEST(Adjust, ApplyAdjustQfq) {
   }
   auto factors = ComputeFactorFromXdxr(events, kline, AdjustType::Qfq);
   ASSERT_GE(factors.size(), 1u);
-  EXPECT_NEAR(factors[0].factor, 10.0 / 11.0, 0.001);  // 累计因子（未归一）
+  EXPECT_NEAR(factors[0].factor, 10.0 / 11.0, 0.001);  // 累乘即最终因子（不归一）
   ApplyAdjust(kline, factors, AdjustType::Qfq);
-  // qfq 归一化后唯一因子为 1.0，所有 K 线价格保持 10.0（因子=1）
-  for (const auto& k : kline) {
-    EXPECT_DOUBLE_EQ(k.open, 10.0);
-    EXPECT_DOUBLE_EQ(k.close, 10.0);
-    EXPECT_DOUBLE_EQ(k.high, 10.0);
-    EXPECT_DOUBLE_EQ(k.low, 10.0);
+  // 6/13-14（除权前）: 10 × 10/11 ≈ 9.0909
+  for (int i = 0; i <= 1; ++i) {
+    EXPECT_NEAR(kline[i].open, 100.0 / 11.0, 1e-9);
+    EXPECT_NEAR(kline[i].close, 100.0 / 11.0, 1e-9);
+  }
+  // 6/15-17（除权日及之后）: 除权日 bar 不乘自身事件，factor=1 → 10.0
+  for (int i = 2; i <= 4; ++i) {
+    EXPECT_DOUBLE_EQ(kline[i].open, 10.0);
+    EXPECT_DOUBLE_EQ(kline[i].close, 10.0);
   }
 }
 
@@ -144,10 +147,12 @@ TEST(Adjust, ApplyAdjustHfq) {
 }
 
 TEST(Adjust, ApplyAdjustQfqSplitExDateNoGap) {
-  // 回归：除权日 bar 只乘其后事件因子（不含自身送转），否则前复权序列在除权日保留假跳空。
-  // 事件: 2024-06-01 10送10 (ef=0.5); 2024-09-01 每股分红1元 (ef=0.98, 归一后=1.0)。
+  // 回归①：除权日 bar 只乘其后事件因子（不含自身送转），否则前复权序列在除权日保留假跳空。
+  // 回归②：不归一——旧「末尾归一」把最新事件因子约成 1.0，其除权效果丢失（9 月分红 0.1 元未除净）。
+  // 事件: 2024-06-01 10送10 (ef=0.5); 2024-09-01 每10股分红1元 (fenhong=1.0→0.1/股, ef=0.998)。
   // 原始: 5月 close=100 (除权前), 6月 close=50 (送转后), 9月 close=49 (分红后)。
-  // 前复权: 5月×0.5=50, 6月×1.0=50, 9月×1.0=49 —— 6/1 除权日处连续 (50→50)。
+  // 前复权: 5月×(0.5×0.998)=49.9, 6月×0.998=49.9, 9月×1.0=49 —— 两处除权日均无假跳空
+  // (9/2 校验: 49.9×(0.98/0.998)=49, 即去掉分红后的真实跌幅)。
   // 旧 backward-asof 会把 6/1 自身 0.5 也算入 → 6月 bar×0.5=25, 出现 4× 假跳空。
   std::vector<Xdxr> events = {
       {"2024-06-01", 0.0, 0.0, 10.0, 0.0, 1, "除权除息"},  // 10送10
@@ -173,9 +178,9 @@ TEST(Adjust, ApplyAdjustQfqSplitExDateNoGap) {
       if (k.datetime == t) return k.close;
     return -1.0;
   };
-  EXPECT_NEAR(close_at(2024, 5, 31), 50.0, 1e-9);  // 除权前 bar 乘自身 0.5
-  EXPECT_NEAR(close_at(2024, 6, 1), 50.0, 1e-9);   // 除权日 bar 不乘自身事件 (旧代码会变 25)
-  EXPECT_NEAR(close_at(2024, 9, 2), 49.0, 1e-9);   // 最新事件后 bar 因子=1
+  EXPECT_NEAR(close_at(2024, 5, 31), 49.9, 1e-9);  // 除权前 bar 乘全部后续事件 0.5×0.998
+  EXPECT_NEAR(close_at(2024, 6, 1), 49.9, 1e-9);   // 除权日 bar 不乘自身事件，只乘其后 0.998 (旧代码会变 25)
+  EXPECT_NEAR(close_at(2024, 9, 2), 49.0, 1e-9);   // 最新事件后 bar 因子=1 (归一版为 50/50/49, 9月分红未除净)
 }
 
 // ---------- Resampler ----------

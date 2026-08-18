@@ -1,6 +1,7 @@
 // 复权因子自算。对齐 tdxdata/sources/adjust.py:49-214。
 // 基于 xdxr 事件流自算前/后复权因子（不是直接取交易所因子）。
-//   qfq（前复权）：新→旧遍历，event_factor=numerator/denominator，末尾除以最新因子（基准归一）
+//   qfq（前复权）：新→旧遍历，event_factor=numerator/denominator，累乘即最终因子
+//   （不归一：forward-asof 下最新 bar 天然=1，归一会抵消最新事件因子）
 //   hfq（后复权）：旧→新遍历，event_factor=denominator/numerator，累计累积
 #pragma once
 
@@ -28,7 +29,7 @@ std::vector<FactorPoint> ComputeFactorFromXdxr(const std::vector<Xdxr>& xdxr,
                                                AdjustType adjust);
 
 // 应用复权因子到 K 线（adjust.py:154-214）
-// qfq: backward-asof + 末尾归一；hfq: forward-asof。仅 OHLC 乘因子，vol/amount 不变。
+// qfq: forward-asof（除权日 bar 不乘自身事件）；hfq: forward-asof。仅 OHLC 乘因子，vol/amount 不变。
 void ApplyAdjust(std::vector<KLine>& kline, const std::vector<FactorPoint>& factors,
                  AdjustType adjust);
 
