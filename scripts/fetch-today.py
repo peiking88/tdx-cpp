@@ -543,9 +543,10 @@ def main():
                     "--n", str(args.czsc_n)]
         if args.all:
             czsc_cmd.append("--all")
-        elif args.codes:
-            czsc_cmd += ["--codes", ",".join(args.codes)]
-        # 否则走默认 zxg.blk
+        else:
+            # 统一传解析后的 codes（覆盖 --codes/--codes-file/--zxg 三种来源），
+            # 否则 --codes-file/--zxg 时 czsc 回落读默认 zxg.blk，标的集与 kline/quotes 不一致
+            czsc_cmd += ["--codes", ",".join(codes)]
         czsc_monitors = [ProcMonitor("czsc", czsc_cmd)]
 
     monitors = kline_monitors + quotes_monitors + czsc_monitors
