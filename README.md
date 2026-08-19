@@ -29,6 +29,7 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 ```bash
 python3 scripts/smmd.py --zxg   # SMMD 股市操纵检测（K-Means++ 聚类 + 启发式欺诈分类）
 python3 scripts/append.py       # 全市场增量补导（读 stock_name → vipdoc + 网络增量入库）
+python3 scripts/append.py --czsc  # 盘后批处理: import + czsc 缠论信号落库（signals 表）
 python3 scripts/scalper.py      # 隔夜套利选股（14:30-15:00 循环, 写 WP.blk + scalper_pick + scalper-日期.csv）
 python3 scripts/scalper.py verify   # 选股验证（前日14:30-15:00均价买/当日9:30-10:00均价卖, 写 scalper_verify + verify.csv）
 python3 scripts/find-diverse.py --zxg     # 多策略选股筛子（--methods leader macd-week-dc macd-min-gc 三法 OR 合并, 写 LT.blk + find-diverse.csv）
