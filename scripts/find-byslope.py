@@ -36,7 +36,9 @@ from datetime import datetime, timedelta
 import pandas as pd
 import taosws
 
-from common import OUTPUT_DIR, all_mainboard_codes, apply_qfq, batch_fetch_adjust, parse_code, zxg_codes
+from common import (OUTPUT_DIR, all_mainboard_codes, apply_qfq,
+                    batch_fetch_adjust, market_line, market_regime,
+                    parse_code, zxg_codes)
 
 # ======================== 配置 ========================
 TDENGINE_HOST = os.environ.get("TDENGINE_HOST", "localhost")
@@ -175,6 +177,8 @@ def main():
     parser.add_argument("--cross-within", type=int, default=CROSS_WITHIN,
                         help="--today: 金叉发生在最近 N 个交易日内 (默认 3)")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
+    parser.add_argument("--market-bull", action="store_true",
+                        help="大盘空头时跳过筛选（默认仅标注，不拦截）")
     args = parser.parse_args()
 
     if args.self_test:
@@ -185,6 +189,13 @@ def main():
     conn = taosws.connect(url)
     cursor = conn.cursor()
     names_by_code = load_stock_names(conn)
+
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
 
     t0 = time.time()
     today_str = time.strftime("%Y-%m-%d")

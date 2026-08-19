@@ -54,14 +54,11 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import taosws
 
 from common import (OUTPUT_DIR, all_mainboard_codes, apply_qfq, batch_fetch_adjust,
-                    parse_code, zxg_codes)
+                    connect, market_line, market_regime, parse_code, zxg_codes)
 
 # ======================== 配置 ========================
-TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041/tdx")
-
 BATCH_SIZE = 1800
 MIN_ROWS = 120          # 上市/数据不足直接跳过（EMA60 稳定 + 次新过滤）
 LOOKBACK_DAYS = 160     # 当日模式加载交易日数
@@ -471,6 +468,8 @@ def main():
     parser.add_argument("--calibrate", action="store_true",
                         help="阈值走步标定 (ELEV_ZERO×SLOPE_FRAC 网格 + IS/OOS)")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
+    parser.add_argument("--market-bull", action="store_true",
+                        help="大盘空头时跳过筛选（默认仅标注，不拦截）")
     args = parser.parse_args()
 
     if args.self_test:
@@ -478,9 +477,16 @@ def main():
         return 0
 
     days = args.days or (BACKTEST_DAYS if (args.backtest or args.calibrate) else LOOKBACK_DAYS)
-    conn = taosws.connect(TDENGINE_URL)
+    conn = connect()
     cursor = conn.cursor()
     names_by_code = load_stock_names(conn)
+
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
 
     t0 = time.time()
     today_str = time.strftime("%Y-%m-%d")

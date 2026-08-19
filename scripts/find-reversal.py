@@ -14,6 +14,8 @@
   5. 二次探底不破前低（可选）
   6. 突破确认：最新收盘 > 底部日开盘（可选）
 
+全部价格基于前复权（apply_qfq），除权缺口不干扰 60 日回撤/锤头/突破的跨日比价。
+
 用法:
   python3 scripts/find-reversal.py                    # 默认筛自选股 zxg.blk
   python3 scripts/find-reversal.py --all              # 筛全部 A 股
@@ -32,7 +34,10 @@ from datetime import datetime, timedelta
 import pandas as pd
 import taosws
 
-from common import OUTPUT_DIR, all_mainboard_codes, parse_code, zxg_codes
+from common import (OUTPUT_DIR, all_mainboard_codes, apply_qfq,
+                    batch_fetch_adjust, forward_ret, is_st_name,
+                    market_line, market_regime, parse_code,
+                    report_events, zxg_codes)
 
 
 # ======================== 配置 ========================
@@ -108,6 +113,19 @@ def batch_query_shares(cursor, codes):
     for row in cursor.fetchall():
         shares[row[0]] = row[1]
     return shares
+
+
+def qfq_rows(rows, events):
+    """行元组前复权（借 common.apply_qfq），仅改 OHLC，ts/vol/code 不变。
+
+    无事件的股票原样返回（绝大多数，避免全市场 df 化开销）。
+    """
+    if not events:
+        return rows
+    df = pd.DataFrame(rows, columns=["ts", "O", "H", "L", "C", "V", "code"])
+    df["ts"] = pd.to_datetime(df["ts"])
+    df = apply_qfq(df, events)
+    return list(df.itertuples(index=False, name=None))
 
 
 def load_stock_names(conn):
@@ -285,6 +303,28 @@ def screen_stock(code, kline_rows, float_shares, config=None):
     return True, details
 
 
+# ======================== 回测 ========================
+def sliding_events(code, rows, float_shares, config, lookback):
+    """回测: 定长 60 日尾窗滑窗, 事件=突破确认日(窗口末根)。
+
+    与当日筛选共用 screen_stock; 按底部日去重, 一个底部只记首个突破日
+    （突破条件在站上底部开盘后持续满足, 不做去重会连续报）。rows 为前复权升序。
+    """
+    closes = [r[4] for r in rows]
+    lows = [r[3] for r in rows]
+    evs = []
+    seen = set()
+    n = len(rows)
+    for i in range(lookback, n):
+        win = rows[i - lookback + 1 : i + 1]
+        ok, d = screen_stock(code, win, float_shares, config)
+        if ok and d["trough_date"] not in seen:
+            seen.add(d["trough_date"])
+            evs.append({"code": code, "date": rows[i][0].strftime("%Y-%m-%d"),
+                        **forward_ret(closes, lows, i)})
+    return evs
+
+
 # ======================== 主函数 ========================
 def main():
     import argparse
@@ -300,6 +340,10 @@ def main():
     parser.add_argument("--no-breakout", action="store_true", help="不要求突破确认")
     parser.add_argument("--json", action="store_true", help="JSON 输出 (stdout, 不写 xlsx)")
     parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-reversal"), help="Excel 输出目录")
+    parser.add_argument("--market-bull", action="store_true",
+                        help="大盘空头时跳过筛选（默认仅标注，不拦截）")
+    parser.add_argument("--backtest", action="store_true",
+                        help="滑窗回测: 逐日信号→前瞻收益(+5/20/65)汇总")
     args = parser.parse_args()
 
     # 构建配置
@@ -318,6 +362,13 @@ def main():
     cursor = conn.cursor()
     names_by_code = load_stock_names(conn)
 
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
+
     t0 = time.time()
 
     # DB 中实际有 kline+fn 表的代码（保证 UNION ALL 批量查询不因缺表报错）
@@ -334,17 +385,27 @@ def main():
 
     # 交集：既有规范标的身份、又有实际数据
     a_stocks = sorted(db_codes & pool)
-    print(f"[1/4] 标的池: {pool_desc} ∩ DB有数据 = {len(a_stocks)} 只 (耗时 {t1-t0:.2f}s)",
-          file=sys.stderr)
+    n_st = sum(1 for mc in a_stocks
+               if is_st_name(names_by_code.get(f"{mc[0]}{mc[1]}", "")))
+    a_stocks = [mc for mc in a_stocks
+                if not is_st_name(names_by_code.get(f"{mc[0]}{mc[1]}", ""))]
+    print(f"[1/4] 标的池: {pool_desc} ∩ DB有数据 = {len(a_stocks)+n_st} 只"
+          f"(排除 ST/*ST {n_st}) (耗时 {t1-t0:.2f}s)", file=sys.stderr)
     if not a_stocks:
         sys.stderr.write("无候选标的（自选股为空或无数据，加 --all 筛全市场）\n")
         return 1
 
-    # 计算起始日期
-    start_date = (datetime.now() - timedelta(days=args.days + 10)).strftime("%Y-%m-%d")
+    # 前复权事件（一次性批量拉取；无事件的股票 qfq_rows 直接跳过）
+    adj_by_mc = batch_fetch_adjust(conn, a_stocks)
+    print(f"[1/4] 复权事件: {len(adj_by_mc)} 只有除权记录", file=sys.stderr)
+
+    # 计算起始日期（回测需更长历史: 60 日尾窗 + 评估期）
+    bt_days = args.days + 700 if args.backtest else args.days + 10
+    start_date = (datetime.now() - timedelta(days=bt_days)).strftime("%Y-%m-%d")
 
     # 批量查询
     all_results = []
+    bt_events = []
     total_batches = (len(a_stocks) + BATCH_SIZE - 1) // BATCH_SIZE
 
     for batch_idx in range(total_batches):
@@ -373,7 +434,12 @@ def main():
             rows = stock_data.get(code, [])
             if not rows:
                 continue
+            rows = qfq_rows(rows, adj_by_mc.get((market, num)))
             float_shares = shares.get(code)
+            if args.backtest:
+                bt_events.extend(sliding_events(code, rows, float_shares, config,
+                                                args.days))
+                continue
             passed, details = screen_stock(code, rows, float_shares, config)
             if passed:
                 batch_passed += 1
@@ -386,6 +452,13 @@ def main():
             f"kline {t3-t2:.1f}s, shares {t4-t3:.1f}s",
             file=sys.stderr,
         )
+
+    if args.backtest:
+        conn.close()
+        mode_desc = "全 A 股" if args.all else "自选股"
+        print(f"[backtest] 共 {len(bt_events)} 个事件", file=sys.stderr)
+        report_events(bt_events, title=f"find-reversal 回测 ({mode_desc})")
+        return 0
 
     conn.close()
 

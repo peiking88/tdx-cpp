@@ -36,7 +36,10 @@ from decimal import Decimal, ROUND_HALF_UP
 import pandas as pd
 import taosws
 
-from common import OUTPUT_DIR, all_mainboard_codes, apply_qfq, batch_fetch_adjust, parse_code, zxg_codes
+from common import (OUTPUT_DIR, all_mainboard_codes, apply_qfq,
+                    batch_fetch_adjust, forward_ret, is_st_name,
+                    market_line, market_regime, parse_code,
+                    report_events, zxg_codes)
 
 
 # ======================== 配置 ========================
@@ -222,6 +225,24 @@ def screen_stock(code, kline_rows, name, today_str, max_rise):
     }
 
 
+# ======================== 回测 ========================
+def sliding_events(code, rows, name, max_rise):
+    """滑窗回测: 逐日以 rows[:i+1] 判定「昨日涨停+今日低开+距底≤X」，事件日 = 第 i 根。
+
+    与当日筛选共用 screen_stock，保证回测口径与实盘一致。rows 为前复权行元组升序。
+    """
+    closes = [r[4] for r in rows]
+    lows = [r[3] for r in rows]
+    evs = []
+    n = len(rows)
+    for i in range(3, n):
+        today = rows[i][0].strftime("%Y-%m-%d")
+        ok, _ = screen_stock(code, rows[:i + 1], name, today, max_rise)
+        if ok:
+            evs.append({"code": code, "date": today, **forward_ret(closes, lows, i)})
+    return evs
+
+
 # ======================== 自检 ========================
 def self_test():
     assert limit_up_price(9.95, 0.10) == 10.95, "四舍五入到分（浮点会得 10.94）"
@@ -318,6 +339,10 @@ def main():
     parser.add_argument("--json", action="store_true", help="JSON 输出 (stdout, 不写 xlsx)")
     parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-retrace"), help="Excel 输出目录")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
+    parser.add_argument("--market-bull", action="store_true",
+                        help="大盘空头时跳过筛选（默认仅标注，不拦截）")
+    parser.add_argument("--backtest", action="store_true",
+                        help="滑窗回测: 逐日信号→前瞻收益(+5/20/65)汇总")
     args = parser.parse_args()
 
     if args.self_test:
@@ -329,6 +354,13 @@ def main():
     conn = taosws.connect(url)
     cursor = conn.cursor()
     names_by_code = load_stock_names(conn)
+
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
 
     t0 = time.time()
     today_str = time.strftime("%Y-%m-%d")
@@ -345,8 +377,12 @@ def main():
         pool_desc = f"自选股 zxg.blk {len(pool)} 只"
 
     a_stocks = sorted(db_codes & pool)
-    print(f"[1/4] 标的池: {pool_desc} ∩ DB有数据 = {len(a_stocks)} 只 (耗时 {t1-t0:.2f}s)",
-          file=sys.stderr)
+    n_st = sum(1 for mc in a_stocks
+               if is_st_name(names_by_code.get(f"{mc[0]}{mc[1]}", "")))
+    a_stocks = [mc for mc in a_stocks
+                if not is_st_name(names_by_code.get(f"{mc[0]}{mc[1]}", ""))]
+    print(f"[1/4] 标的池: {pool_desc} ∩ DB有数据 = {len(a_stocks)+n_st} 只"
+          f"(排除 ST/*ST {n_st}) (耗时 {t1-t0:.2f}s)", file=sys.stderr)
     if not a_stocks:
         sys.stderr.write("无候选标的（自选股为空或无数据，加 --all 筛全市场）\n")
         return 1
@@ -355,9 +391,12 @@ def main():
     adj_by_mc = batch_fetch_adjust(conn, a_stocks)
     print(f"[1/4] 复权事件: {len(adj_by_mc)} 只有除权记录", file=sys.stderr)
 
-    start_date = (datetime.now() - timedelta(days=BOTTOM_SCAN_DAYS * 3 // 2 + 10)).strftime("%Y-%m-%d")
+    # 回测需更长历史: 250 日底部回看 + 评估期
+    bt_days = BOTTOM_SCAN_DAYS * 3 // 2 + 500 if args.backtest else BOTTOM_SCAN_DAYS * 3 // 2 + 10
+    start_date = (datetime.now() - timedelta(days=bt_days)).strftime("%Y-%m-%d")
 
     all_results = []
+    bt_events = []
     reject_count = Counter()
     total_batches = (len(a_stocks) + BATCH_SIZE - 1) // BATCH_SIZE
 
@@ -382,6 +421,10 @@ def main():
                 continue
             name = names_by_code.get(code, "")
             rows = qfq_rows(rows, adj_by_mc.get((market, num)))
+            if args.backtest:
+                bt_events.extend(sliding_events(code, rows, name,
+                                                None if args.y else args.rise))
+                continue
             passed, details = screen_stock(code, rows, name, today_str,
                                            None if args.y else args.rise)
             if passed:
@@ -393,6 +436,13 @@ def main():
 
         print(f"[2/4] 批次 {batch_idx+1}/{total_batches}: {len(batch)} 只, "
               f"通过 {batch_passed}, kline {t3-t2:.1f}s", file=sys.stderr)
+
+    if args.backtest:
+        conn.close()
+        mode_desc = "全 A 股" if args.all else "自选股"
+        print(f"[backtest] 共 {len(bt_events)} 个事件", file=sys.stderr)
+        report_events(bt_events, title=f"find-retrace 回测 ({mode_desc})")
+        return 0
 
     conn.close()
 

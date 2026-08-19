@@ -49,14 +49,11 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import numpy as np
 import pandas as pd
-import taosws
-
 from common import (OUTPUT_DIR, all_mainboard_codes, apply_qfq, batch_fetch_adjust,
-                    load_stock_names, parse_code, zxg_codes)
+                    is_st_name, load_stock_names, market_line,
+                    market_regime, parse_code, zxg_codes, connect)
 
 # ======================== 配置 ========================
-TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041/tdx")
-
 BATCH_SIZE = 1800
 MIN_ROWS = 70            # 5日均量 + EXPMA12 + 250日位置所需最少数据
 LOOKBACK_DAYS = 320      # 当日模式回看交易日（250 日位置 + 红线窗口余量）
@@ -79,7 +76,7 @@ def limit_ratio(market, num, name):
     """涨停幅度: 科创/创业板 20% / 主板 10% / 主板 ST 5%（bj 已在标的池剔除）。"""
     if num.startswith("688") or num.startswith("689") or num.startswith("30"):
         return 0.20
-    return 0.05 if "ST" in (name or "") else 0.10
+    return 0.05 if is_st_name(name) else 0.10
 
 
 def limit_up_price(prev_close, ratio):
@@ -119,7 +116,7 @@ def batch_query_kline(cursor, codes, start_date):
 
 def is_excluded(market, num, name):
     """博主原话「非科创板非北交所非ST」。"""
-    return market == "bj" or num.startswith(("688", "689")) or "ST" in (name or "")
+    return market == "bj" or num.startswith(("688", "689")) or is_st_name(name)
 
 
 def iter_stock_frames(cursor, codes, adj_by_mc, start_date):
@@ -419,6 +416,8 @@ def main():
     parser.add_argument("--top", type=int, default=20, help="当日模式每状态屏显条数 (默认 20)")
     parser.add_argument("--backtest", action="store_true", help="事件回测: 三类买点 → 规则出场收益")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
+    parser.add_argument("--market-bull", action="store_true",
+                        help="大盘空头时跳过筛选（默认仅标注，不拦截）")
     args = parser.parse_args()
 
     if args.self_test:
@@ -426,9 +425,16 @@ def main():
         return 0
 
     days = args.days or (BACKTEST_DAYS if args.backtest else LOOKBACK_DAYS)
-    conn = taosws.connect(TDENGINE_URL)
+    conn = connect()
     cursor = conn.cursor()
     names_by_code = load_stock_names(conn)
+
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
 
     t0 = time.time()
     today_str = time.strftime("%Y-%m-%d")

@@ -17,7 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
-from common import OUTPUT_DIR, parse_code, zxg_codes, batch_fetch_adjust, pad
+from common import (OUTPUT_DIR, parse_code, zxg_codes, batch_fetch_adjust, pad,
+                    forward_ret, market_line, market_regime, report_events)
 from common import (connect, batch_fetch_klines, load_stock_names,
                                   _compute, to_weekly, SECTOR_INDICES,
                                   get_sector_for_code)
@@ -84,6 +85,35 @@ def detect_double_cross(w, fresh=4, lookback=30, zero_band=0.02,
     }
 
 
+def sliding_events(code, df, fresh, lookback, zero_band, vol_ratio, dc_min_score):
+    """回测: 逐周截断周线重跑 detect_double_cross, 事件 = 二次金叉周 (g2, 按日期去重)。
+
+    前瞻收益从 g2 周最后一个交易日（日线）起算，与其余脚本同口径 fwd=(5,20,65)。
+    """
+    weekly = to_weekly(df)
+    closes = [float(x) for x in df["C"]]
+    lows = [float(x) for x in df["L"]]
+    dts = [str(x)[:10] for x in df["ts"]]
+    evs = []
+    seen = set()
+    n = len(weekly)
+    for k in range(35, n):
+        sig = detect_double_cross(weekly.iloc[:k + 1], fresh, lookback, zero_band,
+                                  vol_ratio)
+        if not sig or sig["dc_score"] < dc_min_score:
+            continue
+        g2 = sig["dc_g2"]
+        if g2 in seen:
+            continue
+        seen.add(g2)
+        # 事件日 = g2 周最后一个交易日（g2 为周标签，取 ≤ g2 的最后交易日）
+        j = next((di for di in range(len(dts) - 1, -1, -1) if dts[di] <= g2), None)
+        if j is None:
+            continue
+        evs.append({"code": code, "date": g2, **forward_ret(closes, lows, j)})
+    return evs
+
+
 def main():
     ap = argparse.ArgumentParser(description="find-macd-weekdc 周线 MACD 二次穿越")
     ap.add_argument("--codes", nargs="*")
@@ -98,9 +128,19 @@ def main():
     ap.add_argument("--limit", type=int)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-macd-weekdc"))
+    ap.add_argument("--market-bull", action="store_true",
+                    help="大盘空头时跳过筛选（默认仅标注，不拦截）")
+    ap.add_argument("--backtest", action="store_true",
+                    help="滑窗回测: 周线信号→前瞻收益(+5/20/65)汇总")
     args = ap.parse_args()
 
     conn = connect()
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
     if args.codes:
         pool = [parse_code(c) for c in args.codes]
     elif args.all:
@@ -117,7 +157,8 @@ def main():
     names = load_stock_names(conn)
 
     print("[fetch] 批量拉取日线...")
-    klines = batch_fetch_klines(conn, pool, days=400, min_rows=180)
+    klines = batch_fetch_klines(conn, pool, days=800 if args.backtest else 400,
+                                min_rows=180)
     adj_by_mc = batch_fetch_adjust(conn, pool)
 
     all_features = []
@@ -132,6 +173,16 @@ def main():
             except Exception as e:
                 sys.stderr.write(f"[warn] {e}\n")
     print(f"[fetch] {len(all_features)} 只完成预处理")
+
+    if args.backtest:
+        bt_events = []
+        for m, c, df in all_features:
+            bt_events.extend(sliding_events(
+                f"{m}{c}", df, args.dc_fresh, args.dc_lookback,
+                args.dc_zero_band, args.dc_vol_ratio, args.dc_min_score))
+        print(f"[backtest] 共 {len(bt_events)} 个事件", file=sys.stderr)
+        report_events(bt_events, title="find-macd-weekdc 回测")
+        return 0
 
     print("[dc] 检测周线 MACD 二次穿越...")
     dc_map = {}

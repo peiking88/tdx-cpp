@@ -34,13 +34,14 @@ python3 scripts/scalper.py verify   # 选股验证（前日14:30-15:00均价买/
 python3 scripts/find-diverse.py --zxg     # 多策略选股筛子（--methods leader macd-week-dc macd-min-gc 三法 OR 合并, 写 LT.blk + find-diverse.csv）
 python3 scripts/find-diverse.py --zxg --methods macd-min-gc             # 仅分钟信号（30m MACD底背离 + 5m MACD零轴金叉）
 python3 scripts/find-diverse.py --zxg --backtest-div            # 回测分钟信号各持有期收益率（vs 全 bar 基线）
-python3 scripts/find-reversal.py                          # 底部反转筛选（默认自选股, --all 全 A 股; 600105 模式）
-python3 scripts/find-retrace.py                            # 昨日涨停今低开筛选（前复权, 现价距一年内最低点 <=10%; 开盘后运行, 需当日 bar 已入库）
-python3 scripts/find-byslope.py --all                   # 均线斜率评估: 金叉按MA5斜率分桶回测前瞻收益; --today 出当日金叉清单
-python3 scripts/find-terrain.py --all                   # 相控阵地貌选股（GMMA等高线+波束扫描九类地貌; 反转筛选漏斗: 下降谷底收敛领衔; --backtest 事件回测 / --calibrate 阈值走步标定）
-python3 scripts/find-trivol.py --all              # 寻一三倍量战法选股（V≥前日×3收阳+近5日均量3~10倍; 红线=三倍量收盘价, EXPMA12上穿红线金叉/缩量回调低吸/突破三分类; --backtest 规则出场回测; 建议尾盘运行）
-python3 scripts/find-finish-eating.py --all                   # 吸筹结束突破筛选（平台+低位+地量+筹码集中+情绪+股东户数+放量破颈线, 建议尾盘运行）
-python3 scripts/find-bottom.py --all              # 抄底信号扫描（DEMA20跌破买入区/RSI14上穿30卖出; --backtest 回测 vs 买入持有）
+python3 scripts/find-reversal.py                          # 底部反转筛选（前复权, 600105 模式; --backtest 滑窗回测; --market-bull 大盘滤网）
+python3 scripts/find-retrace.py                            # 昨日涨停今低开筛选（前复权, 现价距一年内最低点 <=10%; --backtest 滑窗回测; --market-bull）
+python3 scripts/find-byslope.py --all                   # 均线斜率评估: 金叉按MA5斜率分桶回测前瞻收益; --today 出当日金叉清单; --market-bull
+python3 scripts/find-terrain.py --all                   # 相控阵地貌选股（GMMA等高线+波束扫描九类地貌; 反转筛选漏斗: 下降谷底收敛领衔; --backtest 事件回测 / --calibrate 阈值走步标定; --market-bull）
+python3 scripts/find-trivol.py --all              # 寻一三倍量战法选股（V≥前日×3收阳+近5日均量3~10倍; 红线=三倍量收盘价, EXPMA12上穿红线金叉/缩量回调低吸/突破三分类; --backtest 规则出场回测; --market-bull; 建议尾盘运行）
+python3 scripts/find-finish-eating.py --all                   # 吸筹结束突破筛选（平台+低位+地量+筹码集中+情绪+股东户数+放量破颈线; --backtest 滑窗回测; --market-bull; 建议尾盘运行）
+python3 scripts/find-bottom.py --all              # 抄底信号扫描（DEMA20跌破买入区/RSI14上穿30卖出; --backtest 回测 vs 买入持有; --market-bull）
+python3 scripts/find-combo.py --min-hit 2             # 综合选股: 5策略共识（terrain+trivol+weekdc+reversal+finish-eating; --min-hit N 共振筛选; --market-bull）
 python3 scripts/find-wave.py --code sh600276 --cycle 1d   # 波浪分析：波峰波谷识别 + 涨跌力度（量价/幅度/时间）
 python3 scripts/fetch-margin.py                            # 融资融券数据入库（AKShare → TDengine）
 python3 scripts/leverage-risk.py                           # 市场杠杆风险监测（读 TDengine，零外部依赖）

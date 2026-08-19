@@ -34,7 +34,9 @@ import numpy as np
 import pandas as pd
 import taosws
 
-from common import OUTPUT_DIR, all_mainboard_codes, apply_qfq, batch_fetch_adjust, parse_code, zxg_codes
+from common import (OUTPUT_DIR, all_mainboard_codes, apply_qfq,
+                    batch_fetch_adjust, is_st_name, market_line,
+                    market_regime, parse_code, zxg_codes)
 
 # ======================== 配置 ========================
 TDENGINE_HOST = os.environ.get("TDENGINE_HOST", "localhost")
@@ -206,6 +208,8 @@ def main():
     parser.add_argument("--cost", type=float, default=COST_PER_SIDE, help="单边成本 (默认 0.003)")
     parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-bottom"), help="输出目录")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
+    parser.add_argument("--market-bull", action="store_true",
+                        help="大盘空头时跳过筛选（默认仅标注，不拦截）")
     args = parser.parse_args()
 
     if args.self_test:
@@ -217,6 +221,13 @@ def main():
     cursor = conn.cursor()
     names_by_code = load_stock_names(conn)
 
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
+
     t0 = time.time()
     db_codes = set(get_a_stock_codes(cursor))
     if args.all:
@@ -226,13 +237,18 @@ def main():
         pool = {parse_code(c) for c in zxg_codes()}
         pool_desc = f"自选股 zxg.blk {len(pool)} 只"
     a_stocks = sorted(db_codes & pool)
+    n_st = sum(1 for mc in a_stocks
+               if is_st_name(names_by_code.get(f"{mc[0]}{mc[1]}", "")))
+    a_stocks = [mc for mc in a_stocks
+                if not is_st_name(names_by_code.get(f"{mc[0]}{mc[1]}", ""))]
     if not a_stocks:
         sys.stderr.write("无候选标的（加 --all 筛全市场）\n")
         return 1
     adj_by_mc = batch_fetch_adjust(conn, a_stocks)
 
     start_date = (datetime.now() - timedelta(days=LOOKBACK_DAYS * 3 // 2 + 30)).strftime("%Y-%m-%d")
-    print(f"[1/3] {pool_desc} ∩ DB = {len(a_stocks)} 只 (耗时 {time.time()-t0:.1f}s)", file=sys.stderr)
+    print(f"[1/3] {pool_desc} ∩ DB = {len(a_stocks)} 只"
+          f"(排除 ST/*ST {n_st}) (耗时 {time.time()-t0:.1f}s)", file=sys.stderr)
 
     signals = []   # (code, name, kind, close, dema, gap, rsi)
     bt_results = []  # (code, name, years, ret, bh, trades, wr, mdd)

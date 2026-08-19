@@ -197,10 +197,10 @@ def connect():
 def fetch_kline(conn, market, code, cycle="1d", days=400, min_rows=2):
     """查单只 K 线。返回 DataFrame 或 None。"""
     start = (pd.Timestamp.now() - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
-    r = conn.query(
+    r = list(conn.query(
         f"SELECT ts,open,high,low,close,volume FROM k_{market}{code}_{cycle} "
         f"WHERE ts >= '{start}' ORDER BY ts"
-    )
+    ))
     if len(r) < min_rows:
         return None
     return pd.DataFrame(list(r), columns=["ts", "O", "H", "L", "C", "V"])
@@ -318,9 +318,9 @@ def sector_momentum(conn, days=20):
     start = (pd.Timestamp.now() - pd.Timedelta(days=days * 2)).strftime("%Y-%m-%d")
     for sec in SECTOR_INDICES:
         try:
-            r = conn.query(
+            r = list(conn.query(
                 f"SELECT ts,close FROM k_{sec}_1d WHERE ts >= '{start}' ORDER BY ts"
-            )
+            ))
             if len(r) >= 2:
                 out[sec] = (r[-1][1] / r[0][1] - 1) * 100
         except Exception:
@@ -355,3 +355,103 @@ def _pivot_lows(cv, k=3, sep=4):
             if not piv or i - piv[-1] >= sep:
                 piv.append(i)
     return piv
+
+
+# ---------------------------------------------------------------------------
+# 寻底脚本口径统一 (ST 排除 / 大盘择时 / 回测报告)
+# ---------------------------------------------------------------------------
+def is_st_name(name):
+    """ST/*ST 判断（含退市整理期等名称标记，子串命中即可）。"""
+    return "ST" in (name or "")
+
+
+def market_regime(conn, ma=20, up=20):
+    """上证指数状态 → {close, ma, ret, bull} 或 None。
+
+    bull = 收 > MA20 且近 20 日涨跌 > 0。复用 fetch_kline 查 k_sh000001_1d。
+    """
+    df = fetch_kline(conn, "sh", "000001", cycle="1d",
+                     days=up * 3 // 2 + 10, min_rows=ma)
+    if df is None or len(df) < ma:
+        return None
+    c = df["C"]
+    close = float(c.iloc[-1])
+    ma_ = float(c.rolling(ma).mean().iloc[-1])
+    ret = float(c.iloc[-1] / c.iloc[-ma] - 1)
+    return {"close": close, "ma": ma_, "ret": ret, "bull": close > ma_ and ret > 0}
+
+
+def market_line(regime):
+    """'上证 3456.78 MA20↑ 近20日+3.2% 多头' 或 '大盘数据缺失'。"""
+    if regime is None:
+        return "大盘数据缺失"
+    arrow = "↑" if regime["close"] > regime["ma"] else "↓"
+    state = "多头" if regime["bull"] else "空头"
+    return f"上证 {regime['close']:.2f} MA20{arrow} 近20日{regime['ret']:+.1%} {state}"
+
+
+def _at(seq, j):
+    """位置访问（list 或 pandas Series 通用）。"""
+    return seq.iloc[j] if hasattr(seq, "iloc") else seq[j]
+
+
+def forward_ret(c, low, i, fwd=(5, 20, 65)):
+    """事件在第 i 根 bar 收盘 → {ret_5/ret_20/ret_65, mae_20}（窗口不足为 None）。
+
+    c/low 为收盘/最低价序列（list 或 Series 均可，按位置访问）；mae_20 = 未来 20 日最大不利偏移。
+    """
+    ci = float(_at(c, i))
+    out = {}
+    for p in fwd:
+        j = i + p
+        out[f"ret_{p}"] = float(_at(c, j)) / ci - 1 if j < len(c) else None
+    if i + 1 < len(low):
+        lo = min(_at(low, k) for k in range(i + 1, min(i + 21, len(low))))
+        out["mae_20"] = float(lo) / ci - 1
+    else:
+        out["mae_20"] = None
+    return out
+
+
+def report_events(events, fwd=(5, 20, 65), title="回测", group_key=None):
+    """事件前瞻收益汇总报告（对齐 find-terrain.report_backtest 风格）。
+
+    events: list[dict]，每项含 code/date + ret_p/mae_20，可选分组字段 group_key。
+    打印总体行 + 分组表（样本数/各期均值收益/胜率/MAE）。
+    """
+    def agg(evs):
+        n = len(evs)
+        row = {}
+        for p in fwd:
+            k = f"ret_{p}"
+            vals = [e[k] for e in evs if e.get(k) is not None]
+            row[k] = sum(vals) / len(vals) if vals else None
+            row[k + "_win"] = (sum(1 for v in vals if v > 0) / len(vals)) if vals else None
+        maes = [e["mae_20"] for e in evs if e.get("mae_20") is not None]
+        row["mae_20"] = sum(maes) / len(maes) if maes else None
+        return n, row
+
+    def fmt(prefix, n, row):
+        parts = [f"{prefix:<10}{n:>6}"]
+        for p in fwd:
+            k = f"ret_{p}"
+            parts.append(f" {k}:{row[k]:+7.1%}" if row[k] is not None else f" {k}:{'':>7}")
+            win = row.get(k + "_win")
+            parts.append(f" 胜{win:4.0%}" if win is not None else " 胜 --")
+        parts.append(f" MAE:{row['mae_20']:+.1%}" if row["mae_20"] is not None else " MAE: --")
+        return "".join(parts)
+
+    print(f"\n{'=' * 74}")
+    print(f" {title} — {len(events)} 个事件")
+    print(f"{'=' * 74}")
+    n, base = agg(events)
+    print(fmt("全体", n, base))
+    if group_key and events:
+        groups = {}
+        for e in events:
+            groups.setdefault(e.get(group_key, "未知"), []).append(e)
+        print("-" * 74)
+        for g, evs in sorted(groups.items()):
+            gn, grow = agg(evs)
+            print(fmt(str(g), gn, grow))
+    print("=" * 74)

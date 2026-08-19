@@ -17,7 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
-from common import OUTPUT_DIR, parse_code, zxg_codes, batch_fetch_adjust, apply_qfq, pad
+from common import (OUTPUT_DIR, parse_code, zxg_codes, batch_fetch_adjust, apply_qfq, pad,
+                    market_line, market_regime)
 from common import (connect, fetch_kline, thread_conn, load_stock_names,
                                   resample_intraday, _pivot_lows,
                                   SECTOR_INDICES, get_sector_for_code)
@@ -115,9 +116,17 @@ def main():
     ap.add_argument("--limit", type=int)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-macd-mingc"))
+    ap.add_argument("--market-bull", action="store_true",
+                    help="大盘空头时跳过筛选（默认仅标注，不拦截）")
     args = ap.parse_args()
 
     conn = connect()
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
     if args.codes:
         pool = [parse_code(c) for c in args.codes]
     elif args.all:

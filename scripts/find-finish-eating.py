@@ -42,7 +42,10 @@ from datetime import datetime, timedelta
 import pandas as pd
 import taosws
 
-from common import OUTPUT_DIR, all_mainboard_codes, apply_qfq, batch_fetch_adjust, parse_code, zxg_codes
+from common import (OUTPUT_DIR, all_mainboard_codes, apply_qfq,
+                    batch_fetch_adjust, forward_ret, is_st_name,
+                    market_line, market_regime, parse_code,
+                    report_events, zxg_codes)
 
 # ======================== 配置 ========================
 TDENGINE_HOST = os.environ.get("TDENGINE_HOST", "localhost")
@@ -290,6 +293,24 @@ def screen_stock(rows, shares, index_closes, cfg):
     }
 
 
+# ======================== 回测 ========================
+def sliding_events(code, rows, shares, index_closes, cfg):
+    """回测: 滑窗逐日判定「平台+地量+放量突破」，事件日 = 突破 bar（第 i 根）。
+
+    与当日筛选共用 screen_stock; F10 无历史数据, 回测跳过（当日模式 h is None 亦放行）。
+    """
+    closes = [r[4] for r in rows]
+    lows = [r[3] for r in rows]
+    evs = []
+    n = len(rows)
+    for i in range(cfg["plat_days"] + 10, n):
+        ok, _ = screen_stock(rows[: i + 1], shares, index_closes, cfg)
+        if ok:
+            evs.append({"code": code, "date": rows[i][0].strftime("%Y-%m-%d"),
+                        **forward_ret(closes, lows, i)})
+    return evs
+
+
 # ======================== 自检 ========================
 def self_test():
     cfg = dict(plat_days=60, plat_amp=0.20, near_low=0.35, quiet_days=5,
@@ -381,6 +402,10 @@ def main():
     parser.add_argument("--conc90", type=float, default=CONC90, help="筹码90%%成本集中度上限 (默认 0.40)")
     parser.add_argument("--output-dir", default=os.path.join(OUTPUT_DIR, "find-finish-eating"), help="Excel 输出目录")
     parser.add_argument("--self-test", action="store_true", help="运行内置自检后退出")
+    parser.add_argument("--market-bull", action="store_true",
+                        help="大盘空头时跳过筛选（默认仅标注，不拦截）")
+    parser.add_argument("--backtest", action="store_true",
+                        help="滑窗回测: 逐日信号→前瞻收益(+5/20/65)汇总")
     args = parser.parse_args()
 
     if args.self_test:
@@ -397,6 +422,13 @@ def main():
     cursor = conn.cursor()
     names_by_code = load_stock_names(conn)
 
+    # 大盘择时：标注 + 可选硬过滤（--market-bull）
+    regime = market_regime(conn)
+    print(f"[大盘] {market_line(regime)}", file=sys.stderr)
+    if args.market_bull and regime and not regime["bull"]:
+        sys.stderr.write("[大盘] 空头, --market-bull 下跳过\n")
+        return 0
+
     t0 = time.time()
     db_codes = set(get_a_stock_codes(cursor))
     if args.all:
@@ -406,16 +438,24 @@ def main():
         pool = {parse_code(c) for c in zxg_codes()}
         pool_desc = f"自选股 zxg.blk {len(pool)} 只"
     a_stocks = sorted(db_codes & pool)
+    n_st = sum(1 for mc in a_stocks
+               if is_st_name(names_by_code.get(f"{mc[0]}{mc[1]}", "")))
+    a_stocks = [mc for mc in a_stocks
+                if not is_st_name(names_by_code.get(f"{mc[0]}{mc[1]}", ""))]
     if not a_stocks:
         sys.stderr.write("无候选标的（加 --all 筛全市场）\n")
         return 1
     adj_by_mc = batch_fetch_adjust(conn, a_stocks)
-    print(f"[1/4] {pool_desc} ∩ DB = {len(a_stocks)} 只, 复权事件 {len(adj_by_mc)} 只 "
+    print(f"[1/4] {pool_desc} ∩ DB = {len(a_stocks)} 只"
+          f"(排除 ST/*ST {n_st}), 复权事件 {len(adj_by_mc)} 只 "
           f"(耗时 {time.time()-t0:.1f}s)", file=sys.stderr)
 
-    start_date = (datetime.now() - timedelta(days=SCAN_DAYS * 3 // 2 + 30)).strftime("%Y-%m-%d")
+    # 回测需更长历史: 60 日平台 + 250 日一年低 + 评估期
+    bt_days = SCAN_DAYS * 3 // 2 + 700 if args.backtest else SCAN_DAYS * 3 // 2 + 30
+    start_date = (datetime.now() - timedelta(days=bt_days)).strftime("%Y-%m-%d")
     index_closes = load_index_closes(cursor, start_date)
     results = []
+    bt_events = []
     reject = defaultdict(int)
     total_batches = (len(a_stocks) + BATCH_SIZE - 1) // BATCH_SIZE
 
@@ -434,6 +474,10 @@ def main():
             rows = qfq_rows(stock_data.get(code, []), adj_by_mc.get((market, num)))
             if not rows:
                 continue
+            if args.backtest:
+                bt_events.extend(sliding_events(code, rows, shares.get(code),
+                                                index_closes, cfg))
+                continue
             passed, d = screen_stock(rows, shares.get(code), index_closes, cfg)
             if passed:
                 n_pass += 1
@@ -443,6 +487,13 @@ def main():
                 reject[d["reason"].split()[0] if "平台过宽" in d["reason"] else d["reason"]] += 1
         print(f"[2/4] 批次 {bi+1}/{total_batches}: {len(batch)} 只, 通过 {n_pass}, "
               f"kline {time.time()-t2:.1f}s", file=sys.stderr)
+
+    if args.backtest:
+        conn.close()
+        mode_desc = "全 A 股" if args.all else "自选股"
+        print(f"[backtest] 共 {len(bt_events)} 个事件", file=sys.stderr)
+        report_events(bt_events, title=f"find-finish-eating 回测 ({mode_desc})")
+        return 0
 
     # F10 股东户数（漏斗末端，仅对幸存者逐只懒查；最新期户数减少为条件）
     kept = []
