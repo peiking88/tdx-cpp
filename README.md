@@ -38,6 +38,7 @@ python3 scripts/find-reversal.py                          # 底部反转筛选�
 python3 scripts/find-retrace.py                            # 昨日涨停今低开筛选（前复权, 现价距一年内最低点 <=10%; 开盘后运行, 需当日 bar 已入库）
 python3 scripts/find-byslope.py --all                   # 均线斜率评估: 金叉按MA5斜率分桶回测前瞻收益; --today 出当日金叉清单
 python3 scripts/find-terrain.py --all                   # 相控阵地貌选股（GMMA等高线+波束扫描九类地貌; 反转筛选漏斗: 下降谷底收敛领衔; --backtest 事件回测 / --calibrate 阈值走步标定）
+python3 scripts/find-trivol.py --all              # 寻一三倍量战法选股（V≥前日×3收阳+近5日均量3~10倍; 红线=三倍量收盘价, EXPMA12上穿红线金叉/缩量回调低吸/突破三分类; --backtest 规则出场回测; 建议尾盘运行）
 python3 scripts/find-finish-eating.py --all                   # 吸筹结束突破筛选（平台+低位+地量+筹码集中+情绪+股东户数+放量破颈线, 建议尾盘运行）
 python3 scripts/find-bottom.py --all              # 抄底信号扫描（DEMA20跌破买入区/RSI14上穿30卖出; --backtest 回测 vs 买入持有）
 python3 scripts/find-wave.py --code sh600276 --cycle 1d   # 波浪分析：波峰波谷识别 + 涨跌力度（量价/幅度/时间）
