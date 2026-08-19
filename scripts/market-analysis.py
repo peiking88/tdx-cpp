@@ -10,7 +10,7 @@
 环境变量:
     DEEPSEEK_API_KEY   — API 密钥（未设置则跳过 LLM 生成）
     DEEPSEEK_BASE_URL  — API 基础地址（默认 https://api.deepseek.com/anthropic）
-    DEEPSEEK_MODEL     — 模型名称（默认 deepseek-v4-pro）
+    DEEPSEEK_MODEL     — 模型名称（默认 deepseek-v4-flash）
 
 输出:
     <项目根>/output/market-analysis-yyyymmdd.md
@@ -213,7 +213,7 @@ def _generate_market_analysis(news_contents: list[str]) -> str:
     环境变量:
       DEEPSEEK_API_KEY  — API 密钥（未设置则跳过）
       DEEPSEEK_BASE_URL — API 基础地址（默认 https://api.deepseek.com/anthropic）
-      DEEPSEEK_MODEL    — 模型名称（默认 deepseek-v4-pro）
+      DEEPSEEK_MODEL    — 模型名称（默认 deepseek-v4-flash）
     """
     import requests as _req
 
@@ -223,7 +223,7 @@ def _generate_market_analysis(news_contents: list[str]) -> str:
         return ""
 
     base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic").strip().rstrip("/")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip()
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
 
     # 过滤空内容和获取失败的
     valid = [c for c in news_contents if c and not c.startswith("[获取失败")]
@@ -255,7 +255,8 @@ def _generate_market_analysis(news_contents: list[str]) -> str:
     }
     payload = {
         "model": model,
-        "max_tokens": 2000,
+        # thinking 模型的推理块计入 max_tokens，给不满会导致正文为空
+        "max_tokens": 8000,
         "system": "你是一位专业的A股市场分析师，擅长结合缠论技术分析和基本面进行市场研判。",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
@@ -267,7 +268,10 @@ def _generate_market_analysis(news_contents: list[str]) -> str:
         # Anthropic Messages API 返回格式: {"content": [{"type": "text", "text": "..."}]}
         content_blocks = data.get("content", [])
         texts = [b["text"] for b in content_blocks if b.get("type") == "text"]
-        return "\n".join(texts) if texts else ""
+        if not texts:
+            return (f"⚠️ 盘面分析生成失败: 正文为空 "
+                    f"(stop_reason={data.get('stop_reason')}, content={[b.get('type') for b in content_blocks]})")
+        return "\n".join(texts)
     except Exception as e:
         return f"⚠️ 盘面分析生成失败: {e}"
 
