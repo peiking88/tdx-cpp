@@ -5,7 +5,7 @@
 ================================================================================
 
 源自头条博主「寻一（无小不私聊）」全部 705 篇微头条（2025-10 ~ 2026-08，原文
-存 output/xunyi/xunyi_posts.md，其中 270 处提及三倍量）。方法规则均为博主原文：
+存 docs/xunyi_posts.md，其中 270 处提及三倍量）。方法规则均为博主原文：
 
   信号    三倍量日 = V ≥ 前一日×3 且收阳上涨（博主主图公式逐字:
           「三倍量:=V>=REF(V,1)*3 AND C>REF(C,1) AND C>O」，
@@ -20,7 +20,8 @@
             金叉应该是最强的」「形成金叉没有大涨的股票」
           ② 回调低吸: 三倍量后「缩量回踩」，价进入两线区间或回踩红线，
             「回调不破放量当天的最低价」「量能必须萎缩」
-          ③ 突破:「突破了三倍量收盘价买入」；次日跌破 = 假突破（博主逢低补）
+          ③ 突破:「突破了三倍量收盘价买入」；三倍量次日缩量站上红线尾盘
+            买入（帖136）；次日跌破 = 假突破（博主逢低补）
   出场    「止损价也为三倍量收盘价」（红线）；「跌破放量K线的最低点果断止损」；
           「一直等到涨停就卖掉」不涨停冲高卖出；跌破 EXPMA12 警惕
   排除    博主原话「非科创板非北交所非ST」→ 剔除 688/689、bj、ST
@@ -183,7 +184,7 @@ def entries_for_anchor(df, a):
       金叉      E12 上穿红线（前日 ≤ 红线，当日 >），且当日未大涨（C ≤ 红线×1.15）
       回调低吸  缩量（V < 三倍量日 V）且当日低点触及两线区间或红线，
                 收盘未破量低（「回调不破放量当天的最低价」）
-      突破      前收 ≤ 红线，当日收盘 > 红线
+      突破      前收 ≤ 红线，当日收盘 > 红线; 首日（三倍量次日）须缩量站上
     """
     n = len(df)
     end = min(a + 1 + ANCHOR_WINDOW, n)
@@ -208,12 +209,13 @@ def entries_for_anchor(df, a):
         & (seg["C"] <= zone_hi * 1.02)
     if pullback.any():
         out[1] = a + 1 + int(np.flatnonzero(pullback.to_numpy())[0])
-    # 突破: 收盘上穿红线。窗口首日的前收 = 三倍量日收盘 = 红线本身，
-    # 首日收高只是延续而非「回调后突破」→ 首日强制 False
-    brk = (seg["C"] > red) & (seg["C"].shift(1) <= red)
-    brk.iloc[0] = False
+    # 突破: 收盘上穿红线。首日前收 = 三倍量日收盘 = 红线，首日站上即帖136
+    # 「三倍量次日缩量站上三倍量收盘价尾盘买入」→ 首日须缩量，防放量冲高误报
+    prev_c = np.append(red, seg["C"].to_numpy()[:-1])
+    brk = (seg["C"].to_numpy() > red) & (prev_c <= red)
+    brk[0] &= float(seg["V"].iloc[0]) < v_anchor
     if brk.any():
-        out[2] = a + 1 + int(np.flatnonzero(brk.to_numpy())[0])
+        out[2] = a + 1 + int(np.flatnonzero(brk)[0])
     return out
 
 
@@ -259,8 +261,10 @@ def classify_state(df, a, today_i):
     crossed = (e12_series > red) & (e12_series.shift(1) <= red)
     if crossed.any() and c <= red * (1 + CROSS_MAX_EXTEND) and e12 > df["E12"].iloc[today_i - 1]:
         return "金叉", red, age
-    # 突破: 前一收盘（须为锚后交易日，锚龄≥2）≤ 红线，当日收盘上穿
-    if age >= 2 and df["C"].iloc[today_i - 1] <= red < c:
+    # 突破: 前收 ≤ 红线 < 当日收盘。锚龄=1 时前收 = 锚收 = 红线，须缩量站上
+    # （帖136「三倍量次日缩量站上三倍量收盘价尾盘买入」）
+    if age >= 1 and df["C"].iloc[today_i - 1] <= red < c \
+            and (age > 1 or float(t["V"]) < v_anchor):
         return "突破", red, age
     shrink = float(t["V"]) < v_anchor
     if shrink and (float(t["L"]) <= zone_hi or float(t["L"]) <= red * 1.02) and c >= low_anchor:
@@ -376,7 +380,12 @@ def self_test():
     a = find_anchors(df2)[0]
     ent = entries_for_anchor(df2, a)
     assert ent.get(1) is not None and ent[1] in (51, 52), ent      # 回调低吸在 51/52
-    assert ent.get(2) is not None and ent[2] >= 52, ent            # 突破在收上红线日
+    assert ent.get(2) == 51, ent   # 51 缩量站上红线 → 首日突破（帖136）
+    # 首日突破须缩量: 51 放量站上 → 不算，首个突破顺延到 53（回调后再上穿）
+    v2b = v2.copy(); v2b[51] = 4_000_000.0
+    df2b = add_expma(_mk_df(o2, h2, l2, c2, v2b))
+    ent_b = entries_for_anchor(df2b, find_anchors(df2b)[0])
+    assert ent_b.get(2) == 53, ent_b
     # 3) 状态分类: 52 日当天 → 回调低吸; 53 日当天 → 突破或持有
     st, red, age = classify_state(df2, a, 52)
     assert st == "回调低吸", st
