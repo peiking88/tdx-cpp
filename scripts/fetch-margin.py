@@ -10,16 +10,26 @@
   python3 scripts/fetch-margin.py --recent 30         # 近 N 日批量补录
 """
 import argparse
+import json
 import os
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import akshare as ak
 import taosws
 
 DB = os.environ.get("TDENGINE_DB", "tdx")
 TDENGINE_URL = os.environ.get("TDENGINE_URL", "taosws://root:taosdata@localhost:6041")
+
+HOLIDAYS = set()  # YYYYMMDD 集合，cfg/holidays.json
+
+
+def load_holidays():
+    p = Path(__file__).resolve().parent.parent / "cfg" / "holidays.json"
+    if p.exists():
+        HOLIDAYS.update(x.replace("-", "") for x in json.load(open(p)))
 
 
 def get_conn():
@@ -39,7 +49,7 @@ def ensure_table(conn):
 
 def previous_trading_day(ref=None):
     d = (ref or datetime.now()) - timedelta(1)
-    while d.weekday() >= 5:
+    while d.weekday() >= 5 or d.strftime("%Y%m%d") in HOLIDAYS:
         d -= timedelta(1)
     return d
 
@@ -100,15 +110,14 @@ def fetch_day(conn, date_str):
         print(f"  [warn] 无数据行", file=sys.stderr)
         return False
 
-    # 批量写入（DROP 子表 + INSERT）
-    # 按 secid 分组
+    # 幂等写入：按日 DELETE（超级表带时间窗口）+ INSERT，不动其他日期
+    conn.query(f"DELETE FROM margin WHERE ts = '{ts}'")
     by_sec = {}
     for r in rows:
         by_sec.setdefault(r[9], []).append(r)
 
     for secid, rlist in by_sec.items():
         tb = f"m_{secid}"
-        conn.query(f"DROP TABLE IF EXISTS {tb}")
         vals = []
         for r in rlist:
             vals.append(
@@ -129,6 +138,7 @@ def main():
 
     conn = get_conn()
     ensure_table(conn)
+    load_holidays()
 
     if args.date:
         ok = fetch_day(conn, args.date)
@@ -143,7 +153,7 @@ def main():
                 ok_count += 1
                 if ok_count >= args.recent:
                     break
-            d -= timedelta(1)
+            d = previous_trading_day(d)
         print(f"[fetch-margin] 补录 {ok_count} 日", file=sys.stderr)
         sys.exit(0)
 
@@ -153,7 +163,7 @@ def main():
         ds = d.strftime("%Y%m%d")
         if fetch_day(conn, ds):
             sys.exit(0)
-        d -= timedelta(1)
+        d = previous_trading_day(d)
     print("[fetch-margin] 近 7 日无数据", file=sys.stderr)
     sys.exit(1)
 

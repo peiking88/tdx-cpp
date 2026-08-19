@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import unicodedata
 from datetime import datetime, timedelta
 
 import taosws
@@ -39,12 +40,14 @@ REFERENCE_MV = {"创业板": 144934.15, "科创板": 107381.71, "沪深两市": 
 
 
 def get_conn():
-    return taosws.connect(TDENGINE_URL)
+    conn = taosws.connect(TDENGINE_URL)
+    conn.query(f"USE {DB}")  # ponytail: taosws 多语句只返回首个结果集，USE 须单独发
+    return conn
 
 
 def query_all(conn, sql):
     """执行查询，返回 [dict(...), ...]。"""
-    r = conn.query(f"USE {DB}; {sql}")
+    r = conn.query(sql)
     cols = [d.name() for d in r.fields]
     return [dict(zip(cols, row)) for row in r]
 
@@ -110,21 +113,26 @@ def fetch_margin_total(conn, date_str):
 
 
 def fetch_circulating_mv(conn, codes):
-    """从 fn_ 表读流通股本 × kline 最新收盘价 → 流通市值（元）。"""
+    """从 fn_ 表读流通股本 × kline 最新收盘价 → 流通市值（亿元）。"""
     out = {}
     for code in codes:
-        market = "sh" if code.startswith(("6", "9")) else "sz"
-        row = query_one(conn, f"SELECT liutongguben FROM fn_{code} LIMIT 1")
-        shares = float(row["liutongguben"] or 0) if row else 0.0
-        if shares <= 0:
+        prefixed = code[:2] in ("sh", "sz", "bj")
+        market = code[:2] if prefixed else ("sh" if code.startswith(("6", "9")) else "sz")
+        bare = code[2:] if prefixed else code
+        try:
+            row = query_one(conn, f"SELECT liutongguben FROM fn_{bare} LIMIT 1")
+            shares = float(row["liutongguben"] or 0) if row else 0.0
+            if shares <= 0:
+                continue
+            price_row = query_one(
+                conn,
+                f"SELECT close FROM k_{market}{bare}_1d ORDER BY ts DESC LIMIT 1"
+            )
+        except Exception:  # 表不存在（未导入/非 A 股）
             continue
-        price_row = query_one(
-            conn,
-            f"SELECT close FROM k_{market}{code}_1d ORDER BY ts DESC LIMIT 1"
-        )
         price = float(price_row["close"] or 0) if price_row else 0.0
         if price > 0:
-            out[code] = shares * price
+            out[code] = shares * price / 1e8
     return out
 
 
@@ -135,13 +143,28 @@ def fetch_live_mv():
     return None
 
 
+def is_index(market, code):
+    """非个股标的：88 通达信板块、sh 000/999 指数段 + 5 基金段、sz 399/395 指数段 + 15/16 基金段。"""
+    if code.startswith(("88", "899")):  # 通达信板块指数 / 北证指数
+        return True
+    if market == "sh":
+        return code.startswith(("000", "999", "5"))
+    if market == "sz":
+        return code.startswith(("399", "395", "15", "16"))
+    return False
+
+
 def fetch_crowding(conn, date_str):
     """交易拥挤度：各板块成交额前5%个股占比。"""
-    ts = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} 00:00:00"
+    # 日 bar ts 为收盘时刻（15:00），用当日范围匹配；cycle='1d' 排除分钟线
+    d = datetime.strptime(date_str, "%Y%m%d")
+    day, nxt = d.strftime("%Y-%m-%d"), (d + timedelta(1)).strftime("%Y-%m-%d")
     rows = query_all(
         conn,
-        f"SELECT market, code, amount FROM kline WHERE ts='{ts}' AND amount > 0"
+        f"SELECT market, code, amount FROM kline "
+        f"WHERE ts >= '{day}' AND ts < '{nxt}' AND cycle='1d' AND amount > 0"
     )
+    rows = [r for r in rows if not is_index(r["market"], r["code"])]
     if not rows:
         return None
 
@@ -278,13 +301,16 @@ def analyze(conn, date_str, threshold, symbols=None, crowding_threshold=CROWDING
     netbuy = fetch_netbuy_trend(conn) if not symbols else None
 
     if symbols:
-        # 个股模式
+        # 个股模式（margin 表 code 为裸代码，market+code 组合消歧）
         circ = fetch_circulating_mv(conn, symbols)
         ts = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} 00:00:00"
         for code in symbols:
+            prefixed = code[:2] in ("sh", "sz", "bj")
+            market = code[:2] if prefixed else ("sh" if code.startswith(("6", "9")) else "sz")
+            bare = code[2:] if prefixed else code
             row = query_one(
                 conn,
-                f"SELECT margin_balance FROM margin WHERE ts='{ts}' AND code='{code}'"
+                f"SELECT margin_balance FROM margin WHERE ts='{ts}' AND market='{market}' AND code='{bare}'"
             )
             m = float(row["margin_balance"]) if row else None
             add(code, m, circ.get(code))
@@ -301,6 +327,20 @@ def analyze(conn, date_str, threshold, symbols=None, crowding_threshold=CROWDING
     return result
 
 
+def dwidth(s):
+    """显示宽度：中文/全角/emoji 算 2 列。"""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+
+def fmt_row(cells, widths, aligns):
+    """按显示宽度对齐的一行表格。"""
+    parts = []
+    for c, w, a in zip(cells, widths, aligns):
+        gap = max(0, w - dwidth(c))
+        parts.append(c + " " * gap if a == "<" else " " * gap + c)
+    return " ".join(parts)
+
+
 def format_report(result):
     """格式化文本报告。"""
     th = result["threshold"]
@@ -312,9 +352,10 @@ def format_report(result):
         f"风险阈值: 融资余额/流通市值 > {th}%   交易拥挤度 >= {cr_th}%",
         "=" * 70,
         "",
-        f"{'标的':<12} {'融资余额(亿)':>12} {'流通市值(亿)':>12} {'占比':>7} {'拥挤度':>7} {'状态':>6}",
-        "-" * 70,
     ]
+    headers = ("标的", "融资余额(亿)", "流通市值(亿)", "占比", "拥挤度", "状态")
+    aligns = ("<", ">", ">", ">", ">", "<")
+    body = []
     risk_names = []
     for it in result["items"]:
         name = it["name"]
@@ -335,11 +376,16 @@ def format_report(result):
             status = "🟢 安全"
         else:
             status = "❓"
-        lines.append(f"{name:<12} {m_str:>12} {c_str:>12} {r_str:>7} {cr_str:>7} {status:>6}")
+        body.append((name, m_str, c_str, r_str, cr_str, status))
         if it.get("crowding_risk"):
             risk_names.append(f"{name}拥挤度{cr_ratio:.1f}%")
 
-    lines.append("-" * 70)
+    widths = [max(dwidth(x) for x in col) for col in zip(headers, *body)]
+    lines.append(fmt_row(headers, widths, aligns))
+    lines.append("-" * (sum(widths) + len(widths) - 1))
+    for row in body:
+        lines.append(fmt_row(row, widths, aligns))
+    lines.append("-" * (sum(widths) + len(widths) - 1))
 
     # 拥挤度明细
     cr = (result.get("crowding") or {}).get("沪深两市")
