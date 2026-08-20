@@ -80,6 +80,10 @@ def fetch_day(conn, date_str):
     rows = []
     ts = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} 00:00:00"
 
+    if sz is not None and len(sz) == 0:
+        # 深交所对未发布日期返回空表不报错——必须告警，否则半份数据静默入库
+        print(f"  [warn] szse detail 返回 0 行（明细可能未发布），{date_str} 仅沪市入库", file=sys.stderr)
+
     if sz is not None and len(sz) > 0:
         for _, r in sz.iterrows():
             rows.append((

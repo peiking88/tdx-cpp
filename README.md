@@ -44,8 +44,8 @@ python3 scripts/find-finish-eating.py --all                   # 吸筹结束突�
 python3 scripts/find-bottom.py --all              # 抄底信号扫描（DEMA20跌破买入区/RSI14上穿30卖出; --backtest 回测 vs 买入持有; --market-bull）
 python3 scripts/find-combo.py --min-hit 2             # 综合选股: 5策略共识（terrain+trivol+weekdc+reversal+finish-eating; --min-hit N 共振筛选; --market-bull）
 python3 scripts/find-wave.py --code sh600276 --cycle 1d   # 波浪分析：波峰波谷识别 + 涨跌力度（量价/幅度/时间）
-python3 scripts/fetch-margin.py                            # 融资融券数据入库（AKShare → TDengine）
-python3 scripts/leverage-risk.py                           # 市场杠杆风险监测（读 TDengine，零外部依赖）
+python3 scripts/fetch-margin.py                            # 融资融券数据入库（AKShare → TDengine; 深交所空表告警）
+python3 scripts/leverage-risk.py                           # 市场杠杆风险监测（读 TDengine, 零外部依赖; 缺数自动调 fetch-margin 补录, 双市场完整性校验）
 python3 scripts/find-jerry.py                               # 某队 ETF 动向追踪（汇金/证金/社保持仓变化）
 python3 scripts/market-analysis.py                           # 盘面分析（财经资讯 + LLM 生成报告; 需 DEEPSEEK_API_KEY; → output/market-analysis/）
 python3 scripts/czsc-predict.py                              # 缠论趋势预测（1d/30m/5m, 复用C++ czsc引擎; → output/czsc/）

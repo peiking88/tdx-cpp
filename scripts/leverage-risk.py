@@ -20,9 +20,11 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import unicodedata
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import taosws
 
@@ -64,18 +66,57 @@ def previous_trading_day(ref=None):
     return d
 
 
+def margin_complete(conn, date_str):
+    """该日融资余额是否 sz+sh 双市场齐全。
+
+    单市场日（深交所明细未发布时 fetch-margin 只入沪市）会让板块汇总缺深市、
+    净买入差分出现砍半级假跳变。
+    """
+    ts = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} 00:00:00"
+    try:
+        mk = query_all(conn, f"SELECT market FROM margin WHERE ts='{ts}' GROUP BY market")
+    except Exception:  # margin 表不存在（首次使用）→ 触发自动补录建表
+        return False
+    return len(mk) >= 2
+
+
+def ensure_margin(conn, date_str):
+    """数据缺失/不完整时自动调 fetch-margin.py 补录该日（子进程隔离 akshare 依赖）。
+
+    fetch-margin 按日 DELETE+INSERT 幂等；半份成功（深交所未发布）退出码仍为 0，
+    故以补录后重查 margin_complete 为准，不看退出码。
+    """
+    script = Path(__file__).resolve().parent / "fetch-margin.py"
+    print(f"[leverage-risk] {date_str} 融资余额缺失/不完整，自动调用 fetch-margin 补录",
+          file=sys.stderr)
+    try:
+        subprocess.run([sys.executable, str(script), "--date", date_str],
+                       timeout=180, check=False)
+    except Exception as e:
+        print(f"  [warn] fetch-margin 调用失败: {e}", file=sys.stderr)
+
+
 def resolve_date(conn, date_str):
-    """确定融资余额日期：显式 > 从上一交易日起向前找首个有数据日。"""
+    """确定融资余额日期：显式 > 从上一交易日起向前找首个双市场齐全日。
+
+    不完整的候选日先自动补录一次，仍缺则往前找。
+    """
     if date_str:
+        if not margin_complete(conn, date_str):
+            ensure_margin(conn, date_str)
+            if not margin_complete(conn, date_str):
+                print(f"[leverage-risk] 警告: {date_str} 仅单市场融资余额，板块占比将失真",
+                      file=sys.stderr)
         return date_str
     d = previous_trading_day()
     for _ in range(7):
         ds = d.strftime("%Y%m%d")
-        row = query_one(conn, f"SELECT COUNT(*) AS n FROM margin WHERE ts='{ds[:4]}-{ds[4:6]}-{ds[6:8]} 00:00:00'")
-        if row and row["n"] > 0:
+        if not margin_complete(conn, ds):
+            ensure_margin(conn, ds)
+        if margin_complete(conn, ds):
             return ds
         d -= timedelta(1)
-    raise RuntimeError("近 7 日无融资余额数据，请先运行 fetch-margin.py")
+    raise RuntimeError("近 7 日无完整融资余额数据（sz+sh），自动补录失败")
 
 
 def board_of(code):
@@ -194,17 +235,27 @@ def fetch_crowding(conn, date_str):
     return result
 
 
+def complete_daily_totals(rows):
+    """[(ts, market, total)] → [(ts, sz+sh合计)]，丢弃缺任一市场的日子。
+
+    单市场日（深交所明细未发布时只入了沪市）若计入差分，会造成砍半级假净卖出。
+    """
+    by_day = {}
+    for r in rows:
+        by_day.setdefault(str(r["ts"])[:10], {})[r["market"]] = float(r["total"])
+    return [(d, v["sz"] + v["sh"]) for d, v in sorted(by_day.items()) if "sz" in v and "sh" in v]
+
+
 def fetch_netbuy_trend(conn, ma_window=NETBUY_MA_WINDOW, lookback=NETBUY_LOOKBACK):
     """融资净买入趋势 → 阶段顶底信号。"""
     rows = query_all(
         conn,
-        f"SELECT ts, SUM(margin_balance) AS total FROM margin "
-        f"GROUP BY ts ORDER BY ts"
+        f"SELECT ts, market, SUM(margin_balance) AS total FROM margin "
+        f"GROUP BY ts, market ORDER BY ts"
     )
-    if len(rows) < ma_window + 2:
+    balances = complete_daily_totals(rows)
+    if len(balances) < ma_window + 2:
         return None
-
-    balances = [(r["ts"], float(r["total"])) for r in rows]
     year = datetime.now().year
     ytd = [(ts, bal) for ts, bal in balances if ts >= f"{year}-01-01"]
     if len(ytd) < 2:
