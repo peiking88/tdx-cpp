@@ -2743,6 +2743,7 @@ static std::vector<Signal> tas_atr_break_v230424(const CZSC& c, const ParamView&
 }
 
 static std::vector<Signal> tas_boll_bc_v221118(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.size()<2)return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t tp=p.usize("timeperiod",20); double nbdev=p.number("nbdev",2.0);
   auto key=ta::boll_cache_key((int)tp,nbdev); ta::update_boll_cache(c.bars_raw,key.c_str(),(int)tp,nbdev,*cache);
@@ -2949,6 +2950,7 @@ static std::vector<Signal> tas_first_bs_v230217(const CZSC& c, const ParamView& 
 }
 
 static std::vector<Signal> tas_hlma_v230301(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.empty())return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t t1=p.usize("t1",5),t2=p.usize("t2",20); const char* mt=p.str("ma_type","SMA");
   auto k1=ta::ma_cache_key(mt,(int)t1),k2=ta::ma_cache_key(mt,(int)t2);
@@ -3075,6 +3077,7 @@ static std::vector<Signal> tas_macd_base_v230320(const CZSC& c, const ParamView&
 }
 
 static std::vector<Signal> tas_macd_bc_v221201(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.size()<2)return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3090,6 +3093,7 @@ static std::vector<Signal> tas_macd_bc_v221201(const CZSC& c, const ParamView& p
 }
 
 static std::vector<Signal> tas_macd_bc_v230803(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.size()<2)return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3105,6 +3109,7 @@ static std::vector<Signal> tas_macd_bc_v230803(const CZSC& c, const ParamView& p
 }
 
 static std::vector<Signal> tas_macd_bc_v230804(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.size()<2)return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3120,6 +3125,7 @@ static std::vector<Signal> tas_macd_bc_v230804(const CZSC& c, const ParamView& p
 }
 
 static std::vector<Signal> tas_macd_bc_v240307(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.size()<2)return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3135,6 +3141,7 @@ static std::vector<Signal> tas_macd_bc_v240307(const CZSC& c, const ParamView& p
 }
 
 static std::vector<Signal> tas_macd_bc_ubi_v230804(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.size()<2)return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3150,6 +3157,7 @@ static std::vector<Signal> tas_macd_bc_ubi_v230804(const CZSC& c, const ParamVie
 }
 
 static std::vector<Signal> tas_macd_bs1_v230312(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.empty())return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3162,6 +3170,7 @@ static std::vector<Signal> tas_macd_bs1_v230312(const CZSC& c, const ParamView& 
 }
 
 static std::vector<Signal> tas_macd_bs1_v230313(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.empty())return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3174,6 +3183,7 @@ static std::vector<Signal> tas_macd_bs1_v230313(const CZSC& c, const ParamView& 
 }
 
 static std::vector<Signal> tas_macd_bs1_v230411(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.empty())return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3186,6 +3196,7 @@ static std::vector<Signal> tas_macd_bs1_v230411(const CZSC& c, const ParamView& 
 }
 
 static std::vector<Signal> tas_macd_bs1_v230412(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.empty())return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3255,6 +3266,7 @@ static std::vector<Signal> tas_macd_dist_v230410(const CZSC& c, const ParamView&
 }
 
 static std::vector<Signal> tas_macd_first_bs_v221201(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.empty())return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3266,6 +3278,7 @@ static std::vector<Signal> tas_macd_first_bs_v221201(const CZSC& c, const ParamV
 }
 
 static std::vector<Signal> tas_macd_first_bs_v221216(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.empty())return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);
@@ -3288,6 +3301,7 @@ static std::vector<Signal> tas_macd_power_v221108(const CZSC& c, const ParamView
 }
 
 static std::vector<Signal> tas_macd_second_bs_v221201(const CZSC& c, const ParamView& p, TaCache* cache) {
+  if(c.bi_list.empty())return{};
   if(!cache||c.bars_raw.empty())return{};
   size_t fast=p.usize("fast",12),slow=p.usize("slow",26),m=p.usize("m",9);
   auto key=ta::macd_cache_key((int)fast,(int)slow,(int)m);

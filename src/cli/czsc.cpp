@@ -163,14 +163,23 @@ std::vector<CodeKey> ListStockNames(const io::LoaderConfig& cfg) {
   tdx::taos::TaosConnection conn_h{tdx::taos::TaosConfig{cfg.taos_host, cfg.taos_port, cfg.taos_user, cfg.taos_pass, cfg.taos_db}};
   ::TAOS* conn = conn_h.native();
   if (!conn) return out;
-  TAOS_RES* res = ::taos_query(conn, "SELECT DISTINCT code FROM stock_name");
-  if (res && ::taos_errno(res) == 0) {
-    TAOS_ROW row;
-    while ((row = ::taos_fetch_row(res))) {
-      if (!row[0]) continue;
-      std::string c = std::string(reinterpret_cast<const char*>(row[0]));
-      if (auto k = io::NormalizeCode(c)) out.push_back(std::move(*k));
-    }
+  // code 列是 6 位裸码（市场在 market 列），须拼前缀再过 NormalizeCode（裸码一律被拒）
+  TAOS_RES* res = ::taos_query(conn, "SELECT DISTINCT code, market FROM stock_name");
+  if (!res || ::taos_errno(res) != 0) {
+    std::fprintf(stderr, "stock_name 查询失败：%s\n",
+                 res ? ::taos_errstr(res) : "无结果返回");
+    if (res) ::taos_free_result(res);
+    return out;
+  }
+  TAOS_ROW row;
+  // 列实际长度（libtaos row[i] 指向固定宽缓冲，不一定 \0 结尾，必须用 lengths 定界）。
+  int num_cols = ::taos_num_fields(res);
+  while ((row = ::taos_fetch_row(res))) {
+    if (!row[0] || !row[1]) continue;
+    int* lens = ::taos_fetch_lengths(res);
+    std::string c(reinterpret_cast<const char*>(row[1]), lens[1]);
+    c.append(reinterpret_cast<const char*>(row[0]), lens[0]);
+    if (auto k = io::NormalizeCode(c)) out.push_back(std::move(*k));
   }
   ::taos_free_result(res);
   return out;
@@ -472,7 +481,11 @@ int DoCzsc(int /*argc*/, char** /*argv*/) {
     }
   }
 
-  if (codes.empty()) { std::printf("无可处理标的。\n"); return 0; }
+  if (codes.empty()) {
+    std::fprintf(stderr, "无可处理标的%s。\n",
+                 args.all_market ? "（stock_name 扫描为空，请先 tdx fetch-names）" : "");
+    return 1;
+  }
   std::printf("处理标的：%zu 只 × %zu 周期\n", codes.size(), args.freqs.size());
 
   // 增量引擎状态（跨轮保留）。

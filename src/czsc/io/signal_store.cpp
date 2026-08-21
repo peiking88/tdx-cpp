@@ -134,10 +134,14 @@ std::vector<SignalRow> QuerySignals(TAOS* conn, const std::string& code,
     return out;
   }
   TAOS_ROW row;
+  // sig 列 VARCHAR：row[i] 不保证 \0 结尾，必须用 fetch_lengths 定界（同 ListSignalCodes）。
   while ((row = ::taos_fetch_row(res))) {
     SignalRow r;
     if (row[0]) r.ts_ms = *static_cast<const int64_t*>(row[0]);
-    if (row[1]) r.sig = std::string(reinterpret_cast<const char*>(row[1]));
+    if (row[1]) {
+      int* lens = ::taos_fetch_lengths(res);
+      r.sig.assign(reinterpret_cast<const char*>(row[1]), lens ? lens[1] : 0);
+    }
     out.push_back(std::move(r));
   }
   ::taos_free_result(res);
