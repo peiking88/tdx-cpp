@@ -78,7 +78,7 @@ std::string NowStr() {
   time_t t = time(nullptr);
   struct tm tmv;
   localtime_r(&t, &tmv);
-  char buf[32];
+  char buf[256];
   std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
                 tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday,
                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
@@ -276,7 +276,7 @@ void RunOneFreq(const io::CodeKey& key, czsc::Freq freq, const Args& args,
           for (auto& s : meta.func(czsc, pv, &cache)) all.push_back(std::move(s));
         } catch (const std::exception& e) {
           std::fprintf(stderr, "[%s/%s] 信号异常 %s: %s\n",
-                       r.display.c_str(), freq_tag.c_str(), name, e.what());
+                       r.display.c_str(), freq_tag.c_str(), name.c_str(), e.what());
         }
       }
       r.sigs_out = all.size();
@@ -316,7 +316,7 @@ void RunOneFreq(const io::CodeKey& key, czsc::Freq freq, const Args& args,
       for (auto& s : sv) all.push_back(std::move(s));
     } catch (const std::exception& e) {
       std::fprintf(stderr, "[%s/%s] 信号异常 %s: %s\n",
-                   r.display.c_str(), freq_tag.c_str(), name, e.what());
+                   r.display.c_str(), freq_tag.c_str(), name.c_str(), e.what());
     }
   }
   r.sigs_out = all.size();
