@@ -13,14 +13,14 @@ ctest --test-dir build -j$(nproc) --output-on-failure
 
 ## 技术栈与依赖
 
-| 依赖 | 用途 | 备注 |
-|---|---|---|
-| C++17 + CMake + Ninja | 构建 | `setup_external.sh` 初始化 |
-| TDengine 客户端 | 时序存储 | libtaos（系统包 `libtaos-dev`） |
-| ta-lib | 技术指标（MACD/RSI/BOLL 等） | **czsc 模块必需**（`sudo apt install ta-lib-dev libta-lib0`） |
-| helio | 异步 IO（io_uring + fibers） | 行情网络层 |
-| nlohmann/json | JSON 序列化 | vendored（`include/nlohmann`，含 json_fwd.hpp） |
-| zlib / iconv | 压缩 / GBK 转码 | 协议必需 |
+| 依赖                  | 用途                         | 备注                                                          |
+| --------------------- | ---------------------------- | ------------------------------------------------------------- |
+| C++17 + CMake + Ninja | 构建                         | `setup_external.sh` 初始化                                    |
+| TDengine 客户端       | 时序存储                     | libtaos（系统包 `libtaos-dev`）                               |
+| ta-lib                | 技术指标（MACD/RSI/BOLL 等） | **czsc 模块必需**（`sudo apt install ta-lib-dev libta-lib0`） |
+| helio                 | 异步 IO（io_uring + fibers） | 行情网络层                                                    |
+| nlohmann/json         | JSON 序列化                  | vendored（`include/nlohmann`，含 json_fwd.hpp）               |
+| zlib / iconv          | 压缩 / GBK 转码              | 协议必需                                                      |
 
 **czsc 缠论模块**（`include/czsc` + `src/czsc`，并入自 [czsc-cpp](https://github.com/waditu/czsc) v0.7.0）提供分型/笔/中枢识别与 246 个信号函数；纯计算库，**不链 helio/absl**，taos 连接走 `tdx_taos_conn` 叶子。
 
@@ -48,6 +48,7 @@ python3 scripts/fetch-margin.py                            # 融资融券数据�
 python3 scripts/leverage-risk.py                           # 市场杠杆风险监测（读 TDengine, 零外部依赖; 缺数自动调 fetch-margin 补录, 双市场完整性校验）
 python3 scripts/find-jerry.py                               # 某队 ETF 动向追踪（汇金/证金/社保持仓变化）
 python3 scripts/market-analysis.py                           # 盘面分析（财经资讯 + LLM 生成报告; 需 DEEPSEEK_API_KEY; → output/market-analysis/）
+python3 scripts/market-struct.py                     # A股后市推演（上证/创业板/科创50: 论断同构目标+B浪90月时钟+终结判定+fib支撑; --no-chart; → output/market-struct/）
 python3 scripts/czsc-predict.py                              # 缠论趋势预测（1d/30m/5m, 复用C++ czsc引擎; → output/czsc/）
 ```
 
@@ -55,10 +56,10 @@ python3 scripts/czsc-predict.py                              # 缠论趋势预�
 
 选股与验证结果同步落本地（csv/blk）与 TDengine（带日期戳, 方便查询统计）：
 
-| TDengine 超级表 | 子表 | 内容 |
-|---|---|---|
-| `scalper_pick` | `sp_{market}{code}` | 每日选股命中（涨幅/量比/换手/市值/VWAP/信号得分 + enhancement_json 全量信号） |
-| `scalper_verify` | `sv_{market}{code}` + `sv_total` | 验证收益（买卖均价/股数/成本/盈亏/收益率, 含合计行） |
+| TDengine 超级表  | 子表                             | 内容                                                                          |
+| ---------------- | -------------------------------- | ----------------------------------------------------------------------------- |
+| `scalper_pick`   | `sp_{market}{code}`              | 每日选股命中（涨幅/量比/换手/市值/VWAP/信号得分 + enhancement_json 全量信号） |
+| `scalper_verify` | `sv_{market}{code}` + `sv_total` | 验证收益（买卖均价/股数/成本/盈亏/收益率, 含合计行）                          |
 
 ```sql
 SELECT DATE(ts) d, AVG(pnl_pct) FROM scalper_verify WHERE code<>'TOTAL' GROUP BY d ORDER BY d;  -- 战法每日表现
