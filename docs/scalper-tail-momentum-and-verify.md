@@ -92,10 +92,10 @@ $$
 
 ### 2.1 战法对应
 
-| 动作 | 窗口 | 语义 |
-|---|---|---|
+| 动作     | 窗口                       | 语义                                                         |
+| -------- | -------------------------- | ------------------------------------------------------------ |
 | **买入** | 上一交易日 **14:30–15:00** | 尾盘选股信号触发的「尾盘买入」,正是 scalper 选股模式运行时段 |
-| **卖出** | 验证当日 **09:30–10:00** | 「次日早盘清仓」铁律(持股不超 4 小时,见 `render_table:937`) |
+| **卖出** | 验证当日 **09:30–10:00**   | 「次日早盘清仓」铁律(持股不超 4 小时,见 `render_table:937`)  |
 
 两价均为窗口内**分钟 close 的算术平均**(非 VWAP),规避单根 bar 噪声。
 
@@ -168,14 +168,14 @@ if not args.no_wait and not args.date:
 
 ## 附:代码索引
 
-| 主题 | 位置 |
-|---|---|
-| 动量因子主体 | `scripts/scalper.py:428-477` |
-| 13:31 预过滤 (SQL 端) | `scripts/scalper.py:285-289` |
-| cos 命中判定 | `scripts/scalper.py:760-762` |
-| cos/ar 表格渲染 | `scripts/scalper.py:901-905` |
-| verify 主循环 | `scripts/scalper.py:975-1045` |
-| 窗口均价 window_avg | `scripts/scalper.py:355-361` |
-| 连续股数 ponytail 注释 | `scripts/scalper.py:1022` |
-| 等待 10:00 | `scripts/scalper.py:997-998` |
-| 持股铁律提示 | `scripts/scalper.py:937` |
+| 主题                   | 位置                          |
+| ---------------------- | ----------------------------- |
+| 动量因子主体           | `scripts/scalper.py:428-477`  |
+| 13:31 预过滤 (SQL 端)  | `scripts/scalper.py:285-289`  |
+| cos 命中判定           | `scripts/scalper.py:760-762`  |
+| cos/ar 表格渲染        | `scripts/scalper.py:901-905`  |
+| verify 主循环          | `scripts/scalper.py:975-1045` |
+| 窗口均价 window_avg    | `scripts/scalper.py:355-361`  |
+| 连续股数 ponytail 注释 | `scripts/scalper.py:1022`     |
+| 等待 10:00             | `scripts/scalper.py:997-998`  |
+| 持股铁律提示           | `scripts/scalper.py:937`      |

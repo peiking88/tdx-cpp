@@ -2,10 +2,10 @@
 
 > 把 `tdx fetch-quotes` 从「获取-同步入库」改造为「获取-缓存(mmap)-异步入库」，并以裸 mmap 共享内存支持多个独立 C++ 分析进程（Krono / czSC 等）零拷贝低延迟读取盘中最新行情。
 
-*Generated: 2026-07-03*
-*Status: v0.3 — 二审 P1-new（head 写完推进）+ P2-1/P2-4 已修复，可进 Phase 6.1 MVP*
-*关联：`tdx-cpp.prd.md`（总 PRD）、`src/cli/fetch_quotes.cpp`（现状采集器）*
-*版本目标：v0.13.0*
+_Generated: 2026-07-03_
+_Status: v0.3 — 二审 P1-new（head 写完推进）+ P2-1/P2-4 已修复，可进 Phase 6.1 MVP_
+_关联：`tdx-cpp.prd.md`（总 PRD）、`src/cli/fetch_quotes.cpp`（现状采集器）_
+_版本目标：v0.13.0_
 
 ---
 
@@ -20,11 +20,11 @@
 
 由此产生三个痛点：
 
-| # | 痛点 | 根因 |
-|---|---|---|
-| 1 | **采集被入库阻塞** | 阶段B 在主线程同步执行，TDengine INSERT 慢直接拖慢下一轮 fetch 的节拍 |
-| 2 | **无全市场最新价快照** | 进程内不留任何「最新价」视图，数据存活仅一轮 fetch→INSERT（秒级） |
-| 3 | **分析进程只能查 TDengine** | Krono / czSC 等独立进程读「最新价」的唯一途径是 `SELECT ... ORDER BY ts DESC LIMIT 1`，连接重、延迟高，无法支撑高频轮询全市场 |
+| #   | 痛点                        | 根因                                                                                                                          |
+| --- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **采集被入库阻塞**          | 阶段B 在主线程同步执行，TDengine INSERT 慢直接拖慢下一轮 fetch 的节拍                                                         |
+| 2   | **无全市场最新价快照**      | 进程内不留任何「最新价」视图，数据存活仅一轮 fetch→INSERT（秒级）                                                             |
+| 3   | **分析进程只能查 TDengine** | Krono / czSC 等独立进程读「最新价」的唯一途径是 `SELECT ... ORDER BY ts DESC LIMIT 1`，连接重、延迟高，无法支撑高频轮询全市场 |
 
 目标架构：
 
@@ -55,25 +55,25 @@
 
 实读 `include/tdx/types.hpp`，待入 mmap 的结构体定长性：
 
-| 结构 | 字段构成 | sizeof | 定长 POD？ |
-|---|---|---|---|
-| `Tick` | datetime(8)+price(8)+avg(8)+volume(8) | **32B** | ✅ |
-| `Transaction` | datetime(8)+price(8)+volume(8)+trans_id(8)+buy_sell(1)+pad(7) | **40B** | ✅ |
-| `KLine` | datetime(8)+open/close/high/low/volume/amount(6×8)+up/down_count(2×4) | **64B** | ✅ |
-| `HistoryOrder` | price(8)+unknown(8)+vol(8) | **24B** | ✅ |
-| `HistoryTransaction` | minutes(4)+price(8)+vol(8)+buy_sell(4)+pad(4) | **24B** | ✅ |
-| `Quote` | 含 `std::string code/name` | ~280B | ⚠️ 见下 |
+| 结构                 | 字段构成                                                              | sizeof  | 定长 POD？ |
+| -------------------- | --------------------------------------------------------------------- | ------- | ---------- |
+| `Tick`               | datetime(8)+price(8)+avg(8)+volume(8)                                 | **32B** | ✅         |
+| `Transaction`        | datetime(8)+price(8)+volume(8)+trans_id(8)+buy_sell(1)+pad(7)         | **40B** | ✅         |
+| `KLine`              | datetime(8)+open/close/high/low/volume/amount(6×8)+up/down_count(2×4) | **64B** | ✅         |
+| `HistoryOrder`       | price(8)+unknown(8)+vol(8)                                            | **24B** | ✅         |
+| `HistoryTransaction` | minutes(4)+price(8)+vol(8)+buy_sell(4)+pad(4)                         | **24B** | ✅         |
+| `Quote`              | 含 `std::string code/name`                                            | ~280B   | ⚠️ 见下    |
 
 `Quote` 含两个 `std::string`，但 intraday 路径上 `parsers_quotes.cpp:90` **只填 `code`、`name` 恒为空**，且 `code` 是 6 字节股票代码 → POD 化为 `char code[8]` 即可，数据体 = datetime(8)+7×double(56)+4×5×double(160) = **224B**。**所有结构均可无损映射为定长 POD**，mmap 布局无需变长字符串处理。
 
 ### 2.2 现状代码位点（改造锚点）
 
-| 位点 | 现状 | 改造 |
-|---|---|---|
-| `fetch_quotes.cpp:713-774` 阶段B | 主线程同步 INSERT | 拆为「写 mmap + 投递队列」，INSERT 移走 |
-| `fetch_quotes.cpp:478` 注释 | 「fiber 内不触 TDengine（taos_* 阻塞 + 与 Proactor 冲突会堆损坏）」 | 异步入库线程必须脱离 helio Proactor，印证 D4 |
-| `fetch_quotes.cpp:697` `fb2::Mutex mu` | 仅保护 chunks 聚合 | 保持；mmap 写在主线程聚合后，无需额外锁 |
-| `fetch_quotes.cpp:835-864` 主线程轮询 | `std::this_thread::sleep_for`（主线程，合规） | 不变 |
+| 位点                                   | 现状                                                                | 改造                                         |
+| -------------------------------------- | ------------------------------------------------------------------- | -------------------------------------------- |
+| `fetch_quotes.cpp:713-774` 阶段B       | 主线程同步 INSERT                                                   | 拆为「写 mmap + 投递队列」，INSERT 移走      |
+| `fetch_quotes.cpp:478` 注释            | 「fiber 内不触 TDengine（taos_* 阻塞 + 与 Proactor 冲突会堆损坏）」 | 异步入库线程必须脱离 helio Proactor，印证 D4 |
+| `fetch_quotes.cpp:697` `fb2::Mutex mu` | 仅保护 chunks 聚合                                                  | 保持；mmap 写在主线程聚合后，无需额外锁      |
+| `fetch_quotes.cpp:835-864` 主线程轮询  | `std::this_thread::sleep_for`（主线程，合规）                       | 不变                                         |
 
 ### 2.3 环境与协议约束
 
@@ -90,6 +90,7 @@
 **决策**：用 `<sys/mman.h>` 裸映射 + 自描述段头 + 定长 POD 槽，不引入 `managed_mapped_file` / `multi_index` / `bip::basic_string`。
 
 **理由**（即便用户确认分析进程「全部 C++」，仍选裸 mmap）：
+
 1. **无新依赖**：项目栈是 helio + abseil + iconv + zlib + TDengine，引入 Boost.Interprocess + MultiIndex + Date_Time 是全新重量级依赖，与「简单优先」相悖。
 2. **helio 纪律**：Boost.Interprocess 的 `interprocess_mutex` / `interprocess_condition` 是**阻塞原语**，fiber 内禁用（CLAUDE.md「helio fiber 编码纪律」）。裸 mmap 配 `std::atomic` / seqlock 不涉及阻塞，fiber 安全。
 3. **性能**：定长槽 O(1) 哈希定位 + 原子版本号，优于 Boost 托管段内的红黑树（`multi_index`）+ 段内动态分配（`basic_string`）。
@@ -114,6 +115,7 @@
 **决策**：新增 `IngestWorker` 独立线程（`std::thread`，非 fiber），消费一个**有界 SPSC 队列**（主线程单生产者 → 入库线程单消费者），批量 drain 后 `taos_query` 写 TDengine。
 
 **理由**：
+
 - `taos_*` 阻塞（`fetch_quotes.cpp:478` 注释已点明与 Proactor 冲突致堆损坏），**必须脱离 helio Proactor**；独立 `std::thread` 不在 Proactor 线程，可用 `std::mutex`/`condition_variable`（与现状主线程 `sleep_for` 同属 fiber 纪律豁免）。
 - SPSC 无锁单生产单消费，主线程投递零开销。
 - **背压**：队列满时**覆盖最旧**（盘中数据「最新优先」，历史落库已由 TDengine 兜底）。
@@ -147,6 +149,7 @@ ord_off      RingHeader + slots  HistoryOrder 委托流
 kmin_off     RingHeader + slots  KLine 增量分钟K
 kmin_end     (段尾)
 ```
+
 > 各区偏移由 `SegmentHeader` 的 `snap_off/txn_off/ord_off/kmin_off` 字段自描述，读者据此定位，不写死。
 
 ### SegmentHeader（约 160B）
@@ -229,13 +232,13 @@ static_assert(sizeof(SnapSlot) == 256, "SnapSlot 定长 256B");
 
 ### 容量估算（初值，均可配置）
 
-| 区 | 槽数 | 槽大小 | 小计 |
-|---|---|---|---|
-| 快照表 | 8192 | 256B | 2 MB |
-| 逐笔 ring | 2²⁰ ≈ 100 万 | 48B | 48 MB |
-| 委托 ring | 2¹⁸ ≈ 26 万 | 32B | 8 MB |
-| 分钟K ring | 2¹⁸ ≈ 26 万 | 72B | 18 MB |
-| **合计** | | | **~76 MB**（/dev/shm 45G，余量充足） |
+| 区         | 槽数         | 槽大小 | 小计                                 |
+| ---------- | ------------ | ------ | ------------------------------------ |
+| 快照表     | 8192         | 256B   | 2 MB                                 |
+| 逐笔 ring  | 2²⁰ ≈ 100 万 | 48B    | 48 MB                                |
+| 委托 ring  | 2¹⁸ ≈ 26 万  | 32B    | 8 MB                                 |
+| 分钟K ring | 2¹⁸ ≈ 26 万  | 72B    | 18 MB                                |
+| **合计**   |              |        | **~76 MB**（/dev/shm 45G，余量充足） |
 
 > 覆盖窗口：逐笔 100 万槽 ÷ 盘中峰值流量（~1万只 × 数笔/秒）≈ 分钟级回溯；分析进程若消费慢被覆盖，按 ring 语义跳过旧数据读最新。
 
@@ -438,11 +441,11 @@ while (true) {
 
 读进程按数据形态走三条路径：
 
-| 数据形态 | 路径 | 成本 |
-|---|---|---|
-| 单只最新态（现价/五档/量额） | `snap.Get(code)` | **O(1)**，无消费者状态，纳秒级 |
-| 全市场扫描（选股） | 遍历快照表槽 | O(slots)，2MB 顺序扫，微秒级 |
-| 单只当日事件序列（逐笔/委托/分钟K） | ring 增量 + 进程内订阅集聚合 | O(1) 命中本地容器 |
+| 数据形态                            | 路径                         | 成本                           |
+| ----------------------------------- | ---------------------------- | ------------------------------ |
+| 单只最新态（现价/五档/量额）        | `snap.Get(code)`             | **O(1)**，无消费者状态，纳秒级 |
+| 全市场扫描（选股）                  | 遍历快照表槽                 | O(slots)，2MB 顺序扫，微秒级   |
+| 单只当日事件序列（逐笔/委托/分钟K） | ring 增量 + 进程内订阅集聚合 | O(1) 命中本地容器              |
 
 **当日序列的侧聚合（关键）：** ring 是**全局混排**时序流，读「某只当日全部逐笔」不能 O(1) 从 ring 直接取。读进程须维护订阅集（通常几十只）+ per-code 累积容器，后台线程持续 drain ring 增量按 code 分流：
 
@@ -482,13 +485,13 @@ st.txn_cursor = base;            // 之后只消费 ring 增量
 
 ## 七、分阶段实施（MoSCoW）
 
-| 阶段 | 范围 | Success Signal |
-|---|---|---|
-| **6.1 MVP** | 快照表 + seqlock + 异步入库骨架（SPSC + IngestWorker 线程）；CLI 加 `--mmap-path`；一个 `reader` 示例进程读最新价 | 单元：seqlock 单写多读正确性、SPSC 无丢失；集成：fork 子进程读到写入价；采集节拍与入库解耦（入库慢不拖 fetch） |
-| **6.2 逐笔/委托流** | Transaction / HistoryOrder ring + 读者 cursor 推进 | 单元：ring 覆盖语义、读者慢消费跳过正确；真网：fetch-quotes + reader 读到逐笔增量 |
-| **6.3 增量分钟K** | KLine ring（采集端聚合 5m/1m 增量推送） | czSC/Krono 能从 ring 重建当日分钟序列 |
-| **6.4 加固（Should）** | 写者存活检测 + 段重建协议、多采集进程互斥（flock + generation）、崩溃恢复（magic 校验失败重建）、metrics（队列深度/覆盖次数/读写延迟） | 异常场景：写者 kill -9 后读者正确判 stale；两采集进程启动仅一个写 |
-| **Won't** | Python 绑定、跨进程事件通知（eventfd/futex 推送，目前轮询足够）、变长字段（F10 等不入 shm，仍走 TDengine） | — |
+| 阶段                   | 范围                                                                                                                                   | Success Signal                                                                                                 |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **6.1 MVP**            | 快照表 + seqlock + 异步入库骨架（SPSC + IngestWorker 线程）；CLI 加 `--mmap-path`；一个 `reader` 示例进程读最新价                      | 单元：seqlock 单写多读正确性、SPSC 无丢失；集成：fork 子进程读到写入价；采集节拍与入库解耦（入库慢不拖 fetch） |
+| **6.2 逐笔/委托流**    | Transaction / HistoryOrder ring + 读者 cursor 推进                                                                                     | 单元：ring 覆盖语义、读者慢消费跳过正确；真网：fetch-quotes + reader 读到逐笔增量                              |
+| **6.3 增量分钟K**      | KLine ring（采集端聚合 5m/1m 增量推送）                                                                                                | czSC/Krono 能从 ring 重建当日分钟序列                                                                          |
+| **6.4 加固（Should）** | 写者存活检测 + 段重建协议、多采集进程互斥（flock + generation）、崩溃恢复（magic 校验失败重建）、metrics（队列深度/覆盖次数/读写延迟） | 异常场景：写者 kill -9 后读者正确判 stale；两采集进程启动仅一个写                                              |
+| **Won't**              | Python 绑定、跨进程事件通知（eventfd/futex 推送，目前轮询足够）、变长字段（F10 等不入 shm，仍走 TDengine）                             | —                                                                                                              |
 
 ---
 
@@ -496,12 +499,12 @@ st.txn_cursor = base;            // 之后只消费 ring 增量
 
 ### 8.1 helio 纪律复核（P0）
 
-| 操作 | 线程 | 原语 | 合规？ |
-|---|---|---|---|
-| 写 mmap 快照/ring | 采集**主线程**（非 Proactor 线程） | `std::atomic` / seqlock | ✅ 无阻塞 |
-| 投递 SPSC 队列 | 采集主线程 | lock-free SPSC | ✅ |
-| 异步 INSERT TDengine | 独立 `std::thread` | `std::mutex`/`condvar` | ✅ 非 Proactor 线程，豁免 |
-| 分析进程读 mmap | 各进程主线程 | `std::atomic` 只读 | ✅ |
+| 操作                 | 线程                               | 原语                    | 合规？                    |
+| -------------------- | ---------------------------------- | ----------------------- | ------------------------- |
+| 写 mmap 快照/ring    | 采集**主线程**（非 Proactor 线程） | `std::atomic` / seqlock | ✅ 无阻塞                 |
+| 投递 SPSC 队列       | 采集主线程                         | lock-free SPSC          | ✅                        |
+| 异步 INSERT TDengine | 独立 `std::thread`                 | `std::mutex`/`condvar`  | ✅ 非 Proactor 线程，豁免 |
+| 分析进程读 mmap      | 各进程主线程                       | `std::atomic` 只读      | ✅                        |
 
 **结论**：fiber worker 不触 mmap/队列/TDengine，全部阻塞操作在 Proactor 之外，符合 CLAUDE.md 纪律。
 
@@ -538,11 +541,11 @@ st.txn_cursor = base;            // 之后只消费 ring 增量
 
 ## 九、测试策略
 
-| 层 | 用例 | 标记 |
-|---|---|---|
-| 单元 | seqlock 并发读写正确性（多线程读者 + 单写者，无撕裂）；SPSC 队列无丢失/无重复；ring 覆盖语义 + 写中槽不丢；段头 magic/version 校验；**POD↔types.hpp 全字段转换覆盖**（评审 P2-1）；布局 `static_assert`（lock-free/alignas/offsetof）编译期通过；**flock + writer_pid 探活：第二写者启动被拒** | unit |
-| 集成 | `fork()` 子进程模拟分析进程，父写子读快照/ring 一致；**双进程原子性长时压（父写子读无撕裂，验证 P0-1）**；**读者 re-attach：段重建（generation 变化）后正确 munmap+重新挂载+cursor 归零（P1-3）**；**写者 kill -9 后读者判 stale 并降级** | local |
-| 真网 | `fetch-quotes --loop --mmap-path ...` + 独立 `reader` 进程，读到实时写入的最新价/逐笔；采集节拍不被入库阻塞（对比改造前后 fetch 间隔） | live |
+| 层   | 用例                                                                                                                                                                                                                                                                                           | 标记  |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| 单元 | seqlock 并发读写正确性（多线程读者 + 单写者，无撕裂）；SPSC 队列无丢失/无重复；ring 覆盖语义 + 写中槽不丢；段头 magic/version 校验；**POD↔types.hpp 全字段转换覆盖**（评审 P2-1）；布局 `static_assert`（lock-free/alignas/offsetof）编译期通过；**flock + writer_pid 探活：第二写者启动被拒** | unit  |
+| 集成 | `fork()` 子进程模拟分析进程，父写子读快照/ring 一致；**双进程原子性长时压（父写子读无撕裂，验证 P0-1）**；**读者 re-attach：段重建（generation 变化）后正确 munmap+重新挂载+cursor 归零（P1-3）**；**写者 kill -9 后读者判 stale 并降级**                                                      | local |
+| 真网 | `fetch-quotes --loop --mmap-path ...` + 独立 `reader` 进程，读到实时写入的最新价/逐笔；采集节拍不被入库阻塞（对比改造前后 fetch 间隔）                                                                                                                                                         | live  |
 
 遵循全局规范：覆盖率 >80%、真实优先于 mock、第三方（系统 mmap）不计覆盖。
 
@@ -552,12 +555,12 @@ st.txn_cursor = base;            // 之后只消费 ring 增量
 
 > 评审 P0/P1 已在 v0.2 修复（见 §四「布局不变量」、§5.0、§5.2、§5.4）。下表为 P2 级及其余未决项。
 
-| # | 问题 | 倾向 | 状态 |
-|---|---|---|---|
-| 1 | 快照槽数 8192（负载因子≈0.98）是否需上调？哈希冲突策略？ | **槽数定为 16384（4MB）；冲突策略定为开放寻址 + 线性探测**（评审 P2-3） | ✅ 已定 |
-| 2 | 是否需要 Tick（分时）ring？czSC/Krono 是否消费分时？ | 若分析侧不用分时则 Won't | 待用户确认 |
-| 3 | 入库队列容量与覆盖策略（覆盖最旧 vs 丢最新）？ | 覆盖最旧（最新优先） | 待评审定 |
-| 4 | 多采集进程场景是否真实存在（需互斥）？ | 单采集进程为主，6.4 预留 flock | 待用户确认 |
-| 5 | 是否需要跨进程事件通知（eventfd）做毫秒级推送？ | 轮询足够（协议上限 30s），Won't | 暂不 |
-| 6 | 段布局 version 升级时的兼容策略（读者发现 version 不符）？ | 版本不符即拒绝挂载并报错 | 待评审定 |
-| 7 | 是否需要 per-symbol ring（每 code 独立 ring，读单只当日序列 O(1)）？ | 当前 **Won't**（全局 ring + 侧聚合足够）；触发条件：实测「频繁查单只当日历史」成瓶颈 | 触发式 |
+| #   | 问题                                                                 | 倾向                                                                                 | 状态       |
+| --- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ---------- |
+| 1   | 快照槽数 8192（负载因子≈0.98）是否需上调？哈希冲突策略？             | **槽数定为 16384（4MB）；冲突策略定为开放寻址 + 线性探测**（评审 P2-3）              | ✅ 已定    |
+| 2   | 是否需要 Tick（分时）ring？czSC/Krono 是否消费分时？                 | 若分析侧不用分时则 Won't                                                             | 待用户确认 |
+| 3   | 入库队列容量与覆盖策略（覆盖最旧 vs 丢最新）？                       | 覆盖最旧（最新优先）                                                                 | 待评审定   |
+| 4   | 多采集进程场景是否真实存在（需互斥）？                               | 单采集进程为主，6.4 预留 flock                                                       | 待用户确认 |
+| 5   | 是否需要跨进程事件通知（eventfd）做毫秒级推送？                      | 轮询足够（协议上限 30s），Won't                                                      | 暂不       |
+| 6   | 段布局 version 升级时的兼容策略（读者发现 version 不符）？           | 版本不符即拒绝挂载并报错                                                             | 待评审定   |
+| 7   | 是否需要 per-symbol ring（每 code 独立 ring，读单只当日序列 O(1)）？ | 当前 **Won't**（全局 ring + 侧聚合足够）；触发条件：实测「频繁查单只当日历史」成瓶颈 | 触发式     |

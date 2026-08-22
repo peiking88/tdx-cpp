@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 用 C++ 单库实现通达信（TDX）行情数据读取，三层合并为同源（协议层 / 行情接口层 / 数据管理层），功能对齐父目录三个上游 Python 项目：
 
-| 上游 | 路径 | 对应层 | 职责 |
-|---|---|---|---|
-| **opentdx** | `/home/li/peiking88/opentdx` | 协议层（最底） | TCP socket、二进制帧编解码、命令号注册表、本地 `.day/.lc1/.lc5`、服务器列表与并发测速 |
-| **mootdx** | `/home/li/peiking88/mootdx` | 行情接口层 | 工厂分发（标准/扩展）、语义化 API、财务下载解析、复权因子、板块解析 |
+| 上游        | 路径                         | 对应层             | 职责                                                                                             |
+| ----------- | ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------ |
+| **opentdx** | `/home/li/peiking88/opentdx` | 协议层（最底）     | TCP socket、二进制帧编解码、命令号注册表、本地 `.day/.lc1/.lc5`、服务器列表与并发测速            |
+| **mootdx**  | `/home/li/peiking88/mootdx`  | 行情接口层         | 工厂分发（标准/扩展）、语义化 API、财务下载解析、复权因子、板块解析                              |
 | **tdxdata** | `/home/li/peiking88/tdxdata` | 数据管理层（最上） | 统一 `TdxData` API、熔断器+重试、增量同步、本地优先+网络补缺混合源、自算复权、A 股时段感知重采样 |
 
 依赖链 `tdxdata → mootdx → opentdx`。C++ 版合并为单库，分层同源，不再跨语言依赖。本文件是 C++ 实现的设计蓝图与协议知识库。
@@ -17,6 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **完成状态**：Phase 1-6 + v0.16 全部完成。
 
 **里程碑**（详见 git log / README changelog）：
+
 - **Phase 1-3（v0.1-0.3）**：协议层 + A股标准/扩展/SP/MAC 行情 + 数据管理核心（Calendar/Adjust/Resampler/SyncState/TdxData）
 - **Phase 4-5（v0.4-0.9.2）**：v2 改进（external/ 统一、断点续传、并发批量）+ abseil time_util + 离线构建 + e2e 真网测试 + TDengine 多线程导入 + XDXR 除权除息 + 代码名称三件套 + 导入过滤（北交所/ETF/LOF/板块指数）
 - **v0.10-0.12**：字段缩放统一（`scaling.hpp`）+ 盘中实时数据落库 + 补全 8 个盘中接口 + thread-affinity 修复 + F10 文本入库 + SQL 注入防护（`IsValidCode`）
@@ -46,6 +47,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 这是 C++ 重写最大的工作量与风险点，全部源自上游实测：
 
 ### 连接
+
 - **传输层**：原生 TCP socket（非 HTTP），默认 `time_out=5` 秒，IPv4/IPv6 自动选择。参考 `opentdx/client/baseStockClient.py:138-227`。
 - **端口**：标准行情 `7709`；扩展行情（期货/港美股）`7727`；SP/MAC 高级行情（板块/资金流）走 `mac_hosts` 也用 `7709`。参考 `opentdx/const.py:4-193`。
 - **登录**：连接后必须发送 `Login`（msg_id `0x0d`），请求体 `struct.pack('<B', 1)`。SP 模式登录是不同的 msg_id `0x2454`。参考 `opentdx/parser/server.py`。
@@ -54,24 +56,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **自动重试**：上游策略 `[0.1, 0.5, 1, 2]` 秒共 4 次，每次重连重发。参考 `opentdx/client/baseStockClient.py:78-87`。
 
 ### 二进制帧格式（全小端 `<`）
+
 - **请求头 12 字节**：`struct.pack('<BIBHH', head, customize, control=1, lbody, lbody)`，紧跟 body = `struct.pack('<H', msg_id) + payload`。`head`：`0x0c`=不压缩 / `0x1c`=请求压缩。参考 `opentdx/parser/baseParser.py:9-25`。
 - **响应头 16 字节**（`RSPHEADER_LEN=0x10`）：`struct.unpack('<IBIBHHH', ...)` → prefix(4B，固定 `b1 cb 74 00`) / zipped / customize / unknown / msg_id / zipsize / unzip_size。当 `zipsize != unzip_size` 时 body 用 **zlib 解压**（注意：是 zlib，不是 lzma）。参考 `opentdx/client/baseStockClient.py:283-321`。
 - **中文编码**：**GBK** 解码（如股票名称、公告）。
 - **价格缩放**：实时行情价格需 `/100`，金额 `*100`；财务字段常以「万元」为单位需 `*10000` 还原。参考 `opentdx/client/quotationClient.py:24-30`、`mootdx/hq_adapter.py:293-294`。
 
 ### 非平凡编码（务必仔细移植，易错）
+
 - **变长价格 `get_price`**：类 UTF-8 变长有符号整数——`bit 0x40`=符号位、`bit 0x80`=继续位、每后续字节 7 bit。参考 `opentdx/utils/help.py:137-169`。
 - **紧凑日期 `to_datetime`**：日 K 用 `YYYYMMDD` 整数；分钟线用紧凑编码（低 16 位 = `(year-2004)<<11 | month*100+day`，高 16 位 = 当日分钟数）。参考 `opentdx/utils/help.py:171-207`。
 - **K 线请求体**：`struct.pack('<H6sHHHHH8s', market, code.gbk, period, times, start, count, adjust, b'')`——注意 code 是 **6 字节 GBK**。参考 `opentdx/parser/quotation/kline.py:12`。
 
 ### 命令号（msg_id）分区
+
 C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser(msg_id, head, customize, need_zip)` 装饰器，见 `opentdx/parser/`。主要分区：
+
 - **A股行情**（`head=0x0c, customize=0`）：`0x04` 心跳、`0x0d` 登录、`0x0f` 除权除息、`0x10` 财务、`0x44d` 列表、`0x44e` 数量、`0x523` K线（核心）、`0x537` 分时、`0x53e` 详细报价、`0x53f` 排行榜、`0x563` 主力异动、`0x56a` 集合竞价、`0xfc5` 实时逐笔、`0xfeb` 历史分时、`0xfb4/0xfb5` 历史委托/成交、`0x2cf/0x2d0` F10。
 - **扩展行情**（`customize=1`）：`0x23f4/0x23f5` 类别/列表、`0x23ff/0x2489` K线、`0x23fa` 单报价、`0x2412` 历史成交、`0x2454` 登录。
 - **SP/MAC 协议**（`customize=1 或 2`）：`0x1218` 资金流向、`0x122C` 板块成员报价、`0x122E` 板块K线、`0x1231` 板块列表、`0x1237` 异动、`0x123D` 竞价。SP 字段用位图映射，见 `opentdx/utils/bitmap.py`。
 
 ### 本地 vipdoc 文件格式
+
 读取通达信本地目录（环境变量 `TDX_HOME` 或默认安装路径）：
+
 - `.day` 日线：`<IffffIIf`（扩展行情多一列 hk_stock_amount）。参考 `opentdx/reader/daily_bar_reader.py:35`。
 - `.lc1` 1分钟线 / `.lc5` 5分钟线：均为 `<HHfffffII`（32 字节/条，OHLC=float 直读）。`opentdx/reader/min_bar_reader.py` 的 `<HHIIIIfII` 注释已过时（实测 hex 为 float）。参考 `opentdx/reader/lc_min_bar_reader.py`。
 - 路径模式：`{tdxdir}/vipdoc/{sh|sz|bj|ds}/{lday|fzline|minline}/{symbol}.{day|lc5|lc1|5|1}`。`88****` 板块指数放 `sh` 目录；`#` 开头为扩展市场 `ds`。
@@ -89,21 +97,21 @@ C++ 用注册表（`msg_id → 解析器`）实现。上游用 `@register_parser
 
 `tdx import` 从本地 vipdoc 目录导入日线到 TDengine，通过 `IsAStock()` 过滤代码：
 
-| 包含 | 代码段 | 说明 |
-|---|---|---|
-| 深市主板/中小 | `0xxxxx` | A股 |
-| 创业板 | `3xxxxx` | 含深证指数 `399xxx` |
-| 沪市主板/科创板 | `6xxxxx` | A股 |
-| 北交所 | `4xxxxx`, `8xxxxx` | 不含 `88` 板块指数 |
-| 板块/沪深指数 | `88xxxx` | 通达信板块指数 |
-| 沪市 ETF/LOF | `5xxxxx` | 基金 |
-| 深市 ETF | `159xxx` | 基金 |
-| 深市 LOF | `16xxxx` | 基金 |
-| **排除** | | |
-| 债券 | `1xxxxx`(非159/16) | 含可转债 |
-| B股/债券 | `2xxxxx` | |
-| 港股通 | `7xxxxx` | |
-| B股 | `9xxxxx` | |
+| 包含            | 代码段             | 说明                |
+| --------------- | ------------------ | ------------------- |
+| 深市主板/中小   | `0xxxxx`           | A股                 |
+| 创业板          | `3xxxxx`           | 含深证指数 `399xxx` |
+| 沪市主板/科创板 | `6xxxxx`           | A股                 |
+| 北交所          | `4xxxxx`, `8xxxxx` | 不含 `88` 板块指数  |
+| 板块/沪深指数   | `88xxxx`           | 通达信板块指数      |
+| 沪市 ETF/LOF    | `5xxxxx`           | 基金                |
+| 深市 ETF        | `159xxx`           | 基金                |
+| 深市 LOF        | `16xxxx`           | 基金                |
+| **排除**        |                    |                     |
+| 债券            | `1xxxxx`(非159/16) | 含可转债            |
+| B股/债券        | `2xxxxx`           |                     |
+| 港股通          | `7xxxxx`           |                     |
+| B股             | `9xxxxx`           |                     |
 
 对照表 `stock_names.json` 由 `fetch-names` 建立，`check-names` 校验完整性，`cleanup` 清理对照表中已不再覆盖的冗余条目。
 
@@ -152,20 +160,21 @@ external/    第三方依赖（不入 git，setup_external.sh 初始化）
 output/      程序输出（不入 git）
 ```
 
-| 命名空间 | CMake target | 职责 |
-|---|---|---|
-| `tdx::util` | `tdx_util` | GBK iconv、zlib 解压、**absl::Time+FixedTimeZone(+8)** 替代 POSIX timegm/gmtime_r、字节序、代码校验 |
-| `tdx::proto` | `tdx_proto`（umbrella INTERFACE） | 协议层：帧编解码（core）、连接/心跳/熔断/选服（transport）、解析器（parsers）、本地文件（local） |
-| `tdx::quotes` | `tdx_quotes` | 行情接口层（StdQuotes / ExtQuotes / SpQuotes） |
-| `tdx::data` | `tdx_data` | 数据管理层（Calendar / Adjust / Resampler / SyncState / TdxData） |
-| `tdx::taos` | `tdx_taos` | TDengine 导入层（多线程 + 批量 INSERT） |
-| `tdx::batch` | `tdx_batch` | 并发批量拉取（helio fiber 池分片 + `-n` 并发数） |
-| `tdx::taos`（连接） | `tdx_taos_conn` | 连接 RAII 叶子（仅 taos C API，czsc 等纯计算模块共链） |
-| `tdx::shm` | `tdx_shm` | 盘中实时行情共享内存（mmap 段 + seqlock 快照表，`/dev/shm` 跨进程 O(1) 读最新价） |
-| `czsc` | `czsc_types/ta/analyze/signals/io` | 缠论分析引擎（并入自 czsc-cpp v0.7.0）：分型/笔/中枢 + 246 信号函数 + TDengine/mmap 数据拼接，不链 helio |
-| `tdx` (exe) | `tdx` | CLI 入口（见下） |
+| 命名空间            | CMake target                       | 职责                                                                                                     |
+| ------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `tdx::util`         | `tdx_util`                         | GBK iconv、zlib 解压、**absl::Time+FixedTimeZone(+8)** 替代 POSIX timegm/gmtime_r、字节序、代码校验      |
+| `tdx::proto`        | `tdx_proto`（umbrella INTERFACE）  | 协议层：帧编解码（core）、连接/心跳/熔断/选服（transport）、解析器（parsers）、本地文件（local）         |
+| `tdx::quotes`       | `tdx_quotes`                       | 行情接口层（StdQuotes / ExtQuotes / SpQuotes）                                                           |
+| `tdx::data`         | `tdx_data`                         | 数据管理层（Calendar / Adjust / Resampler / SyncState / TdxData）                                        |
+| `tdx::taos`         | `tdx_taos`                         | TDengine 导入层（多线程 + 批量 INSERT）                                                                  |
+| `tdx::batch`        | `tdx_batch`                        | 并发批量拉取（helio fiber 池分片 + `-n` 并发数）                                                         |
+| `tdx::taos`（连接） | `tdx_taos_conn`                    | 连接 RAII 叶子（仅 taos C API，czsc 等纯计算模块共链）                                                   |
+| `tdx::shm`          | `tdx_shm`                          | 盘中实时行情共享内存（mmap 段 + seqlock 快照表，`/dev/shm` 跨进程 O(1) 读最新价）                        |
+| `czsc`              | `czsc_types/ta/analyze/signals/io` | 缠论分析引擎（并入自 czsc-cpp v0.7.0）：分型/笔/中枢 + 246 信号函数 + TDengine/mmap 数据拼接，不链 helio |
+| `tdx` (exe)         | `tdx`                              | CLI 入口（见下）                                                                                         |
 
 **CLI 命令**（`src/cli/main.cpp` 分发）：
+
 - **采集/入库**：`server-test`（测速选服）、`import`（vipdoc 历史导入）、`fetch-quotes`（实时行情→TDengine/mmap）、`fetch-kline`（当日K线循环）、`fetch-finance`/`fetch-f10`（财务/F10 独立重导）、`truncate-quotes`（清当日盘中队列）
 - **盘中接口**：`history-orders`、`history-tx`、`vol-profile`、`index-info`、`unusual`、`board-list`、`board-quotes`、`capital-flow`、`sp-quotes`、`sp-bar`、`sp-auction`
 - **扩展行情（7727 港股/期货）**：`ex-bars`、`ex-quotes`、`ex-stocks`、`ex-category`、`ex-history-tx`
@@ -178,11 +187,11 @@ output/      程序输出（不入 git）
 
 helio 的 Proactor 线程内**禁用**标准库阻塞原语——它们会阻塞整个事件循环线程（不只当前 fiber）：
 
-| 禁用 | 替代（`util::fb2::`） |
-|---|---|
-| `std::mutex` / `std::lock_guard` | `util::fb2::Mutex` |
-| `std::condition_variable` | `util::fb2::CondVar` / `EventCount` / `Done` |
-| `std::this_thread::sleep_for` | `ThisFiber::SleepFor` |
+| 禁用                             | 替代（`util::fb2::`）                        |
+| -------------------------------- | -------------------------------------------- |
+| `std::mutex` / `std::lock_guard` | `util::fb2::Mutex`                           |
+| `std::condition_variable`        | `util::fb2::CondVar` / `EventCount` / `Done` |
+| `std::this_thread::sleep_for`    | `ThisFiber::SleepFor`                        |
 
 来源：`helio/CLAUDE.md:67-77`。
 
@@ -238,10 +247,10 @@ ctest --test-dir build -R <test_name> -V   # 单个用例
 
 **历史 K 线 = vipdoc，当日盘中 = 网络**：
 
-| 数据来源 | 命令 | 周期 | 范围 |
-|---|---|---|---|
-| 本地 vipdoc | `tdx import` | 1d/1m/5m | 历史（今日之前） |
-| 网络 | `tdx fetch-kline` | 1d/5m/1m | 当日盘中 |
+| 数据来源    | 命令              | 周期     | 范围             |
+| ----------- | ----------------- | -------- | ---------------- |
+| 本地 vipdoc | `tdx import`      | 1d/1m/5m | 历史（今日之前） |
+| 网络        | `tdx fetch-kline` | 1d/5m/1m | 当日盘中         |
 
 - `tdx import` 默认仅导自选股 `zxg.blk`（与 `fetch-quotes` 一致），加 `--all` 导全市场
 - 导入时自动 DROP+重建 1d/1m/5m 子表，清除网络旧数据（含解析错位产生的 23:55/16:39 脏 bar）
